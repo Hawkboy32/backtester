@@ -45,6 +45,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -397,8 +398,33 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
     return status
 
 
+def _another_instance_alive() -> bool:
+    """True if another auto-trader already looks alive — a fresh heartbeat from a
+    recent cycle. Guards against running two instances at once (which would
+    double every order), now that the trader can be auto-started on login as
+    well as launched from the dashboard. A stale heartbeat (dead/slept process)
+    is treated as free to take over."""
+    status = load_status()
+    hb = status.last_heartbeat
+    if not hb or not status.running:
+        return False
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(hb)).total_seconds()
+    except ValueError:
+        return False
+    control = load_control()
+    # a live loop beats at least once per poll interval; allow ~3 cycles of slack
+    return age < max(300, 3 * control.poll_interval_seconds) and status.pid != os.getpid()
+
+
 def main() -> None:
-    load_dotenv()
+    # Load .env by ABSOLUTE path (next to this file), not via cwd — so the bot
+    # works identically whether launched from the dashboard, a terminal, or the
+    # login auto-start task (which runs from an arbitrary working directory).
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+    if _another_instance_alive():
+        print("Another auto-trader instance appears to be running (fresh heartbeat) — exiting to avoid double-trading.")
+        return
     status = load_status()
     print(f"Auto-trader starting (pid={os.getpid()}).")
     try:
