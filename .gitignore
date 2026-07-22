@@ -1,0 +1,21 @@
+.env
+auth_config.yaml
+broker_accounts.json
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.streamlit/credentials.toml
+.cache/
+results/
+logs/
+auto_trader_state/
+saved_configs.json
+scan_history.db
+live_trades.db
+# belt-and-braces catch-alls for anything personal/generated
+*.db
+*.bak
+*.pkl
+*.log
+.DS_Store
