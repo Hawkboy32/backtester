@@ -409,7 +409,10 @@ machine. Entry point: app.py.
   operational failure at zero cost).
 - IMMEDIATE CLEANUP DONE: ABNB position has a queued market-sell (order 77a1b24b) that closes
   it at Thu open. Bot DISARMED (control.enabled=False, killed=False) — will NOT trade until
-  re-armed. status.json reset. NOTE the odd submit bug found doing this -> task #33.
+  re-armed. status.json reset. (Order 77a1b24b was the USER's manual 'liquidate' on Alpaca,
+  hit ~same second as the assistant's close attempt — the assistant's duplicate sell was
+  correctly rejected. Initially misdiagnosed as a submit bug; it was NOT — see task #33
+  RESOLVED/false-alarm. submit_market_order behaved correctly.)
 - AUTO-START-ON-LOGIN built (user's chosen fix; their workflow: laptop sleeps at night when
   market's shut, they log in each morning before work, laptop never-sleeps-on-mains so it
   stays alive locked all day). Mechanism: a Startup-folder shortcut
