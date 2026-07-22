@@ -399,6 +399,22 @@ machine. Entry point: app.py.
   APP_FOLDER_AI root, not inside backtester/) — load that skill before doing Streamlit
   work, per its own trigger rules.
 
+=== VERSION CONTROL / GITHUB (set up 2026-07-21) ===
+- backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester
+  (verified private: anonymous fetch 404s). Purpose: enables working on the project from a
+  phone via Claude Code on the web (claude.ai/code) connected to the repo. Context for a
+  phone/fresh session lives in the committed files (CLAUDE_NOTES.txt + the *_PLAN.md /
+  *_RESEARCH.md docs) — read those to resume.
+- SECRETS ARE EXCLUDED and must STAY excluded — .gitignore covers auth_config.yaml, .env,
+  broker_accounts.json, *.db (scan_history.db, live_trades.db), saved_configs.json,
+  auto_trader_state/ (control/status/roster/positions/notifications json), logs/, results/,
+  .cache/, .venv/. Real broker/API creds live in Windows Credential Manager (keyring), never
+  in files. BEFORE ANY future commit: verify no secret file is staged (git diff --cached
+  --name-only). Never commit a real key/hash even to the private repo.
+- Sync rhythm: laptop changes -> commit + 'Push origin' in GitHub Desktop; phone/web changes
+  -> push there, pull down on the laptop. Note the LIVE bot + real creds stay on the laptop;
+  the repo is code + notes only, not the running system.
+
 === ROADMAP + DASHBOARD REORG PLAN (agreed 2026-07-21) ===
 - Full plan: backtester/ROADMAP_AND_DASHBOARD_PLAN.md. Agreed build sequence AFTER the
   Thursday 2026-07-23 validation review (+ tiny #26 notification qty fix batched w/ restart):
