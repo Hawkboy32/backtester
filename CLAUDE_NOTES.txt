@@ -399,6 +399,34 @@ machine. Entry point: app.py.
   APP_FOLDER_AI root, not inside backtester/) — load that skill before doing Streamlit
   work, per its own trigger rules.
 
+=== BOT DIED (host unreliable) + AUTO-START-ON-LOGIN FIX (2026-07-22) ===
+- VALIDATION FINDING: the paper run's bot process (pid 22012) DIED Tue ~5pm UK and stayed
+  dead ~29h — almost certainly the laptop SLEEPING (froze/killed the detached process; it
+  did not resume). It made only 1 trade ever (ABNB buy Tue open), missed all of Wed's
+  session, and left the ABNB position unmanaged (drifted to ~-$10 paper). No alert fired —
+  silence looked like 'no trades'. Concrete proof the laptop is an unreliable host and there's
+  no dead-man's alert. This is the paper phase doing its job (caught a would-be live-money
+  operational failure at zero cost).
+- IMMEDIATE CLEANUP DONE: ABNB position has a queued market-sell (order 77a1b24b) that closes
+  it at Thu open. Bot DISARMED (control.enabled=False, killed=False) — will NOT trade until
+  re-armed. status.json reset. NOTE the odd submit bug found doing this -> task #33.
+- AUTO-START-ON-LOGIN built (user's chosen fix; their workflow: laptop sleeps at night when
+  market's shut, they log in each morning before work, laptop never-sleeps-on-mains so it
+  stays alive locked all day). Mechanism: a Startup-folder shortcut
+  (%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\TradingBotAutoStart.lnk) launching
+  .venv\Scripts\pythonw.exe auto_trader.py (headless, user session — needed for keyring). Task
+  Scheduler was blocked (needs admin); Startup folder needs none. Supporting code changes
+  (committed): auto_trader.py now has _another_instance_alive() singleton guard (won't start a
+  2nd bot over a live one -> no double-trading) and loads .env by ABSOLUTE path (cwd-
+  independent). Dry-run verified: launches from any cwd, writes heartbeat, idles correctly
+  while disarmed, no errors. So on next login the bot auto-starts (idle until armed + until
+  2:30pm market open via the existing market-hours guard).
+- TO RESTART THE TEST (when ready): re-arm in the dashboard Auto Trading tab (Start -> sets
+  enabled=True, killed=False) OR the bot auto-starts on next login and just needs arming.
+  Also set Windows power to NEVER SLEEP while plugged in (user confirmed they do this). The
+  ABNB closes itself at Thu open, so the fresh test starts flat. Consider a heartbeat 'bot
+  down' alert (task #34) and remember the Pi is the real always-on fix.
+
 === VERSION CONTROL / GITHUB (set up 2026-07-21) ===
 - backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester
   (verified private: anonymous fetch 404s). Purpose: enables working on the project from a
