@@ -429,6 +429,15 @@ machine. Entry point: app.py.
   Also set Windows power to NEVER SLEEP while plugged in (user confirmed they do this). The
   ABNB closes itself at Thu open, so the fresh test starts flat. Consider a heartbeat 'bot
   down' alert (task #34) and remember the Pi is the real always-on fix.
+- CONFIRMED WORKING 2026-07-23 AM: user did a full shutdown overnight, powered on + logged in
+  in the morning, and the bot AUTO-STARTED unattended — fresh pid, headless (no window, as
+  designed), came up ARMED (state persists), idling correctly ('market closed, next open
+  Thu 09:30 ET'), no errors. So the shutdown->boot->login auto-start chain is proven. KEY
+  CAVEAT reaffirmed: this fires on LOGIN (shutdown/restart/logoff), NOT on sleep->wake or
+  hibernate->resume (same session, no new login) — so the routine is 'shut down at night,
+  power on in the morning', which the user adopted. Thu 2026-07-23 is the first clean
+  validation day (ABNB from the aborted run closes at the 2:30pm open via the user's queued
+  liquidate; open-order guard makes the bot skip ABNB until it clears, then trade fresh).
 
 === VERSION CONTROL / GITHUB (set up 2026-07-21) ===
 - backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester
