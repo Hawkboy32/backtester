@@ -439,6 +439,16 @@ machine. Entry point: app.py.
   validation day (ABNB from the aborted run closes at the 2:30pm open via the user's queued
   liquidate; open-order guard makes the bot skip ABNB until it clears, then trade fresh).
 
+- FIRST CLEAN SESSION RESULT (Thu 2026-07-23 EOD): OPERATIONAL SUCCESS — bot auto-started AM,
+  ran continuously all day on the locked laptop (same pid, never died), zero errors, still
+  alive+armed at EOD. Proves the plumbing is finally reliable after Tue overnight-overtrade
+  and Wed dead-on-sleep. TRADING: 0 trades (normal — Bollinger Mean Reversion is selective,
+  no buy setups on ABNB/ADBE/AEP today; bot correctly ignored a non-held AEP sell signal).
+  ABNB leftover liquidate filled ~137.31, account FLAT, equity ~99,752 (small dip = the
+  aborted-run ABNB round trip, not today). HONEST CAVEAT: 0 trades = still NO P&L data on
+  whether the strategies make money — that needs days/weeks of accumulated trades. Today
+  validated reliability, not profitability. live_trades.db still 0 round trips.
+
 === VERSION CONTROL / GITHUB (set up 2026-07-21) ===
 - backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester
   (verified private: anonymous fetch 404s). Purpose: enables working on the project from a
