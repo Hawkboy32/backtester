@@ -448,6 +448,21 @@ machine. Entry point: app.py.
   aborted-run ABNB round trip, not today). HONEST CAVEAT: 0 trades = still NO P&L data on
   whether the strategies make money — that needs days/weeks of accumulated trades. Today
   validated reliability, not profitability. live_trades.db still 0 round trips.
+- AUTO-START CONFIRMED AGAIN Fri 2026-07-24 AM (2nd shutdown->boot cycle, fresh pid 5756) —
+  reliable, not a fluke.
+- STRATEGIC DIRECTION set by user 2026-07-24: PRIORITISE LEARNING / DATA-GATHERING over profit
+  for now — 'get as much data as possible into the bot for maximum learning.' Assistant's
+  honest framing given back: (1) the bot does not really 'learn' yet — only a crude roster
+  demotion loop (pause a combo losing live after >=5 trades) exists; conviction sizing (#25)
+  + any ML meta-model are still FUTURE. So 'max data' now = building the TRAINING DATASET
+  those future features will learn from, not live self-improvement. (2) KEY: for VOLUME of
+  learning data, BACKTESTING is the firehose (thousands of trades across years/tickers/18
+  strategies per scan) vs LIVE paper being a slow trickle (few/day, max_trades_per_day=10 cap,
+  5 req/min Polygon limit). Two complementary streams: backtests = volume/training set; live
+  paper = realistic fills+slippage + operational proof + the only thing that feeds the current
+  roster live-demotion (live_trades.db, NOT populated by backtests). PLAN: keep live bot
+  running for realism/ops, lean on broad DIVERSE backtests for the learning dataset. Ties to
+  #35 (diversify) and the future learning tasks.
 
 === VERSION CONTROL / GITHUB (set up 2026-07-21) ===
 - backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester
