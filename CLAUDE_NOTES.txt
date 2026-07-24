@@ -463,6 +463,16 @@ machine. Entry point: app.py.
   roster live-demotion (live_trades.db, NOT populated by backtests). PLAN: keep live bot
   running for realism/ops, lean on broad DIVERSE backtests for the learning dataset. Ties to
   #35 (diversify) and the future learning tasks.
+- END OF WEEK 1 (Fri 2026-07-24 night): bot DELIBERATELY STOPPED + disarmed (enabled=False)
+  for the weekend — it is OFF ON PURPOSE, not dead. Open position: AEP 3.74sh (~flat, the
+  week's only live trade) left open; user to decide Mon (close at open vs let bot manage —
+  but if AEP drops out of the diversified roster it would be orphaned). Account ~$99,751.
+  REVIEW verdict: operational reliability PROVEN (auto-start x2, unattended all-day runs, no
+  crashes); PROFITABILITY still UNPROVEN (1 trade all week = ~zero edge data). WEEKEND PLAN:
+  start working through the task list, aiming to get some/all done ready for Monday. Likely
+  order: dashboard reorg (#32, unblocks the Research section) -> backtest playlist runner
+  (#37) + roster diversification (#35) -> the metrics/learning bits. Direction = learning-
+  first / max-data via broad diverse backtests. Nothing is running; safe to build freely.
 
 === VERSION CONTROL / GITHUB (set up 2026-07-21) ===
 - backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester
