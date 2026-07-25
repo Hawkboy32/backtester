@@ -10,6 +10,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,7 +53,7 @@ from backtester.scan_db import (
 from backtester.scanner import run_scan
 from backtester.strategies import STRATEGY_REGISTRY, build_strategy, strategy_regime
 from backtester.strategies.sma_crossover import SmaCrossoverStrategy
-from backtester.universe import UNIVERSE_REGISTRY, load_universe
+from backtester.universe import UNIVERSE_REGISTRY, load_universe, sector_for_ticker
 from backtester.walkforward import aggregate_walkforward, run_walkforward_scan
 from backtester import account_risk, app_settings, live_trades, notifications, position_attribution, roster, volatility
 
@@ -1690,6 +1691,23 @@ def _render_adaptive_roster_section() -> None:
         value=state.config.regime_match_only, key="roster_regime_match",
     )
 
+    st.caption("Diversification caps (0 = no limit) — applied when you re-evaluate the roster")
+    dcol1, dcol2 = st.columns(2)
+    with dcol1:
+        max_per_strategy = st.number_input(
+            "Max active combos per strategy", min_value=0, value=state.config.max_per_strategy,
+            key="roster_max_per_strategy",
+            help="Stops one strategy filling every slot. If its edge breaks, only part of the "
+                 "roster is affected instead of all of it.",
+        )
+    with dcol2:
+        max_per_sector = st.number_input(
+            "Max active combos per sector", min_value=0, value=state.config.max_per_sector,
+            key="roster_max_per_sector",
+            help="Stops the roster concentrating in one sector. Tickers with an unknown sector "
+                 "are never blocked.",
+        )
+
     new_config = roster.RosterConfig(
         roster_size=int(roster_size),
         min_live_trades=int(min_live_trades),
@@ -1699,6 +1717,8 @@ def _render_adaptive_roster_section() -> None:
         max_pnl_drawdown_floor=max_pnl_drawdown_floor,
         weights=state.config.weights,
         regime_match_only=regime_match_only,
+        max_per_strategy=int(max_per_strategy),
+        max_per_sector=int(max_per_sector),
     )
 
     bcol1, bcol2 = st.columns(2)
@@ -1738,6 +1758,7 @@ def _render_adaptive_roster_section() -> None:
             rows.append(
                 {
                     "ticker": e.ticker,
+                    "sector": sector_for_ticker(e.ticker) or "—",
                     "strategy": e.strategy_name,
                     "status": e.status,
                     "backtest_score": round(e.backtest_score, 3),
@@ -1756,6 +1777,29 @@ def _render_adaptive_roster_section() -> None:
             "measured behaviour over the scan window. ⚠️ flags a mismatch — informational unless "
             "the regime-match setting above is on. Blank for entries from scans before this existed."
         )
+
+        # Concentration readout: the roster that actually trades is the ACTIVE
+        # set, so measure that rather than the whole candidate list.
+        active_entries = [e for e in state.entries if e.status == "active"]
+        if active_entries:
+            strat_counts = Counter(e.strategy_name for e in active_entries)
+            sector_counts = Counter(sector_for_ticker(e.ticker) or "unknown" for e in active_entries)
+            top_strat, top_strat_n = strat_counts.most_common(1)[0]
+            top_sector, top_sector_n = sector_counts.most_common(1)[0]
+            total = len(active_entries)
+            summary = (
+                f"**Active roster concentration:** {total} combo(s) across "
+                f"{len(strat_counts)} strategy(s) and {len(sector_counts)} sector(s). "
+                f"Largest: {top_strat_n}/{total} on *{top_strat}*, {top_sector_n}/{total} in *{top_sector}*."
+            )
+            if total > 1 and (top_strat_n == total or top_sector_n == total):
+                st.warning(
+                    summary + " Every active slot shares a strategy or sector — one broken edge "
+                    "would hit the whole roster at once. Consider lowering the caps above and "
+                    "re-evaluating."
+                )
+            else:
+                st.caption(summary)
 
     st.markdown("#### Promotion / demotion history")
     events = roster.load_events(limit=50)

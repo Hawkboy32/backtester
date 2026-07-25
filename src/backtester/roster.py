@@ -29,6 +29,7 @@ from backtester.auto_trader_state import STATE_DIR, atomic_write_text
 from backtester.metrics import classify_ticker_regime
 from backtester.scanner import ScanResultRow
 from backtester.strategies import strategy_regime
+from backtester.universe import sector_for_ticker
 
 ROSTER_PATH = STATE_DIR / "roster.json"
 EVENTS_PATH = STATE_DIR / "roster_events.jsonl"
@@ -66,6 +67,13 @@ class RosterConfig:
     # window (efficiency ratio -> metrics.classify_ticker_regime). "either" on
     # either side never blocks. Off by default — measure-first, like conviction.
     regime_match_only: bool = False
+    # Diversification caps on a single re-evaluation's ACTIVE promotions. 0 =
+    # unlimited. Without these the roster happily fills every slot with one
+    # strategy (the live roster was 3/3 Bollinger Mean Reversion), so a single
+    # broken edge takes down the whole book at once. Tickers whose sector is
+    # unknown are never blocked by the sector cap.
+    max_per_strategy: int = 2
+    max_per_sector: int = 2
 
 
 @dataclass
@@ -200,6 +208,8 @@ def evaluate_roster(
 
     claimed_tickers: set[str] = set()
     active_count = 0
+    per_strategy: dict[str, int] = {}
+    per_sector: dict[str, int] = {}
     new_entries: list[RosterEntry] = []
     seen_keys: set[tuple[str, str]] = set()
 
@@ -257,14 +267,31 @@ def evaluate_roster(
             seen_keys.add(key)
             continue
 
+        # Diversification: don't let one strategy (or one sector) own the whole
+        # roster, however good its backtest scores look.
+        sector = sector_for_ticker(ticker)
+        cap_reason = None
         if active_count >= config.roster_size:
+            cap_reason = f"no longer in top {config.roster_size} by backtest score"
+        elif config.max_per_strategy and per_strategy.get(strategy_name, 0) >= config.max_per_strategy:
+            cap_reason = (
+                f"diversification: already {config.max_per_strategy} active combo(s) using "
+                f"{strategy_name}"
+            )
+        elif config.max_per_sector and sector and per_sector.get(sector, 0) >= config.max_per_sector:
+            cap_reason = (
+                f"diversification: already {config.max_per_sector} active combo(s) in the "
+                f"{sector} sector"
+            )
+
+        if cap_reason is not None:
             entry = RosterEntry(
                 ticker=ticker, strategy_name=strategy_name, params=params_lookup.get(key, {}),
                 status="candidate", promoted_at=existing.promoted_at if existing else None,
                 backtest_score=score, live_stats=asdict(stats), efficiency_ratio=er,
             )
             if was_active:
-                append_event(ticker, strategy_name, "demoted", f"no longer in top {config.roster_size} by backtest score")
+                append_event(ticker, strategy_name, "demoted", cap_reason)
             new_entries.append(entry)
             seen_keys.add(key)
             continue
@@ -280,6 +307,9 @@ def evaluate_roster(
         new_entries.append(entry)
         claimed_tickers.add(ticker)
         active_count += 1
+        per_strategy[strategy_name] = per_strategy.get(strategy_name, 0) + 1
+        if sector:
+            per_sector[sector] = per_sector.get(sector, 0) + 1
         seen_keys.add(key)
 
     # Entries that used to exist but weren't reconsidered this pass (e.g. the
