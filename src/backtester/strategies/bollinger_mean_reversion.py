@@ -42,3 +42,21 @@ class BollingerMeanReversionStrategy(Strategy):
         if reverted_to_mean:
             return Signal.SELL
         return Signal.HOLD
+
+    def conviction(self, history: pd.DataFrame, current: Bar) -> float | None:
+        """How far below the lower band the close is, as a fraction of the band
+        half-width (num_std*std). Deeper break = more oversold = higher conviction.
+        (#25 — logged only, does not affect sizing.)"""
+        if len(history) < self.period + 1:
+            return None
+        closes = history["close"]
+        mid = closes.rolling(self.period).mean()
+        std = closes.rolling(self.period).std()
+        lower = mid - self.num_std * std
+        curr_mid, curr_lower, curr_close = mid.iloc[-1], lower.iloc[-1], closes.iloc[-1]
+        if pd.isna(curr_lower) or pd.isna(curr_mid):
+            return None
+        half_width = curr_mid - curr_lower  # = num_std * std
+        if half_width <= 0:
+            return None
+        return (curr_lower - curr_close) / half_width

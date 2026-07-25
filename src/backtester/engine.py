@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from backtester.conviction import compute_conviction
 from backtester.strategy import Bar, Signal, Strategy
 
 
@@ -41,6 +42,7 @@ class Trade:
     exit_time: pd.Timestamp | None = None
     exit_price: float | None = None
     shares: float = 0.0
+    conviction: float | None = None  # [0,1] entry-signal strength (#25); logged only, never sizes
 
     @property
     def pnl(self) -> float | None:
@@ -132,7 +134,13 @@ class BacktestEngine:
                 if spend > self.commission_per_trade:
                     shares = (spend - self.commission_per_trade) / fill_price
                     cash -= shares * fill_price + self.commission_per_trade
-                    open_trade = Trade(entry_time=current.timestamp, entry_price=fill_price, shares=shares)
+                    # Conviction is scored at the entry bar and stored for later learning
+                    # (#25). It does NOT influence sizing here — spend/shares are unchanged.
+                    conviction = compute_conviction(strategy, history, current)
+                    open_trade = Trade(
+                        entry_time=current.timestamp, entry_price=fill_price,
+                        shares=shares, conviction=conviction,
+                    )
             elif signal is Signal.SELL and shares > 0:
                 cash += shares * fill_price - self.commission_per_trade
                 if open_trade is not None:

@@ -47,3 +47,18 @@ class RsiMeanReversionStrategy(Strategy):
         if crossed_down_from_overbought:
             return Signal.SELL
         return Signal.HOLD
+
+    def conviction(self, history: pd.DataFrame, current: Bar) -> float | None:
+        """Depth of the oversold dip just before the bounce: how far the prior
+        bar's RSI was below the oversold line, as a fraction of oversold. A deeper
+        oversold before crossing up = stronger mean-reversion setup. (#25 — logged
+        only.)"""
+        if len(history) < self.period + 1:
+            return None
+        rsi = _rsi(history["close"], self.period)
+        if len(rsi) < 2:
+            return None
+        prev_rsi = rsi.iloc[-2]
+        if pd.isna(prev_rsi):
+            return None
+        return (self.oversold - prev_rsi) / self.oversold

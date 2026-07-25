@@ -36,6 +36,7 @@ class ScanResultRow:
     num_trades: int | None = None
     win_rate: float | None = None
     num_bars: int | None = None
+    avg_conviction: float | None = None  # mean entry-signal conviction across this combo's trades (#25)
     error: str | None = None
 
 
@@ -120,6 +121,8 @@ def run_scan(
             )
             result = engine.run(bars, strategy)
             report = compute_report(result.equity_curve, result.trades)
+            convictions = [t.conviction for t in result.trades if t.conviction is not None]
+            avg_conviction = sum(convictions) / len(convictions) if convictions else None
             return ScanResultRow(
                 ticker=ticker,
                 strategy_name=strategy_name,
@@ -131,6 +134,7 @@ def run_scan(
                 num_trades=report.num_trades,
                 win_rate=report.win_rate,
                 num_bars=len(bars),
+                avg_conviction=avg_conviction,
             )
         except Exception as e:  # noqa: BLE001
             return ScanResultRow(ticker=ticker, strategy_name=strategy_name, params=params, error=str(e))

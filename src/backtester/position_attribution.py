@@ -39,11 +39,12 @@ def save_map(data: dict[str, dict]) -> None:
     PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def record_open(account_id: str, ticker: str, strategy_name: str) -> None:
+def record_open(account_id: str, ticker: str, strategy_name: str, conviction: float | None = None) -> None:
     data = load_map()
     data[_key(account_id, ticker)] = {
         "strategy_name": strategy_name,
         "opened_at": datetime.now(timezone.utc).isoformat(),
+        "conviction": conviction,  # [0,1] entry-signal strength (#25); carried through to live_trades on close
     }
     save_map(data)
 

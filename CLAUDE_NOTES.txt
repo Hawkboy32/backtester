@@ -572,6 +572,38 @@ machine. Entry point: app.py.
   (4002 paper), add 127.0.0.1 to trusted IPs. Then link it in the Accounts tab and the chip should go
   🟢. Live account stays behind the existing is_paper=False + confirmation gates.
 
+=== CONVICTION LOGGING (#25) — measure-first entry-strength dataset (2026-07-25) ===
+- WHY: the bot's goal is to "learn where it made mistakes", but nothing captured HOW STRONG each entry
+  was (strategies emit only BUY/SELL/HOLD). #25 attaches a conviction score to every entry and LOGS it,
+  to build the training dataset a future conviction-sizing / ML meta-model will use. CRITICAL: LOGGED
+  ONLY — nothing sizes or gates a trade on conviction in this pass (family-wealth caution).
+- WHAT: a float in [0,1] (0 = barely triggered, 1 = strong), or NULL. Two sources via
+  backtester/conviction.py::compute_conviction(strategy, history, current):
+  (a) a strategy's OPTIONAL conviction(history, current)->float|None hook (added to the Strategy ABC in
+      strategy.py, default None — mirrors the required_lookback() opt-in). Implemented for the starter
+      set the user runs: Bollinger Mean Reversion, RSI Mean-Reversion, Bollinger Breakout (each a
+      "distance past the band/threshold" strength). The other ~15 use the fallback for now.
+  (b) a GENERIC fallback (vol-normalised entry-bar move + relative volume, clamped [0,1]) so EVERY trade
+      gets a conviction. A v1 heuristic, NOT ground truth.
+- Logged to ALL THREE targets: Backtest trades (Trade.conviction in engine.py, computed at the BUY fill;
+  shown in the Backtest Trade log); Scan results (ScanResultRow.avg_conviction = mean over the combo's
+  trades; new scan_results.conviction column + Scan History "Mean conviction"/"Conviction" columns);
+  Live/paper trades (new live_trades.conviction column; position_attribution.record_open carries it from
+  the opening BUY, pop_open returns it, auto_trader threads it to live_trades.record_realized_trade).
+- DB MIGRATIONS: scan_db + live_trades gained an idempotent _migrate() (PRAGMA table_info + ALTER TABLE
+  ADD COLUMN) inside init_db(). NON-DESTRUCTIVE — verified on COPIES of both real DBs (old rows NULL,
+  2nd run no-op). Loading the dashboard once already migrated the REAL scan_history.db (6 runs/3060
+  results preserved, conviction col added NULL) — intended production migration, not damage. Old scan
+  rows show blank conviction; new scans/backtests/live trades populate it.
+- FUTURE (#21): once the news panel exists, per-ticker news sentiment is intended as an extra input to
+  compute_conviction — a comment marks the seam in conviction.py. Not built yet.
+- VERIFIED: unit tests (bespoke ordering deep>shallow, generic clamp, engine attaches varying [0,1] per
+  trade, scanner avg=mean, both DB migrations on real-DB copies, live open->close round-trip threads
+  conviction, integrated engine->scan_db->leaderboard); LIVE — Scan History leaderboard renders the
+  "Mean conviction" column, 0 exceptions. Backtest Trade-log column is code-verified (trivial dict-key
+  add on the same st.dataframe grid; engine attach unit-proven), not click-run (avoided driving the
+  ticker/date form + a Polygon fetch at session end). NOT YET COMMITTED as of this note.
+
 === VERSION CONTROL / GITHUB (set up 2026-07-21) ===
 - backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester
   (verified private: anonymous fetch 404s). Purpose: enables working on the project from a

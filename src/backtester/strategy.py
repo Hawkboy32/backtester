@@ -69,3 +69,13 @@ class Strategy(ABC):
         default (full history-so-far, same as before this existed).
         """
         return Lookback()
+
+    def conviction(self, history: pd.DataFrame, current: Bar) -> float | None:
+        """Optional: the strength of the entry signal at `current`, in [0, 1]
+        (0 = weak/barely triggered, 1 = strong), or None to fall back to the
+        generic context-based score (see backtester.conviction). Only consulted
+        on the bar a BUY actually fires. LOGGED ONLY — never used to size or gate
+        a trade in this measure-first pass. Default None; override where a
+        natural strength exists (e.g. how far past a band/threshold price is).
+        """
+        return None

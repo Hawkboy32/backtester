@@ -664,6 +664,7 @@ def _execute_backtest_body(params: dict) -> None:
                 "exit_price": round(t.exit_price, 2) if t.exit_price is not None else None,
                 "shares": round(t.shares, 4),
                 "pnl": round(t.pnl, 2) if t.pnl is not None else None,
+                "conviction": round(t.conviction, 3) if t.conviction is not None else None,
             }
             for t in result.trades
         ]
@@ -1925,6 +1926,7 @@ def render_scan_history_tab() -> None:
             "mean_sharpe": st.column_config.NumberColumn("Mean Sharpe", format="%.2f"),
             "mean_return": st.column_config.NumberColumn("Mean return", format="percent"),
             "pct_profitable": st.column_config.NumberColumn("% profitable", format="percent"),
+            "mean_conviction": st.column_config.NumberColumn("Mean conviction", format="%.2f", help="Average entry-signal conviction (0-1) across this strategy's trades. Logged for future learning; does not affect sizing."),
         },
     )
 
@@ -1960,6 +1962,7 @@ def render_scan_history_tab() -> None:
             "sharpe_ratio": st.column_config.NumberColumn("Sharpe", format="%.2f"),
             "num_trades": st.column_config.NumberColumn("Trades"),
             "win_rate": st.column_config.NumberColumn("Win rate", format="percent"),
+            "conviction": st.column_config.NumberColumn("Conviction", format="%.2f", help="Average entry-signal conviction (0-1) for this combo. Logged for future learning; does not affect sizing."),
             "run_at": st.column_config.DatetimeColumn("Scanned at"),
         },
     )

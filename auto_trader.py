@@ -56,6 +56,7 @@ from backtester.brokers.base import BrokerAccount, OrderSide
 from backtester.data import PolygonClient, PolygonError
 from backtester.execution import AccountOrder, SizingMode, compute_qty_for_account, execute_order_across_accounts
 from backtester.execution_log import log_results
+from backtester.conviction import compute_conviction
 from backtester.strategies import STRATEGY_REGISTRY, build_strategy
 from backtester.strategy import Bar
 
@@ -184,6 +185,10 @@ def _trade_target(
 
     order_side = OrderSide.BUY if signal.value == "buy" else OrderSide.SELL
     sizing_mode = SizingMode(control.sizing_mode)
+    # Score the entry signal's conviction once (#25). Only meaningful for a BUY
+    # (a new entry); carried through attribution to live_trades on the eventual
+    # close. Logged only — it does NOT influence sizing/gating anywhere.
+    entry_conviction = compute_conviction(strategy, bars, current) if order_side is OrderSide.BUY else None
 
     account_orders: list[AccountOrder] = []
     # parallel to account_orders — pre-submit position snapshot per account, for
@@ -245,7 +250,9 @@ def _trade_target(
             continue
         broker_account = ctx["account"]
         if order_side is OrderSide.BUY:
-            position_attribution.record_open(broker_account.account_id, ticker, strategy_name)
+            position_attribution.record_open(
+                broker_account.account_id, ticker, strategy_name, conviction=entry_conviction
+            )
             notifications.notify_trade_open(
                 ticker, strategy_name, result.filled_qty or 0.0,
                 broker_account.nickname, broker_account.is_paper,
@@ -267,6 +274,7 @@ def _trade_target(
                 exit_time=datetime.now(timezone.utc).isoformat(),
                 exit_price=exit_price,
                 qty=qty,
+                conviction=attribution.get("conviction"),
             )
             pnl = (exit_price - existing_position.avg_entry_price) * qty
             notifications.notify_trade_close(

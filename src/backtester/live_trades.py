@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS live_trades (
     exit_price REAL NOT NULL,
     qty REAL NOT NULL,
     pnl REAL NOT NULL,
-    pnl_pct REAL NOT NULL
+    pnl_pct REAL NOT NULL,
+    conviction REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_live_trades_ticker_strategy ON live_trades(ticker, strategy_name);
@@ -59,9 +60,19 @@ def _connect():
         conn.close()
 
 
+def _migrate(conn) -> None:
+    """Add columns to a pre-existing live_trades table that predates them.
+    CREATE TABLE IF NOT EXISTS won't alter an existing table. Idempotent (guarded
+    by a table_info check) — safe to run on every startup."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(live_trades)").fetchall()}
+    if "conviction" not in existing:
+        conn.execute("ALTER TABLE live_trades ADD COLUMN conviction REAL")
+
+
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
 
 
 def record_realized_trade(
@@ -74,9 +85,12 @@ def record_realized_trade(
     exit_time: str,
     exit_price: float,
     qty: float,
+    conviction: float | None = None,
 ) -> int:
     """Record one closed round trip (long-only: always BUY then SELL, matching
-    this project's engine.py convention). Returns the new row id."""
+    this project's engine.py convention). `conviction` is the [0,1] strength of
+    the ENTRY signal (#25), captured at open time and carried through — logged
+    only, never used to size. Returns the new row id."""
     pnl = (exit_price - entry_price) * qty
     pnl_pct = (exit_price - entry_price) / entry_price if entry_price else 0.0
 
@@ -85,8 +99,8 @@ def record_realized_trade(
         cursor = conn.execute(
             """INSERT INTO live_trades
                (account_id, ticker, strategy_name, is_paper, entry_time, entry_price,
-                exit_time, exit_price, qty, pnl, pnl_pct)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                exit_time, exit_price, qty, pnl, pnl_pct, conviction)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 account_id,
                 ticker,
@@ -99,6 +113,7 @@ def record_realized_trade(
                 qty,
                 pnl,
                 pnl_pct,
+                conviction,
             ),
         )
         row_id = cursor.lastrowid
