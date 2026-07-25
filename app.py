@@ -31,6 +31,7 @@ from backtester.accounts import (
 )
 from backtester.auto_trader_state import AutoTraderControl, load_control, load_status, save_control, trigger_kill_switch
 from backtester.brokers.base import OrderSide
+from backtester.brokers.ibkr import check_gateway_reachable
 from backtester.data import PolygonClient, PolygonError
 from backtester.engine import BacktestEngine
 from backtester.execution import AccountOrder, SizingMode, compute_qty_for_account, execute_order_across_accounts
@@ -53,7 +54,7 @@ from backtester.strategies import STRATEGY_REGISTRY, build_strategy
 from backtester.strategies.sma_crossover import SmaCrossoverStrategy
 from backtester.universe import UNIVERSE_REGISTRY, load_universe
 from backtester.walkforward import aggregate_walkforward, run_walkforward_scan
-from backtester import account_risk, live_trades, notifications, position_attribution, roster, volatility
+from backtester import account_risk, app_settings, live_trades, notifications, position_attribution, roster, volatility
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 AUTO_TRADER_SCRIPT = PROJECT_ROOT / "auto_trader.py"
@@ -217,8 +218,16 @@ def require_auth() -> tuple[stauth.Authenticate, str]:
     return authenticator, username
 
 
-def render_api_keys_tab() -> None:
-    st.subheader("API keys")
+def render_settings_page() -> None:
+    """One home for all configuration: API keys, phone notifications, the
+    execution-cost defaults new Backtest/Scanner runs start from, and the
+    account-level max-drawdown circuit breaker. Consolidated here so settings
+    stop being scattered across the API Keys tab, the Backtest/Scanner sidebars,
+    and the Auto Trading tab."""
+    st.subheader("Settings")
+    st.caption("API keys, notifications, execution-cost defaults, and the account-risk limit — all in one place.")
+
+    st.markdown("### API keys")
     st.caption(
         "Stored locally in this project's .env file. Never sent anywhere except "
         "to the API providers themselves when the backtester runs."
@@ -242,7 +251,7 @@ def render_api_keys_tab() -> None:
                     st.rerun()
 
     st.divider()
-    st.subheader("Phone notifications")
+    st.markdown("### Phone notifications")
     st.caption(
         "Get a push to your phone each time the auto-trader opens or closes a trade. "
         "Uses ntfy (free): install the **ntfy** app (iOS/Android), then in the app "
@@ -279,6 +288,102 @@ def render_api_keys_tab() -> None:
                 st.error("Enter a topic name first.")
             else:
                 st.error("Send failed — check your internet connection and the topic name.")
+
+    st.divider()
+    st.markdown("### Execution-cost defaults")
+    st.caption(
+        "The commission and slippage that new Backtest and Scanner runs start from. Defaults "
+        "model Alpaca: $0 commission on US stocks/ETFs, with spread-crossing + sub-bp sell-side "
+        "regulatory fees captured as ~2 bps slippage per side. You can still override these per "
+        "run in the Backtest/Scanner sidebars."
+    )
+    cost_cfg = app_settings.load_settings()
+    # Seed the widgets from the persisted defaults before they render, so the preset
+    # buttons below can set them via session_state without the value=+key warning.
+    if "settings_commission" not in st.session_state:
+        st.session_state["settings_commission"] = cost_cfg["commission"]
+    if "settings_slippage" not in st.session_state:
+        st.session_state["settings_slippage"] = cost_cfg["slippage_bps"]
+
+    def _fill_cost_preset(slippage_bps: float) -> None:
+        # Fill the Settings inputs; commission stays $0 either way (Alpaca).
+        st.session_state["settings_commission"] = 0.0
+        st.session_state["settings_slippage"] = slippage_bps
+
+    pcol1, pcol2 = st.columns(2)
+    with pcol1:
+        st.button(
+            f"Large cap ({LARGE_CAP_SLIPPAGE_BPS:.0f} bps)", key="settings_cost_large",
+            width="stretch", on_click=_fill_cost_preset, args=(LARGE_CAP_SLIPPAGE_BPS,),
+        )
+    with pcol2:
+        st.button(
+            f"Small cap ({SMALL_CAP_SLIPPAGE_BPS:.0f} bps)", key="settings_cost_small",
+            width="stretch", on_click=_fill_cost_preset, args=(SMALL_CAP_SLIPPAGE_BPS,),
+        )
+    st.number_input("Default commission per trade ($)", min_value=0.0, step=0.5, key="settings_commission")
+    st.number_input("Default slippage (bps)", min_value=0.0, step=0.5, key="settings_slippage")
+    if st.button("Save execution-cost defaults", key="settings_save_costs"):
+        commission = float(st.session_state["settings_commission"])
+        slippage = float(st.session_state["settings_slippage"])
+        app_settings.save_settings({"commission": commission, "slippage_bps": slippage})
+        # Push into the live Backtest/Scanner widgets so the change applies immediately,
+        # not just on a fresh session (their keys may already hold an old value).
+        st.session_state["bt_commission"] = commission
+        st.session_state["scan_comm"] = commission
+        st.session_state["bt_slippage"] = slippage
+        st.session_state["scan_slip"] = slippage
+        st.success("Execution-cost defaults saved.")
+
+    st.divider()
+    st.markdown("### Account risk limit")
+    st.caption(
+        "A per-account hard stop, independent of Manual/Adaptive mode. Once an account's equity "
+        "drops this far below its own peak since being watched, new entries are blocked (existing "
+        "positions can still be closed). It stays blocked — even if equity recovers — until you "
+        "manually re-arm it below."
+    )
+    control = load_control()
+    risk_enabled = st.checkbox(
+        "Enable account-level max-drawdown circuit breaker. Off by default.",
+        value=control.max_drawdown_enabled, key="settings_max_dd_enabled",
+    )
+    risk_pct = st.number_input(
+        "Max drawdown from peak equity (%)", min_value=1.0, max_value=100.0,
+        value=control.max_drawdown_pct, step=1.0, key="settings_max_dd_pct", disabled=not risk_enabled,
+    )
+    if st.button("Save account-risk limit", key="settings_save_risk"):
+        # Load-mutate-save so only the two drawdown fields change — never clobber the
+        # rest of the auto-trader control (which the Auto Trading tab also writes).
+        fresh = load_control()
+        fresh.max_drawdown_enabled = risk_enabled
+        fresh.max_drawdown_pct = risk_pct
+        save_control(fresh)
+        st.success("Account-risk limit saved.")
+        st.rerun()
+
+    linked = list_accounts()
+    watched = [a for a in linked if a["id"] in control.account_ids]
+    blocked_any = False
+    for account in watched:
+        risk_status = account_risk.get_status(account["id"])
+        if risk_status and risk_status.get("blocked"):
+            blocked_any = True
+            rcol1, rcol2 = st.columns([3, 1])
+            with rcol1:
+                st.error(f"{account['nickname']}: risk-blocked — {risk_status['reason']}")
+            with rcol2:
+                if st.button("Re-arm", key=f"settings_rearm_{account['id']}"):
+                    try:
+                        broker_accounts = build_broker_accounts([account["id"]])
+                        equity = broker_accounts[0].get_account_snapshot().equity
+                        account_risk.reset_breach(account["id"], equity)
+                        st.success(f"{account['nickname']} re-armed at current equity ${equity:,.2f}.")
+                        st.rerun()
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"Could not re-arm: {e}")
+    if control.account_ids and not blocked_any:
+        st.caption("No target accounts are currently risk-blocked.")
 
 
 BACKTEST_CONFIG_KEYS = [
@@ -320,31 +425,10 @@ def _friendly_broker_error(error: str | None) -> str:
     return error
 
 
-def _apply_cost_preset(commission_key: str, slippage_key: str, slippage_bps: float) -> None:
-    """Shared by the Backtest and Scanner tabs' liquidity preset buttons —
-    commission stays $0 either way (Alpaca), only the spread cost differs."""
-    st.session_state[commission_key] = 0.0
-    st.session_state[slippage_key] = slippage_bps
-
-
+# Liquidity-based slippage presets, offered on the Settings page's execution-cost
+# defaults section. Commission stays $0 either way (Alpaca); only the spread differs.
 LARGE_CAP_SLIPPAGE_BPS = 2.0   # liquid S&P/Nasdaq names: ~1-2 bps half-spread
 SMALL_CAP_SLIPPAGE_BPS = 10.0  # thinner names: wider spreads, conservative default
-
-
-def _render_cost_presets(commission_key: str, slippage_key: str) -> None:
-    pcol1, pcol2 = st.columns(2)
-    with pcol1:
-        st.button(
-            f"Large cap ({LARGE_CAP_SLIPPAGE_BPS:.0f} bps)", key=f"{slippage_key}_preset_large",
-            width="stretch", on_click=_apply_cost_preset,
-            args=(commission_key, slippage_key, LARGE_CAP_SLIPPAGE_BPS),
-        )
-    with pcol2:
-        st.button(
-            f"Small cap ({SMALL_CAP_SLIPPAGE_BPS:.0f} bps)", key=f"{slippage_key}_preset_small",
-            width="stretch", on_click=_apply_cost_preset,
-            args=(commission_key, slippage_key, SMALL_CAP_SLIPPAGE_BPS),
-        )
 
 
 def render_backtest_tab() -> tuple[dict, "st.delta_generator.DeltaGenerator"] | None:
@@ -399,17 +483,17 @@ def render_backtest_tab() -> tuple[dict, "st.delta_generator.DeltaGenerator"] | 
         st.caption(
             "Execution assumptions — defaults model Alpaca: $0 commission on US "
             "stocks/ETFs, with spread-crossing + sub-bp sell-side regulatory fees "
-            "captured as ~2 bps slippage per side. Adjust for other brokers."
+            "captured as ~2 bps slippage per side. Set the default in Settings; adjust here per run."
         )
-        _render_cost_presets("bt_commission", "bt_slippage")
+        _bt_costs = app_settings.load_settings()
         starting_cash = st.number_input(
             "Starting cash ($)", min_value=1.0, value=100_000.0, step=1000.0, key="bt_cash"
         )
         commission = st.number_input(
-            "Commission per trade ($)", min_value=0.0, value=0.0, step=0.5, key="bt_commission"
+            "Commission per trade ($)", min_value=0.0, value=_bt_costs["commission"], step=0.5, key="bt_commission"
         )
         slippage_bps = st.number_input(
-            "Slippage (bps)", min_value=0.0, value=2.0, step=0.5, key="bt_slippage"
+            "Slippage (bps)", min_value=0.0, value=_bt_costs["slippage_bps"], step=0.5, key="bt_slippage"
         )
         compare_buy_hold = st.checkbox(
             "Compare to buy-and-hold", value=True, key="bt_compare_buy_hold"
@@ -671,14 +755,14 @@ def render_scanner_tab() -> None:
         starting_cash = st.number_input(
             "Starting cash ($)", min_value=1.0, value=100_000.0, step=1000.0, key="scan_cash"
         )
-        _render_cost_presets("scan_comm", "scan_slip")
+        _scan_costs = app_settings.load_settings()
         commission = st.number_input(
             "Commission per trade ($) — default models Alpaca's $0 US stock/ETF commission",
-            min_value=0.0, value=0.0, step=0.5, key="scan_comm",
+            min_value=0.0, value=_scan_costs["commission"], step=0.5, key="scan_comm",
         )
         slippage_bps = st.number_input(
             "Slippage (bps) — default ~2 bps/side covers spread-crossing + sell-side regulatory fees on Alpaca",
-            min_value=0.0, value=2.0, step=0.5, key="scan_slip",
+            min_value=0.0, value=_scan_costs["slippage_bps"], step=0.5, key="scan_slip",
         )
 
     st.caption("GARCH volatility filter + sizing")
@@ -907,6 +991,15 @@ def _market_status(account_id: str, broker: str) -> dict:
     return {"state": "open" if clock["is_open"] else "closed", "next_open": clock.get("next_open")}
 
 
+@st.cache_data(ttl=30)
+def _ibkr_gateway_reachable(host: str, port: int) -> bool:
+    """Cached IBKR gateway reachability probe for the Accounts status chip. Kept
+    separate from _market_status because get_market_clock() deliberately falls
+    back to a heuristic when the gateway is down (so the auto-trader always has a
+    clock) — meaning it can't tell us the gateway is actually unreachable."""
+    return check_gateway_reachable(host, port)
+
+
 def _market_status_label(status: dict) -> str:
     state = status["state"]
     if state == "open":
@@ -999,11 +1092,21 @@ def render_accounts_tab() -> None:
             cols[0].write(f"**{acct['nickname']}**")
             cols[1].write(BROKER_META.get(acct["broker"], {}).get("label", acct["broker"]))
             cols[2].write("🟢 Paper" if acct["is_paper"] else "🔴 LIVE")
-            cols[3].write(_market_status_label(_market_status(acct["id"], acct["broker"])))
+            if acct["broker"] == "ibkr":
+                cp = acct.get("conn_params", {})
+                if _ibkr_gateway_reachable(cp.get("host", "127.0.0.1"), int(cp.get("port", 4002))):
+                    cols[3].write("🟢 Gateway · " + _market_status_label(_market_status(acct["id"], acct["broker"])))
+                else:
+                    cols[3].write("🔴 Gateway unreachable")
+            else:
+                cols[3].write(_market_status_label(_market_status(acct["id"], acct["broker"])))
             if cols[4].button("Remove", key=f"remove_{acct['id']}"):
                 remove_account(acct["id"])
                 st.rerun()
-        st.caption("Market status is cached for 60s. Alpaca follows the US regular session; crypto trades 24/7.")
+        st.caption(
+            "Market status is cached for 60s. Alpaca/IBKR follow the US regular session; crypto trades "
+            "24/7. IBKR also shows whether its local gateway is reachable (cached 30s)."
+        )
     else:
         st.info("No accounts linked yet.")
 
@@ -1075,28 +1178,7 @@ def render_accounts_tab() -> None:
                 st.caption("No balance history available yet for the selected range.")
 
     if linked:
-        st.divider()
-        st.subheader("Current positions")
-        pcol1, pcol2 = st.columns([1, 2])
-        with pcol1:
-            if st.button("Show positions"):
-                st.session_state["show_positions"] = True
-        with pcol2:
-            live = st.toggle(
-                "Live P&L (auto-refresh every 15s)", key="pos_live",
-                help="Re-fetches from the broker every 15 seconds so unrealized P&L updates on its own.",
-            )
-        if live:
-            st.session_state["show_positions"] = True
-
-        if st.session_state.get("show_positions"):
-            account_ids = [a["id"] for a in linked]
-
-            @st.fragment(run_every=(15 if live else None))
-            def _live_positions_panel() -> None:
-                _render_live_positions(account_ids)
-
-            _live_positions_panel()
+        st.caption("Live positions with colour-coded P&L are now on the **Overview** page.")
 
     st.divider()
     st.subheader("Link a new account")
@@ -1104,6 +1186,7 @@ def render_accounts_tab() -> None:
         "Broker", SUPPORTED_BROKERS, format_func=lambda b: BROKER_META[b]["label"], key="link_broker"
     )
     broker_meta = BROKER_META[broker]
+    uses_gateway = broker_meta.get("uses_gateway", False)
     cred_label_1, cred_label_2 = broker_meta["cred_fields"]
 
     with st.form("add_account_form", clear_on_submit=True):
@@ -1118,8 +1201,34 @@ def render_accounts_tab() -> None:
             )
             mode = "Live (real money)"
 
-        api_key = st.text_input(cred_label_1, type="password")
-        secret_key = st.text_input(cred_label_2, type="password")
+        api_key = secret_key = ""
+        ibkr_host = ibkr_account = ""
+        ibkr_port, ibkr_client_id = 4002, 1
+        if uses_gateway:
+            # IBKR connects to a local gateway the user runs and logs into — no API
+            # key/secret, just connection config. Rendered as normal (non-masked) inputs.
+            st.caption(
+                "Interactive Brokers connects to a local **IB Gateway** (or Trader Workstation) that "
+                "you run and log into — there's no API key to enter here. Start the gateway, enable its "
+                "API (Configure → Settings → API → Enable ActiveX and Socket Clients), and point this at "
+                "its host/port. Ports: IB Gateway **4002 paper / 4001 live** (TWS 7497 / 7496)."
+            )
+            ibkr_host = st.text_input("Gateway host", value="127.0.0.1")
+            gwcol1, gwcol2 = st.columns(2)
+            with gwcol1:
+                ibkr_port = st.number_input(
+                    "Gateway port", min_value=1, max_value=65535,
+                    value=4002 if mode.startswith("Paper") else 4001, step=1,
+                )
+            with gwcol2:
+                ibkr_client_id = st.number_input("Client ID", min_value=0, value=1, step=1)
+            ibkr_account = st.text_input(
+                "IBKR account code", placeholder="e.g. DU1234567 (paper) or U1234567 (live)"
+            )
+        else:
+            api_key = st.text_input(cred_label_1, type="password")
+            secret_key = st.text_input(cred_label_2, type="password")
+
         live_confirm = st.checkbox(
             "I understand this connects a REAL brokerage account and orders placed against "
             "it will use real money.",
@@ -1128,14 +1237,32 @@ def render_accounts_tab() -> None:
         submitted = st.form_submit_button("Link account")
         if submitted:
             is_paper = mode.startswith("Paper")
-            if not nickname or not api_key or not secret_key:
-                st.error(f"Nickname, {cred_label_1}, and {cred_label_2} are all required.")
-            elif not is_paper and not live_confirm:
-                st.error("Check the confirmation box to link this account.")
+            if uses_gateway:
+                if not nickname or not ibkr_account.strip():
+                    st.error("Nickname and IBKR account code are required.")
+                elif not is_paper and not live_confirm:
+                    st.error("Check the confirmation box to link this account.")
+                else:
+                    add_account(
+                        nickname, broker, is_paper,
+                        conn_params={
+                            "host": ibkr_host.strip() or "127.0.0.1",
+                            "port": int(ibkr_port),
+                            "client_id": int(ibkr_client_id),
+                            "ibkr_account": ibkr_account.strip(),
+                        },
+                    )
+                    st.success(f"Linked {nickname}.")
+                    st.rerun()
             else:
-                add_account(nickname, broker, is_paper, api_key, secret_key)
-                st.success(f"Linked {nickname}.")
-                st.rerun()
+                if not nickname or not api_key or not secret_key:
+                    st.error(f"Nickname, {cred_label_1}, and {cred_label_2} are all required.")
+                elif not is_paper and not live_confirm:
+                    st.error("Check the confirmation box to link this account.")
+                else:
+                    add_account(nickname, broker, is_paper, api_key, secret_key)
+                    st.success(f"Linked {nickname}.")
+                    st.rerun()
 
 
 def render_execution_tab() -> None:
@@ -1582,30 +1709,7 @@ def render_auto_trading_tab() -> None:
     control = load_control()
 
     st.markdown("### Status")
-    heartbeat_stale = True
-    if status.last_heartbeat:
-        try:
-            age = (datetime.now(timezone.utc) - datetime.fromisoformat(status.last_heartbeat)).total_seconds()
-            heartbeat_stale = age > max(control.poll_interval_seconds * 3, 30)
-        except ValueError:
-            heartbeat_stale = True
-    actually_running = status.running and not heartbeat_stale
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Process", "🟢 Running" if actually_running else "🔴 Not running")
-    c2.metric("Armed", "🟢 Yes" if control.enabled and not control.killed else "🔴 No")
-    c3.metric("Trades today", f"{status.trades_today} / {control.max_trades_per_day}")
-    c4.metric("Killed", "⚠ Yes" if control.killed else "No")
-
-    if status.last_signal:
-        st.caption(f"Last signal: {status.last_signal}")
-    if status.last_error:
-        st.error(f"Last error: {status.last_error}")
-
-    if st.button("🛑 KILL SWITCH — stop auto-trading now", type="primary"):
-        trigger_kill_switch()
-        st.success("Kill switch engaged. The trader will stop within one poll cycle.")
-        st.rerun()
+    actually_running = _render_bot_status(status, control, kill_key="kill_auto")
 
     st.divider()
     st.markdown("### Configuration")
@@ -1649,57 +1753,58 @@ def render_auto_trading_tab() -> None:
         strategy_name = control.strategy_name
         _render_adaptive_roster_section()
 
-    gcol1, gcol2, gcol3 = st.columns(3)
-    with gcol1:
-        multiplier = st.number_input("Bar multiplier", min_value=1, value=control.multiplier, key="auto_mult")
-    with gcol2:
-        timespan = st.selectbox(
-            "Bar unit", ["minute", "hour", "day"],
-            index=["minute", "hour", "day"].index(control.timespan) if control.timespan in ("minute", "hour", "day") else 0,
-            key="auto_timespan",
+    with st.expander("Advanced settings", expanded=False):
+        gcol1, gcol2, gcol3 = st.columns(3)
+        with gcol1:
+            multiplier = st.number_input("Bar multiplier", min_value=1, value=control.multiplier, key="auto_mult")
+        with gcol2:
+            timespan = st.selectbox(
+                "Bar unit", ["minute", "hour", "day"],
+                index=["minute", "hour", "day"].index(control.timespan) if control.timespan in ("minute", "hour", "day") else 0,
+                key="auto_timespan",
+            )
+        with gcol3:
+            poll_interval = st.number_input(
+                "Poll interval (seconds)", min_value=5, value=control.poll_interval_seconds, key="auto_poll"
+            )
+
+        sizing_options = ["Fixed shares", "% of account equity", "Fixed dollar amount"]
+        sizing_mode_to_label = {
+            SizingMode.FIXED_SHARES.value: "Fixed shares",
+            SizingMode.PCT_EQUITY.value: "% of account equity",
+            SizingMode.FIXED_DOLLARS.value: "Fixed dollar amount",
+        }
+        sizing_label = st.radio(
+            "Sizing", sizing_options,
+            index=sizing_options.index(sizing_mode_to_label.get(control.sizing_mode, "Fixed shares")),
+            horizontal=True, key="auto_sizing_mode",
         )
-    with gcol3:
-        poll_interval = st.number_input(
-            "Poll interval (seconds)", min_value=5, value=control.poll_interval_seconds, key="auto_poll"
+        sizing_mode = {
+            "Fixed shares": SizingMode.FIXED_SHARES,
+            "% of account equity": SizingMode.PCT_EQUITY,
+            "Fixed dollar amount": SizingMode.FIXED_DOLLARS,
+        }[sizing_label]
+        sizing_value = st.number_input(
+            "Sizing value (shares, % of equity, or $ depending on the mode above)",
+            min_value=0.01, value=control.sizing_value, key="auto_sizing_value",
         )
 
-    sizing_options = ["Fixed shares", "% of account equity", "Fixed dollar amount"]
-    sizing_mode_to_label = {
-        SizingMode.FIXED_SHARES.value: "Fixed shares",
-        SizingMode.PCT_EQUITY.value: "% of account equity",
-        SizingMode.FIXED_DOLLARS.value: "Fixed dollar amount",
-    }
-    sizing_label = st.radio(
-        "Sizing", sizing_options,
-        index=sizing_options.index(sizing_mode_to_label.get(control.sizing_mode, "Fixed shares")),
-        horizontal=True, key="auto_sizing_mode",
-    )
-    sizing_mode = {
-        "Fixed shares": SizingMode.FIXED_SHARES,
-        "% of account equity": SizingMode.PCT_EQUITY,
-        "Fixed dollar amount": SizingMode.FIXED_DOLLARS,
-    }[sizing_label]
-    sizing_value = st.number_input(
-        "Sizing value (shares, % of equity, or $ depending on the mode above)",
-        min_value=0.01, value=control.sizing_value, key="auto_sizing_value",
-    )
+        max_trades_per_day = st.number_input(
+            "Max trades per day (hard limit, resets at UTC midnight)",
+            min_value=1, value=control.max_trades_per_day, key="auto_max_trades",
+        )
 
-    max_trades_per_day = st.number_input(
-        "Max trades per day (hard limit, resets at UTC midnight)",
-        min_value=1, value=control.max_trades_per_day, key="auto_max_trades",
-    )
-
-    st.caption("GARCH volatility filter + sizing")
-    vol_target_enabled = st.checkbox(
-        "Enable: block new BUYs while a ticker is in a high-vol (\"storm\") regime, and scale "
-        "the sizing value above by forecast vol otherwise. Recomputed once per ticker per day "
-        "(not every poll). Off by default.",
-        value=control.vol_target_enabled, key="auto_vol_target",
-    )
-    vol_target_ann = st.number_input(
-        "Target annualized vol (%)", min_value=1.0, value=control.vol_target_ann, step=1.0,
-        key="auto_vol_target_ann", disabled=not vol_target_enabled,
-    )
+        st.caption("GARCH volatility filter + sizing")
+        vol_target_enabled = st.checkbox(
+            "Enable: block new BUYs while a ticker is in a high-vol (\"storm\") regime, and scale "
+            "the sizing value above by forecast vol otherwise. Recomputed once per ticker per day "
+            "(not every poll). Off by default.",
+            value=control.vol_target_enabled, key="auto_vol_target",
+        )
+        vol_target_ann = st.number_input(
+            "Target annualized vol (%)", min_value=1.0, value=control.vol_target_ann, step=1.0,
+            key="auto_vol_target_ann", disabled=not vol_target_enabled,
+        )
 
     account_options = {f"{a['nickname']} ({'Paper' if a['is_paper'] else 'LIVE'})": a["id"] for a in linked}
     selected_labels = st.multiselect(
@@ -1726,35 +1831,10 @@ def render_auto_trading_tab() -> None:
     else:
         allow_live = False
 
-    st.caption("Account risk limit")
-    max_drawdown_enabled = st.checkbox(
-        "Enable: hard-block new entries for an account once its equity drops this far below "
-        "its own peak since being watched. Existing positions can still be closed. Stays "
-        "blocked — even if equity recovers — until you manually re-arm it below. Off by default.",
-        value=control.max_drawdown_enabled, key="auto_max_dd_enabled",
+    st.caption(
+        "The account-level max-drawdown circuit breaker now lives in **Settings → Account "
+        "risk limit** (it applies to both Manual and Adaptive mode)."
     )
-    max_drawdown_pct = st.number_input(
-        "Max drawdown from peak equity (%)", min_value=1.0, max_value=100.0,
-        value=control.max_drawdown_pct, step=1.0, key="auto_max_dd_pct", disabled=not max_drawdown_enabled,
-    )
-    if selected_ids:
-        for account_id in selected_ids:
-            risk_status = account_risk.get_status(account_id)
-            if risk_status and risk_status.get("blocked"):
-                nickname = next((a["nickname"] for a in linked if a["id"] == account_id), account_id)
-                rcol1, rcol2 = st.columns([3, 1])
-                with rcol1:
-                    st.error(f"{nickname}: risk-blocked — {risk_status['reason']}")
-                with rcol2:
-                    if st.button("Re-arm", key=f"rearm_{account_id}"):
-                        try:
-                            broker_accounts = build_broker_accounts([account_id])
-                            equity = broker_accounts[0].get_account_snapshot().equity
-                            account_risk.reset_breach(account_id, equity)
-                            st.success(f"{nickname} re-armed at current equity ${equity:,.2f}.")
-                            st.rerun()
-                        except Exception as e:  # noqa: BLE001
-                            st.error(f"Could not re-arm: {e}")
 
     if st.button("Save configuration"):
         new_control = AutoTraderControl(
@@ -1773,8 +1853,10 @@ def render_auto_trading_tab() -> None:
             vol_target_enabled=vol_target_enabled,
             vol_target_ann=vol_target_ann,
             use_roster=use_roster,
-            max_drawdown_enabled=max_drawdown_enabled,
-            max_drawdown_pct=max_drawdown_pct,
+            # Owned by the Settings page now — carry forward from the loaded control so
+            # saving here never clobbers the account-risk limit set in Settings.
+            max_drawdown_enabled=control.max_drawdown_enabled,
+            max_drawdown_pct=control.max_drawdown_pct,
         )
         save_control(new_control)
         st.success("Configuration saved.")
@@ -1912,42 +1994,126 @@ def render_scan_history_tab() -> None:
             st.rerun()
 
 
+def _render_bot_status(status, control, *, kill_switch: bool = True, kill_key: str = "kill_switch_btn") -> bool:
+    """Auto-trader status row (process / armed / trades today / killed) plus the
+    last signal/error and an optional kill switch. Shared by the Overview home
+    and the Auto Trading tab so both always show the same truth. Returns whether
+    the process is actually running (heartbeat-fresh), which the Auto Trading tab
+    uses to decide whether to launch a new process on Start."""
+    heartbeat_stale = True
+    if status.last_heartbeat:
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(status.last_heartbeat)).total_seconds()
+            heartbeat_stale = age > max(control.poll_interval_seconds * 3, 30)
+        except ValueError:
+            heartbeat_stale = True
+    actually_running = status.running and not heartbeat_stale
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Process", "🟢 Running" if actually_running else "🔴 Not running")
+    c2.metric("Armed", "🟢 Yes" if control.enabled and not control.killed else "🔴 No")
+    c3.metric("Trades today", f"{status.trades_today} / {control.max_trades_per_day}")
+    c4.metric("Killed", "⚠ Yes" if control.killed else "No")
+
+    if status.last_signal:
+        st.caption(f"Last signal: {status.last_signal}")
+    if status.last_error:
+        st.error(f"Last error: {status.last_error}")
+
+    if kill_switch and st.button("🛑 KILL SWITCH — stop auto-trading now", type="primary", key=kill_key):
+        trigger_kill_switch()
+        st.success("Kill switch engaged. The trader will stop within one poll cycle.")
+        st.rerun()
+
+    return actually_running
+
+
+def render_overview_page() -> None:
+    """Daily-glance home: bot status, open positions with live P&L, and recent
+    trades on one screen, with the kill switch always reachable. Reuses the same
+    helpers as the Auto Trading / Accounts tabs — this page only re-arranges."""
+    st.subheader("Overview")
+    st.caption("Your daily glance — bot status, open positions, and recent trades on one screen.")
+
+    status = load_status()
+    control = load_control()
+    _render_bot_status(status, control, kill_key="kill_overview")
+
+    st.divider()
+    st.markdown("### Open positions")
+    linked = list_accounts()
+    target_ids = [a["id"] for a in linked if a["id"] in control.account_ids]
+    if not target_ids:
+        st.info(
+            "No auto-trading accounts are configured yet. Link one under **Accounts**, then set it "
+            "as a target under **Auto trading** — its live positions will show here."
+        )
+    else:
+        any_live = any(not a["is_paper"] for a in linked if a["id"] in target_ids)
+
+        @st.fragment(run_every=(15 if any_live else None))
+        def _overview_positions() -> None:
+            _render_live_positions(target_ids)
+
+        _overview_positions()
+
+    st.divider()
+    st.markdown("### Recent trades")
+    log_df = execution_log.load_log(limit=10)
+    if log_df.empty:
+        st.caption(
+            "No executed trades logged yet — either the bot hasn't traded, or no manual order "
+            "has been placed."
+        )
+    else:
+        st.dataframe(log_df, hide_index=True, width="stretch")
+
+
+def render_backtest_page() -> None:
+    """Backtest tab wrapped as a navigation page: render the form, then run any
+    pending backtest inline. The old 'defer to the end of main()' workaround only
+    existed to stop sibling tabs looking stuck while a backtest blocked the script
+    — under single-page navigation there are no sibling tabs, so it's unnecessary."""
+    pending = render_backtest_tab()
+    if pending is not None:
+        params, results_container = pending
+        execute_backtest(params, results_container)
+
+
 def main() -> None:
     st.markdown(TERMINAL_CSS, unsafe_allow_html=True)
     authenticator, username = require_auth()
 
+    # Grouped sidebar navigation (Overview / Research / Trading / Settings). Each
+    # page is an existing render_* function wrapped as a callable st.Page — the
+    # reorg re-arranges placement only, it does not rewrite any tab's logic.
+    pages = {
+        "": [
+            st.Page(render_overview_page, title="Overview", icon=":material/dashboard:", default=True),
+        ],
+        "Research": [
+            st.Page(render_backtest_page, title="Backtest", icon=":material/science:"),
+            st.Page(render_scanner_tab, title="Strategy scanner", icon=":material/radar:"),
+            st.Page(render_scan_history_tab, title="Scan history", icon=":material/history:"),
+        ],
+        "Trading": [
+            st.Page(render_accounts_tab, title="Accounts", icon=":material/account_balance:"),
+            st.Page(render_execution_tab, title="Trade execution", icon=":material/sync_alt:"),
+            st.Page(render_auto_trading_tab, title="Auto trading", icon=":material/smart_toy:"),
+        ],
+        "Settings": [
+            st.Page(render_settings_page, title="Settings", icon=":material/settings:"),
+        ],
+    }
+    page = st.navigation(pages, position="sidebar")
+
     with st.sidebar:
+        st.divider()
         st.write(f"Logged in as **{username}**")
         authenticator.logout("Log out", "sidebar")
 
     st.title("Trading Bot Backtester")
-
-    tab_backtest, tab_scanner, tab_history, tab_accounts, tab_execution, tab_auto, tab_keys = st.tabs(
-        ["Backtest", "Strategy Scanner", "Scan History", "Accounts", "Trade Execution", "Auto Trading", "API Keys"]
-    )
-    with tab_backtest:
-        pending_backtest = render_backtest_tab()
-    with tab_scanner:
-        render_scanner_tab()
-    with tab_history:
-        render_scan_history_tab()
-    with tab_accounts:
-        render_accounts_tab()
-    with tab_execution:
-        render_execution_tab()
-    with tab_auto:
-        render_auto_trading_tab()
-    with tab_keys:
-        render_api_keys_tab()
-
-    # Deferred until every tab has fully rendered: a backtest blocks the
-    # script for its whole duration, and running it inside the tab block
-    # left every later tab (Scanner onward) looking stuck mid-load until it
-    # finished. Down here the page is complete first; results still land in
-    # the Backtest tab via its own container.
-    if pending_backtest is not None:
-        params, results_container = pending_backtest
-        execute_backtest(params, results_container)
+    page.run()
 
 
 if __name__ == "__main__":

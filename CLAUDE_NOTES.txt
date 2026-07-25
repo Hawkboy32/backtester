@@ -21,9 +21,12 @@ machine. Entry point: app.py.
   Tastytrade), accounts.py, execution.py, execution_log.py, auto_trader_state.py,
   universe.py (S&P 500 / Nasdaq-100), keystore.py (Polygon key only), saved_configs.json
   store, volatility.py (GARCH vol regime + sizing, see below), live_trades.py +
-  position_attribution.py + roster.py (adaptive roster, see below).
-- app.py — Streamlit dashboard, 7 tabs: Backtest, Strategy Scanner, Scan History, Accounts,
-  Trade Execution, Auto Trading, API Keys.
+  position_attribution.py + roster.py (adaptive roster, see below), app_settings.py
+  (dashboard-wide execution-cost defaults, see reorg note below).
+- app.py — Streamlit dashboard. As of 2026-07-25 (task #32) it uses GROUPED st.navigation
+  (st.Page callables), NOT flat st.tabs. Sidebar sections: Overview (daily-glance home) /
+  Research (Backtest, Strategy Scanner, Scan History) / Trading (Accounts, Trade Execution,
+  Auto Trading) / Settings. See the reorg note below for what moved where.
 - auto_trader.py — standalone background process for automated trading. Coordinates with
   the dashboard purely through files in auto_trader_state/ (control.json / status.json),
   not a Streamlit-managed thread — deliberate, so it survives closing the dashboard.
@@ -34,9 +37,10 @@ machine. Entry point: app.py.
   independently re-verified since. If data calls start failing with 404/auth errors,
   re-check this before assuming the code broke.
 - Brokers implemented (real, verified SDKs): Alpaca (stocks/crypto, paper+live), Coinbase,
-  Kraken, Tastytrade.
-- Explicitly NOT implemented: Interactive Brokers (no docs access this session — revisit),
-  Robinhood, Webull, Trading 212, Plum, eToro (none have a verified public trading API;
+  Kraken, Tastytrade, Interactive Brokers (US equities via ib_async + local gateway — added
+  2026-07-25 task #30, see the IBKR section below).
+- Explicitly NOT implemented: Robinhood, Webull, Trading 212, Plum, eToro (none have a
+  verified public trading API;
   building against them would mean reverse-engineering private endpoints, which this
   project does not do — ToS/account-suspension/unauthorized-access risk).
 
@@ -473,6 +477,100 @@ machine. Entry point: app.py.
   order: dashboard reorg (#32, unblocks the Research section) -> backtest playlist runner
   (#37) + roster diversification (#35) -> the metrics/learning bits. Direction = learning-
   first / max-data via broad diverse backtests. Nothing is running; safe to build freely.
+
+=== DASHBOARD REORG DONE (#32) — grouped nav + Overview home + full settings consolidation (2026-07-25) ===
+- app.py moved from 7 flat st.tabs to GROUPED st.navigation via callable st.Page (Streamlit
+  1.59.2 supports a Callable page target). Sidebar sections (Material Symbols icons):
+    Overview (ungrouped daily-glance HOME) / Research (Backtest, Strategy Scanner, Scan
+    History) / Trading (Accounts, Trade Execution, Auto Trading) / Settings.
+  KEY: every existing render_*_tab() body is UNCHANGED — the reorg re-arranges placement only,
+  it does not rewrite feature logic. main() is the main thing rewritten; render_backtest_page()
+  is a thin wrapper that runs the deferred backtest inline (the old defer-to-end-of-main hack is
+  gone — single-page nav has no sibling tabs to look stuck).
+- NEW Overview home (render_overview_page): bot status row + kill switch (shared helper
+  _render_bot_status, also used by Auto Trading so both show the same truth), live P&L positions
+  (reuses _render_live_positions over control.account_ids in an st.fragment), and recent trades
+  (execution_log.load_log). Kill switch reachable here AND on Auto Trading (distinct keys
+  kill_overview / kill_auto).
+- FULL settings consolidation into a new Settings page (render_settings_page): API keys + phone
+  notifications (was the API Keys tab) + EXECUTION-COST DEFAULTS + ACCOUNT-RISK LIMIT.
+    * Execution-cost defaults: new module src/backtester/app_settings.py -> app_settings.json
+      (gitignored, project root, like saved_configs.json). Backtest/Scanner commission+slippage
+      number_inputs now source their value= default from app_settings.load_settings() (was
+      hardcoded 0.0/2.0); the large/small-cap preset buttons moved OUT of those sidebars into
+      Settings. Saving in Settings also writes the bt_commission/bt_slippage/scan_comm/scan_slip
+      session keys so the change applies immediately, not just on a fresh session. Per-run
+      overrides + saved-config loads still win via session_state, unchanged. Dead helpers
+      _apply_cost_preset/_render_cost_presets were removed (constants kept).
+    * Account-risk max-drawdown breaker: MOVED from the Auto Trading tab to Settings. Settings
+      saves it via load_control()->set the two fields->save_control() (load-mutate-save). The
+      Auto Trading "Save configuration" builder now CARRIES max_drawdown_enabled/pct FORWARD from
+      the loaded control (was reading now-removed widgets) so it can never clobber the
+      Settings-owned value. VERIFIED via a temp-path round-trip clobber test (17% set in Settings
+      survived an Auto Trading save; real control.json never touched).
+- Auto Trading tab SLIMMED: status via shared helper; bar/unit/poll, sizing, max-trades/day, and
+  GARCH vol-targeting pushed behind an "Advanced settings" expander; mode + roster + target
+  accounts + save + start/stop/kill stay visible. A caption points to Settings for the risk limit.
+- Light position de-dup: the Accounts "Current positions" panel was removed (live P&L now on
+  Overview); a caption points there. Trade Execution keeps its own positions (coupled to its
+  close-position action). Accounts keeps balances.
+- VERIFIED end-to-end in the real dashboard (throwaway qa_temp auth user added then removed;
+  [redacted-dashboard-username] untouched): clean boot, all 8 nav destinations render with 0 st.exceptions and no
+  console errors, Overview showed the real disarmed-but-running bot + real AEP position w/ live
+  P&L + recent-trades log, cost-default propagation Settings->Backtest confirmed (10 bps flowed
+  through), account-risk clobber test passed. Cleanup: qa_temp removed, my test app_settings.json
+  deleted (reverts to 0/2 defaults), control.json confirmed byte-unchanged, preview server stopped.
+- NEXT per the roadmap: #30 IBKR (now has a clean Accounts/Trading home), then research bits
+  (#25 conviction logging, #21 news), then IG (#31). Reorg was the blocker for #30/#31.
+- Also added .claude/launch.json already existed (backtester-dashboard on 8501 / -alt on 8502)
+  for the preview tool; runs `streamlit run backtester/app.py` from the APP_FOLDER_AI root.
+
+=== INTERACTIVE BROKERS (IBKR) ADDED (#30) — real US-equity execution via ib_async (2026-07-25) ===
+- 5th broker. Scope: US equities only (same instruments as Alpaca, reuses the Polygon equities
+  data path). Forex/CFDs are OUT of scope (that's #31/IG). IBKR is the "longevity / real assets,
+  unleveraged" broker from BROKER_EXPANSION_RESEARCH.md.
+- SDK: `ib_async` (2.1.0, maintained ib_insync successor) — added to requirements.txt +
+  pyproject.toml. Pulled in nest_asyncio + aeventkit, and PINNED tzdata DOWN to 2025.3
+  (ib_async requires tzdata<2026). Confirmed pandas 3.0.3 / streamlit 1.59.2 still import fine.
+- THE KEY DIFFERENCE from every other broker: IBKR has NO API key/secret. It connects to a local
+  IB Gateway / Trader Workstation the USER runs and logs into; auth lives in that gateway. So an
+  IBKR account is defined by non-secret connection config (host, port, clientId, IBKR account
+  code), NOT keyring secrets. accounts.py stores these as plain metadata in broker_accounts.json:
+  BROKER_META['ibkr'] has `uses_gateway=True`; add_account() gained a `conn_params` arg and skips
+  keyring for gateway brokers; build_broker_accounts() builds IBKRBroker from conn_params and skips
+  the keyring-secret requirement. The other 4 brokers' keyring path is untouched (verified).
+- brokers/ibkr.py — IBKRBroker(BrokerAccount). CONNECT-PER-OPERATION model (a _connect() context
+  manager: ensures an asyncio event loop in the current thread — needed off the main thread in both
+  Streamlit and the auto_trader process — connects with a JITTERED clientId to dodge "id already in
+  use", disconnects in finally). get_market_clock() is REAL US-equity hours parsed from IBKR's own
+  reqContractDetails(SPY).liquidHours (handles holidays: an explicit CLOSED day reads as closed, NOT
+  a fall-through to the heuristic — this matters so the auto_trader market-hours guard still protects
+  IBKR; a gateway-down/parse-fail falls back to a NYSE 9:30-16:00 ET weekday heuristic, flagged
+  approximate). get_open_order_tickers() via reqAllOpenOrders (dedup guard). Bracket orders build a
+  MARKET-parent trio by hand (ib_async's bracketOrder() forces a LIMIT parent). get_equity_history()
+  raises NotImplementedError (TWS API has no portfolio-equity series — same as Coinbase/Kraken; the
+  balances chart skips it).
+- Dashboard: the Accounts "Link a new account" form branches on uses_gateway — for IBKR it shows
+  host / port / clientId / account-code inputs (NOT password-masked) instead of key/secret, defaults
+  port 4002 (IB Gateway paper; 4001 live; TWS 7497/7496). A per-IBKR "Gateway 🟢 reachable / 🔴
+  unreachable" chip in the accounts table (cached 30s via check_gateway_reachable) — kept SEPARATE
+  from market status because get_market_clock() deliberately falls back to the heuristic when the
+  gateway is down, so it can't signal unreachable itself.
+- VERIFIED: (a) mocked-SDK unit tests for all 7 methods incl. bracket construction, failed-order
+  error surfacing, clock parsing (incl. holiday), NotImplementedError; (b) account-store round-trip
+  add/list/build/remove with NO keyring touched, other 4 brokers still require keyring; (c) LIVE in
+  the dashboard: the link form renders the IBKR gateway inputs (key/secret hidden), and a seeded IBKR
+  account showed the "🔴 Gateway unreachable" chip correctly alongside the 3 real accounts, 0
+  exceptions; (d) check_gateway_reachable fails safe (False, ~2-3s) with no gateway. NOTE: the
+  Broker selectbox hit the documented browser-automation quirk again (won't commit a change) — the
+  form was click-verified instead by temporarily defaulting the selectbox index to IBKR (reverted).
+- STILL PENDING (needs the USER's gateway): the real paper CONNECTION test — connect to a running IB
+  Gateway (paper login, API enabled on 4002), fetch a real snapshot/positions/market-clock, place one
+  tiny paper order, and confirm the connect-per-op lifecycle works cleanly from Streamlit's thread AND
+  a standalone script mimicking auto_trader. USER SETUP: install IB Gateway, log into the PAPER
+  account, Configure → Settings → API → enable "ActiveX and Socket Clients", note the socket port
+  (4002 paper), add 127.0.0.1 to trusted IPs. Then link it in the Accounts tab and the chip should go
+  🟢. Live account stays behind the existing is_paper=False + confirmation gates.
 
 === VERSION CONTROL / GITHUB (set up 2026-07-21) ===
 - backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester

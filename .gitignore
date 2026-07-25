@@ -11,6 +11,7 @@ results/
 logs/
 auto_trader_state/
 saved_configs.json
+app_settings.json
 scan_history.db
 live_trades.db
 # belt-and-braces catch-alls for anything personal/generated
