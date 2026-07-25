@@ -10,9 +10,10 @@ import hashlib
 import json
 import subprocess
 import sys
+import time
 from collections import Counter
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -55,10 +56,11 @@ from backtester.strategies import STRATEGY_REGISTRY, build_strategy, strategy_re
 from backtester.strategies.sma_crossover import SmaCrossoverStrategy
 from backtester.universe import UNIVERSE_REGISTRY, load_universe, sector_for_ticker
 from backtester.walkforward import aggregate_walkforward, run_walkforward_scan
-from backtester import account_risk, app_settings, live_trades, notifications, position_attribution, roster, volatility
+from backtester import account_risk, app_settings, live_trades, notifications, playlist, position_attribution, roster, volatility
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 AUTO_TRADER_SCRIPT = PROJECT_ROOT / "auto_trader.py"
+SCAN_RUNNER_SCRIPT = PROJECT_ROOT / "scan_runner.py"
 LIVE_ARM_PHRASE = "I ARM LIVE AUTO-TRADING"
 
 st.set_page_config(page_title="Backtester Dashboard", layout="wide")
@@ -2123,6 +2125,196 @@ def render_scan_history_tab() -> None:
             st.rerun()
 
 
+def _launch_scan_runner_process() -> None:
+    kwargs = {"cwd": str(PROJECT_ROOT)}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen([sys.executable, str(SCAN_RUNNER_SCRIPT)], **kwargs)
+    st.session_state["scan_runner_proc"] = proc
+
+
+def render_playlist_page() -> None:
+    st.subheader("Backtest playlist")
+    st.caption(
+        "Queue several scans and let them run unattended in a separate process — it keeps "
+        "going after you close this tab. Results land in **Scan history** exactly like a "
+        "manual scan. This is the bulk data-gathering path: broad, varied backtests build the "
+        "dataset that future learning features train on."
+    )
+
+    items = playlist.load_playlist()
+    status = playlist.load_status()
+
+    heartbeat_stale = True
+    if status.last_heartbeat:
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(status.last_heartbeat)).total_seconds()
+            heartbeat_stale = age > 900  # a ticker can legitimately take minutes at 5 req/min
+        except ValueError:
+            heartbeat_stale = True
+    runner_alive = status.running and not heartbeat_stale
+
+    pending_count = sum(1 for i in items if i.status == playlist.PENDING)
+    done_count = sum(1 for i in items if i.status == playlist.DONE)
+
+    st.markdown("### Runner")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Runner", "🟢 Running" if runner_alive else "🔴 Not running")
+    m2.metric("Queued", pending_count)
+    m3.metric("Completed", done_count)
+    m4.metric("Failed", sum(1 for i in items if i.status == playlist.FAILED))
+
+    if runner_alive and status.current_label:
+        st.progress(
+            min(max(status.current_progress, 0.0), 1.0),
+            text=f"{status.current_label} — {status.current_ticker or 'starting'}",
+        )
+    if status.running and heartbeat_stale:
+        st.warning(
+            "The runner is flagged as running but hasn't sent a heartbeat in a while — it was "
+            "probably killed (laptop sleep, reboot). Starting again is safe: finished tickers "
+            "are checkpointed and won't be re-fetched."
+        )
+    if status.last_error:
+        st.error(f"Last error: {status.last_error}")
+
+    rc1, rc2, rc3 = st.columns(3)
+    with rc1:
+        if st.button("▶ Start runner", type="primary", disabled=runner_alive or pending_count == 0):
+            playlist.request_stop(False)
+            _launch_scan_runner_process()
+            st.success("Runner started. It works through the queue and exits when it's empty.")
+            time.sleep(1.5)
+            st.rerun()
+    with rc2:
+        if st.button("⏹ Stop after current ticker", disabled=not runner_alive):
+            playlist.request_stop(True)
+            st.info("Stop requested — the runner finishes the current ticker, then stops. "
+                    "The in-progress scan goes back to queued and resumes from its checkpoint.")
+            st.rerun()
+    with rc3:
+        if st.button("🔄 Refresh"):
+            st.rerun()
+
+    st.divider()
+    st.markdown("### Queue")
+    if not items:
+        st.caption("Nothing queued yet — add a scan below.")
+    else:
+        icons = {playlist.PENDING: "⏳", playlist.RUNNING: "▶️", playlist.DONE: "✅",
+                 playlist.FAILED: "❌", playlist.CANCELLED: "⛔"}
+        for pos, item in enumerate(items):
+            with st.container(border=True):
+                head, actions = st.columns([5, 2])
+                with head:
+                    st.markdown(f"{icons.get(item.status, '•')} **{item.describe()}**")
+                    bits = [f"status: `{item.status}`"]
+                    if item.run_id:
+                        bits.append(f"scan run #{item.run_id}")
+                    if item.num_results is not None:
+                        bits.append(f"{item.num_results} results")
+                    if item.vol_target_enabled:
+                        bits.append("GARCH on")
+                    if item.event_filter_enabled:
+                        bits.append("event step-out on")
+                    st.caption(" · ".join(bits))
+                    if item.error:
+                        st.error(item.error)
+                with actions:
+                    a1, a2, a3 = st.columns(3)
+                    if a1.button("↑", key=f"up_{item.id}", disabled=pos == 0,
+                                 help="Move earlier in the queue"):
+                        playlist.move_item(item.id, -1)
+                        st.rerun()
+                    if a2.button("↓", key=f"down_{item.id}", disabled=pos == len(items) - 1,
+                                 help="Move later in the queue"):
+                        playlist.move_item(item.id, 1)
+                        st.rerun()
+                    if a3.button("🗑", key=f"del_{item.id}", disabled=item.status == playlist.RUNNING,
+                                 help="Remove from the queue"):
+                        playlist.remove_item(item.id)
+                        st.rerun()
+                    if item.status in (playlist.DONE, playlist.FAILED):
+                        if st.button("Re-queue", key=f"requeue_{item.id}"):
+                            playlist.reset_item(item.id)
+                            st.rerun()
+
+        if any(i.status in playlist.TERMINAL for i in items) and st.button("Clear finished items"):
+            playlist.clear_finished()
+            st.rerun()
+
+    st.divider()
+    st.markdown("### Add a scan to the queue")
+    costs = app_settings.load_settings()
+    with st.form("playlist_add"):
+        label = st.text_input("Label (optional)", placeholder="e.g. 'S&P 500 · 3 months · hourly'")
+        c1, c2 = st.columns(2)
+        with c1:
+            universe_name = st.selectbox("Universe", options=list(UNIVERSE_REGISTRY.keys()))
+            max_tickers = st.number_input("Number of tickers", min_value=1, max_value=503, value=25)
+            multiplier = st.number_input("Bar multiplier", min_value=1, value=1)
+            timespan = st.selectbox("Bar unit", ["minute", "hour", "day"])
+        with c2:
+            from_date = st.date_input("From", value=date.today() - timedelta(days=30))
+            to_date = st.date_input("To", value=date.today())
+            requests_per_minute = st.number_input(
+                "Polygon requests/minute", min_value=1, value=5,
+                help="Match your Polygon plan. The runner honours this for every item.",
+            )
+            max_workers = st.number_input("Worker threads", min_value=1, max_value=16, value=4)
+        strategy_names = st.multiselect(
+            "Strategies", options=list(STRATEGY_REGISTRY.keys()),
+            default=list(STRATEGY_REGISTRY.keys()),
+        )
+        f1, f2 = st.columns(2)
+        with f1:
+            vol_target_enabled = st.checkbox("GARCH volatility filter + sizing (doubles API calls)")
+            target_vol_ann = st.number_input("Target annualized vol (%)", min_value=1.0, value=20.0)
+        with f2:
+            event_filter_enabled = st.checkbox("Skip entries on FOMC days")
+            starting_cash = st.number_input("Starting cash ($)", min_value=100.0, value=100_000.0, step=1000.0)
+
+        submitted = st.form_submit_button("Add to queue", type="primary")
+        if submitted:
+            if not strategy_names:
+                st.error("Select at least one strategy.")
+            elif from_date >= to_date:
+                st.error("'From' must be before 'To'.")
+            else:
+                playlist.add_item(playlist.PlaylistItem(
+                    label=label.strip(),
+                    universe=universe_name,
+                    max_tickers=int(max_tickers),
+                    strategy_names=strategy_names,
+                    from_date=str(from_date),
+                    to_date=str(to_date),
+                    multiplier=int(multiplier),
+                    timespan=timespan,
+                    starting_cash=starting_cash,
+                    commission_per_trade=costs["commission"],
+                    slippage_bps=costs["slippage_bps"],
+                    requests_per_minute=int(requests_per_minute),
+                    max_workers=int(max_workers),
+                    vol_target_enabled=vol_target_enabled,
+                    target_vol_ann=target_vol_ann,
+                    event_filter_enabled=event_filter_enabled,
+                ))
+                st.success("Added to the queue.")
+                st.rerun()
+
+    calls = sum(i.max_tickers * (2 if i.vol_target_enabled else 1)
+                for i in items if i.status == playlist.PENDING)
+    if calls:
+        slowest = min((i.requests_per_minute for i in items if i.status == playlist.PENDING), default=5)
+        st.caption(
+            f"Queued work: ~{calls} API calls at {slowest}/min ≈ {calls / slowest / 60:.1f} hours "
+            "minimum, before per-ticker backtest compute. Scans are checkpointed, so stopping "
+            "and restarting doesn't lose progress."
+        )
+
+
 def _render_bot_status(status, control, *, kill_switch: bool = True, kill_key: str = "kill_switch_btn") -> bool:
     """Auto-trader status row (process / armed / trades today / killed) plus the
     last signal/error and an optional kill switch. Shared by the Overview home
@@ -2303,6 +2495,7 @@ def main() -> None:
         "Research": [
             st.Page(render_backtest_page, title="Backtest", icon=":material/science:"),
             st.Page(render_scanner_tab, title="Strategy scanner", icon=":material/radar:"),
+            st.Page(render_playlist_page, title="Backtest playlist", icon=":material/queue_music:"),
             st.Page(render_scan_history_tab, title="Scan history", icon=":material/history:"),
             st.Page(render_news_page, title="News", icon=":material/newspaper:"),
         ],
