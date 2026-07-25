@@ -16,7 +16,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from backtester.auto_trader_state import STATE_DIR
+from backtester.auto_trader_state import STATE_DIR, atomic_write_text
 
 PATH = STATE_DIR / "positions.json"
 
@@ -36,7 +36,7 @@ def load_map() -> dict[str, dict]:
 
 def save_map(data: dict[str, dict]) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    atomic_write_text(PATH, json.dumps(data, indent=2))
 
 
 def record_open(account_id: str, ticker: str, strategy_name: str, conviction: float | None = None) -> None:

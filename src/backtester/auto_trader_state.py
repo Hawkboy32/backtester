@@ -12,12 +12,52 @@ trading.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 STATE_DIR = Path(__file__).resolve().parent.parent.parent / "auto_trader_state"
 CONTROL_PATH = STATE_DIR / "control.json"
 STATUS_PATH = STATE_DIR / "status.json"
+
+
+def atomic_write_text(path: Path, text: str, replace_attempts: int = 20) -> None:
+    """Write a state file so a concurrent reader can never see a half-written
+    one. Plain `write_text` truncates first and fills after, leaving a window
+    where a reader gets invalid JSON — for control.json that used to be read as
+    "corrupt" and therefore killed=True, silently stopping a running bot when
+    the dashboard merely saved a config. Write to a temp file in the same
+    directory, then os.replace (atomic on Windows and POSIX).
+
+    Windows caveat, found by testing this under a hammering reader: os.replace
+    raises PermissionError (WinError 5) if the DESTINATION is open in another
+    process at that instant, because Python opens files without
+    FILE_SHARE_DELETE. A reader's open() lasts microseconds, so retry briefly
+    rather than propagating a spurious failure into the dashboard's save path.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        for attempt in range(replace_attempts):
+            try:
+                os.replace(tmp_name, path)
+                return
+            except PermissionError:
+                if attempt == replace_attempts - 1:
+                    raise
+                time.sleep(0.02)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 @dataclass
@@ -40,6 +80,9 @@ class AutoTraderControl:
     # of the single strategy_name/tickers pair above — those fields are ignored when this is True
     max_drawdown_enabled: bool = False  # account-level circuit breaker (see backtester.account_risk)
     max_drawdown_pct: float = 10.0  # % below peak equity that hard-blocks new entries for that account
+    block_event_days: bool = True  # skip NEW entries on known risk-event days (FOMC — see backtester.events).
+    # Defaults ON, unlike the other opt-in filters: it's a pure step-out safety net ("don't sell
+    # insurance during a flood warning") and only takes effect on a deliberate (re)start.
 
 
 @dataclass
@@ -57,21 +100,34 @@ def _ensure_dir() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_control() -> AutoTraderControl:
+def load_control_checked(attempts: int = 3) -> tuple[AutoTraderControl, bool]:
+    """(control, readable). `readable` is False only when the file exists but
+    could not be parsed after `attempts` tries — callers use it to tell a
+    GENUINE kill switch apart from an unreadable file, which must never be
+    mistaken for a deliberate stop (see main()'s exit condition).
+    """
     _ensure_dir()
     if not CONTROL_PATH.exists():
-        return AutoTraderControl()
-    try:
-        data = json.loads(CONTROL_PATH.read_text(encoding="utf-8"))
-        return AutoTraderControl(**data)
-    except Exception:
-        # Malformed control file -> fail closed: disarmed AND killed, never "trade anyway".
-        return AutoTraderControl(enabled=False, killed=True)
+        return AutoTraderControl(), True
+    for attempt in range(attempts):
+        try:
+            data = json.loads(CONTROL_PATH.read_text(encoding="utf-8"))
+            return AutoTraderControl(**data), True
+        except Exception:
+            # Writes are atomic now, so this should be unreachable in practice;
+            # retry anyway before concluding the file is genuinely corrupt.
+            if attempt < attempts - 1:
+                time.sleep(0.05)
+    # Malformed control file -> fail closed: disarmed AND killed, never "trade anyway".
+    return AutoTraderControl(enabled=False, killed=True), False
+
+
+def load_control() -> AutoTraderControl:
+    return load_control_checked()[0]
 
 
 def save_control(control: AutoTraderControl) -> None:
-    _ensure_dir()
-    CONTROL_PATH.write_text(json.dumps(asdict(control), indent=2), encoding="utf-8")
+    atomic_write_text(CONTROL_PATH, json.dumps(asdict(control), indent=2))
 
 
 def load_status() -> AutoTraderStatus:
@@ -86,8 +142,7 @@ def load_status() -> AutoTraderStatus:
 
 
 def save_status(status: AutoTraderStatus) -> None:
-    _ensure_dir()
-    STATUS_PATH.write_text(json.dumps(asdict(status), indent=2), encoding="utf-8")
+    atomic_write_text(STATUS_PATH, json.dumps(asdict(status), indent=2))
 
 
 def trigger_kill_switch() -> None:

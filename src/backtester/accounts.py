@@ -25,6 +25,7 @@ from backtester.brokers.coinbase import CoinbaseBroker
 from backtester.brokers.ibkr import IBKRBroker
 from backtester.brokers.kraken import KrakenBroker
 from backtester.brokers.tastytrade_broker import TastytradeBroker
+from backtester.auto_trader_state import atomic_write_text
 
 ACCOUNTS_PATH = Path(__file__).resolve().parent.parent.parent / "broker_accounts.json"
 KEYRING_SERVICE = "backtester-dashboard"
@@ -79,7 +80,7 @@ def _load_raw() -> list[dict]:
 
 
 def _save_raw(accounts: list[dict]) -> None:
-    ACCOUNTS_PATH.write_text(json.dumps(accounts, indent=2), encoding="utf-8")
+    atomic_write_text(ACCOUNTS_PATH, json.dumps(accounts, indent=2))
 
 
 def _keyring_key(account_id: str, field: str) -> str:

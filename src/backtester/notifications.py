@@ -21,7 +21,7 @@ import json
 
 import requests
 
-from backtester.auto_trader_state import STATE_DIR
+from backtester.auto_trader_state import STATE_DIR, atomic_write_text
 
 CONFIG_PATH = STATE_DIR / "notifications.json"
 NTFY_BASE = "https://ntfy.sh"
@@ -39,7 +39,7 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    atomic_write_text(CONFIG_PATH, json.dumps(cfg, indent=2))
 
 
 def _send_ntfy(topic: str, title: str, message: str, priority: str | None = None) -> bool:

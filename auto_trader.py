@@ -50,8 +50,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from backtester import account_risk, accounts as accounts_module
-from backtester import live_trades, notifications, position_attribution, roster, volatility
-from backtester.auto_trader_state import AutoTraderStatus, load_control, load_status, save_status
+from backtester import events, live_trades, notifications, position_attribution, roster, volatility
+from backtester.auto_trader_state import (
+    AutoTraderStatus, load_control, load_control_checked, load_status, save_status,
+)
 from backtester.brokers.base import BrokerAccount, OrderSide
 from backtester.data import PolygonClient, PolygonError
 from backtester.execution import AccountOrder, SizingMode, compute_qty_for_account, execute_order_across_accounts
@@ -166,6 +168,17 @@ def _trade_target(
 
     if signal.value == "hold":
         return
+
+    # Proactive step-out: never open NEW positions on a known risk-event day
+    # (FOMC). Complements the reactive GARCH storm block below — this one fires
+    # BEFORE the event moves the market. Sells fall through untouched.
+    if control.block_event_days and signal.value == "buy":
+        today_date = datetime.now(timezone.utc).date()
+        reason = events.event_reason(today_date, ticker)
+        if reason is not None:
+            status.last_signal = f"{ticker}/{strategy_name}: BUY blocked — {reason} (event step-out)"
+            save_status(status)
+            return
 
     size_multiplier = 1.0
     if control.vol_target_enabled:
@@ -342,6 +355,16 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
 
     status.last_error = None
 
+    # The event calendar is a static list (updated annually). If today is past
+    # its coverage, is_event_day() silently returning False would mean "no
+    # data", not "no event" — surface that instead of trading blind through
+    # an unlisted FOMC meeting.
+    if control.block_event_days and not events.calendar_covers(datetime.now(timezone.utc).date()):
+        status.last_error = (
+            f"event calendar only covers through {events.CALENDAR_COVERS_THROUGH} — "
+            "update backtester/src/backtester/events.py with the Fed's newer meeting dates"
+        )
+
     # Market-hours guard: never trade an account whose market is closed. Overnight,
     # the data feed keeps returning the previous session's final bar (stale), so a
     # mean-reversion strategy re-fires the same signal every cycle and — because a
@@ -437,13 +460,20 @@ def main() -> None:
     print(f"Auto-trader starting (pid={os.getpid()}).")
     try:
         while True:
-            control = load_control()
+            control, readable = load_control_checked()
             status = run_cycle(status)
-            if control.killed:
+            # Only a GENUINE kill switch stops the process. An unreadable control
+            # file also fails closed (run_cycle won't trade), but exiting on it
+            # would mean a transient read problem silently kills the bot — the
+            # exact "silence looks like no trades" failure mode we've been bitten
+            # by before. Stay alive, keep the heartbeat, don't trade.
+            if control.killed and readable:
                 print("Kill switch engaged — stopping.")
                 status.running = False
                 save_status(status)
                 break
+            if not readable:
+                print("Control file unreadable — not trading this cycle, staying alive.")
             time.sleep(max(control.poll_interval_seconds, 5))
     except KeyboardInterrupt:
         status.running = False

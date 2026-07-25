@@ -21,7 +21,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from backtester.auto_trader_state import STATE_DIR
+from backtester.auto_trader_state import STATE_DIR, atomic_write_text
 
 PATH = STATE_DIR / "account_risk.json"
 
@@ -37,7 +37,7 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    atomic_write_text(PATH, json.dumps(state, indent=2))
 
 
 def check_and_update(account_id: str, current_equity: float, max_drawdown_pct: float) -> tuple[bool, str | None]:
