@@ -718,6 +718,53 @@ machine. Entry point: app.py.
   trader must use atomic_write_text, never write_text. memory_report.py's outputs are exempt
   (report artifacts, never concurrently read).
 
+=== ROSTER DIVERSIFICATION (#35, 2026-07-25, commit 70829f9) ===
+- Problem it fixes: the live roster was 3/3 Bollinger Mean Reversion. One broken edge would
+  take down the whole book at once. evaluate_roster now caps how many ACTIVE combos share a
+  strategy (RosterConfig.max_per_strategy, default 2) or a sector (max_per_sector, default 2),
+  keeping the highest-scored and holding the rest as candidates; a capped demotion writes a
+  readable audit event to roster_events.jsonl.
+- Sectors come from the existing constituent CSVs via new cached universe.sector_for_ticker().
+  A ticker with an UNKNOWN sector is never blocked (rather than lumping all unknowns into one
+  fake bucket). The two CSVs use different sector taxonomies (S&P GICS "Information Technology"
+  vs the Nasdaq page's "Technology") — fine for "don't concentrate", don't rely on it for
+  anything needing a canonical taxonomy.
+- NOTHING CHANGES SILENTLY: promotion only happens on the manual "Re-evaluate roster now" click,
+  and apply_demotion_checks (the every-cycle path) never promotes. The existing roster stays as
+  it is until the user re-evaluates. Verified against a reproduction of the real 3x Bollinger
+  roster: cap=2 keeps the two highest-scored and demotes the third with the reason logged.
+- The roster table gained a `sector` column and a concentration readout that WARNS when every
+  active slot shares a strategy or sector. Confirmed live against the real roster: "3 combo(s)
+  across 1 strategy(s) and 3 sector(s). Largest: 3/3 on Bollinger Mean Reversion".
+
+=== BACKTEST PLAYLIST RUNNER (#37, 2026-07-25, commit 3c257a8) ===
+- What: queue several scan configs and let a STANDALONE process work through them unattended —
+  the bulk data-gathering path for the learning-first direction. Same architecture as
+  auto_trader.py (separate process + file-based coordination) for the same reason: a 50-ticker
+  scan took ~4.5h and shouldn't be tied to a browser tab.
+- Files: src/backtester/playlist.py (queue + status store, both written via atomic_write_text
+  since dashboard AND runner write them; unknown fields on load are ignored rather than dropping
+  the queue) and scan_runner.py at the project root. State lives in auto_trader_state/
+  playlist.json + playlist_status.json (already covered by the gitignore's auto_trader_state/).
+- SAFETY: scan_runner NEVER TRADES. No arming, no kill switch, no broker imports — it only
+  fetches market data and writes to scan_history.db. The only control it honours is "stop after
+  the current ticker".
+- Each item records into scan_history.db exactly like a manual scan (meta gets source="playlist"),
+  and reuses the Scanner's checkpoint hash so an interrupted item resumes without re-fetching.
+  A stop request returns the item to PENDING (resumable), never FAILED. Singleton heartbeat guard
+  prevents two runners duplicating scans / doubling API spend against the 5 req/min limit.
+- Dashboard: "Backtest playlist" page under Research (runner status + progress bar, start/stop,
+  queue add/remove/reorder/re-queue, estimated runtime for the queued work).
+- REAL DEFECT CAUGHT BY TESTING: a failure BEFORE run_scan (bad universe name, client
+  construction) escaped run_item's try/except, stranding the item in "running" forever AND
+  aborting the whole queue. Fixed by moving all per-item setup inside the try plus a
+  belt-and-braces handler in the main loop; verified a failing item is marked FAILED with its
+  error and the next item still runs.
+- Verified: store CRUD/reorder, full two-item run recording 2 scan_history runs, clean exit on
+  empty queue, failure isolation, re-queue, mid-run stop leaving the item resumable, and the
+  singleton guard (blocks a live second runner, takes over from a dead one). Add + delete were
+  also round-tripped through the real browser UI.
+
 === VERSION CONTROL / GITHUB (set up 2026-07-21) ===
 - backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester
   (verified private: anonymous fetch 404s). Purpose: enables working on the project from a
