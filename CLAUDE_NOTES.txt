@@ -604,6 +604,30 @@ machine. Entry point: app.py.
   add on the same st.dataframe grid; engine attach unit-proven), not click-run (avoided driving the
   ticker/date form + a Polygon fetch at session end). NOT YET COMMITTED as of this note.
 
+=== NEWS CONTEXT PANEL (#21) — read-only headlines per ticker (2026-07-25) ===
+- A read-only Research → News page: enter a ticker, see recent Polygon headlines with publisher,
+  time, sentiment badge, and description. Nothing here places or influences a trade — human context
+  only, AND the data source a future task will feed into conviction (#25 seam). Reuses the existing
+  Polygon key/client, no new dependency.
+- data.py: new PolygonClient.get_news(ticker, limit=10) — GET /v2/reference/news (endpoint verified
+  against the live massive.com docs, newest-first). Normalises each article to title/publisher/
+  published_utc/article_url/description/tickers + per-ticker sentiment pulled from the optional
+  insights[] array (matches THIS ticker case-insensitively). Not disk-cached (time-sensitive); the UI
+  wraps it in @st.cache_data(ttl=600) to respect the 5 req/min limit.
+- app.py: render_news_page() wired as the 4th Research nav page (icon newspaper). Friendly degradation:
+  no key -> points to Settings; plan lacks news (NOT_AUTHORIZED/403) -> a warning, not a traceback.
+  DISPLAY BUG FIXED during verification: financial descriptions are full of '$' which Streamlit
+  markdown renders as LaTeX math (mangled '$16 trillion'). Added _md_safe() escaping '$' -> '\$' for
+  the title/description/reasoning. Verified: get_news parsing unit-tested (picks the right ticker's
+  sentiment, handles missing fields, raises on bad status); LIVE in the dashboard the user's Polygon
+  plan DOES include news — real AAPL headlines rendered with sentiment badges + reasoning, 0 exceptions,
+  and the $-amounts render as plain text after the fix.
+- FOUR objectives shipped 2026-07-25: #32 dashboard reorg + #30 IBKR (commit 0c1e656), #25 conviction
+  logging (commit 8b3d93a), #21 news panel. All committed locally to master (not pushed — user pushes
+  via GitHub Desktop). Next roadmap items: forex/CFD data + leverage decision -> IG (#31); 2FA (#22) +
+  keyring swap -> Pi/VPN hosting. Also still pending: the IBKR real paper CONNECTION test (needs the
+  user's running IB Gateway).
+
 === VERSION CONTROL / GITHUB (set up 2026-07-21) ===
 - backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester
   (verified private: anonymous fetch 404s). Purpose: enables working on the project from a

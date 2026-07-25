@@ -171,3 +171,45 @@ class PolygonClient:
             df.to_pickle(self._cache_path(cache_key))
 
         return df
+
+    def get_news(self, ticker: str, limit: int = 10) -> list[dict]:
+        """Fetch recent news articles for a ticker via Polygon's news endpoint
+        (GET /v2/reference/news, newest first). Read-only context — headlines,
+        publisher, and (where the plan/article provides it) per-ticker sentiment
+        from the optional insights[] array. Returns a list of normalised dicts.
+
+        Not disk-cached (news is time-sensitive) — callers should wrap this in a
+        short-TTL cache to respect the rate limit. This is also the data source a
+        future task will feed into backtester.conviction (see the #21/#25 seam).
+        """
+        payload = self._get(f"{BASE_URL}/v2/reference/news", params={"ticker": ticker, "limit": limit})
+        status = payload.get("status")
+        if status not in ("OK", "DELAYED"):
+            raise PolygonError(f"Unexpected news response status: {payload}")
+
+        articles: list[dict] = []
+        for r in payload.get("results", []) or []:
+            # Per-ticker sentiment lives in the optional insights[] array — pull the
+            # entry matching THIS ticker (case-insensitive), if present.
+            sentiment = reasoning = None
+            for insight in r.get("insights", []) or []:
+                if str(insight.get("ticker", "")).upper() == ticker.upper():
+                    sentiment = insight.get("sentiment")
+                    reasoning = insight.get("sentiment_reasoning")
+                    break
+            publisher = r.get("publisher") or {}
+            articles.append(
+                {
+                    "title": r.get("title"),
+                    "publisher": publisher.get("name"),
+                    "author": r.get("author"),
+                    "published_utc": r.get("published_utc"),
+                    "article_url": r.get("article_url"),
+                    "image_url": r.get("image_url"),
+                    "description": r.get("description"),
+                    "tickers": r.get("tickers", []) or [],
+                    "sentiment": sentiment,
+                    "sentiment_reasoning": reasoning,
+                }
+            )
+        return articles

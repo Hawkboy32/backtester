@@ -2072,6 +2072,86 @@ def render_overview_page() -> None:
         st.dataframe(log_df, hide_index=True, width="stretch")
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch_news(ticker: str, limit: int) -> list[dict]:
+    """Cached ~10 min per (ticker, limit) so flipping to the News page doesn't
+    hammer Polygon's rate limit."""
+    client = PolygonClient(api_key=keystore.get_key("POLYGON_API_KEY"), use_cache=False)
+    return client.get_news(ticker, limit=limit)
+
+
+def _md_safe(text: str | None) -> str:
+    """Escape '$' so Streamlit's markdown doesn't render dollar amounts in news
+    prose as LaTeX math (financial headlines are full of '$16 trillion' etc.)."""
+    return (text or "").replace("$", "\\$")
+
+
+def _news_time(published_utc: str | None) -> str:
+    if not published_utc:
+        return ""
+    try:
+        dt = datetime.fromisoformat(published_utc.replace("Z", "+00:00"))
+        return f"{dt:%b %d, %H:%M} UTC"
+    except ValueError:
+        return published_utc
+
+
+def render_news_page() -> None:
+    """Read-only news-headlines-per-ticker panel (#21). Nothing here places or
+    influences a trade; it's context for the human, and the data source a future
+    task will feed into conviction (#25). Uses Polygon's news endpoint."""
+    st.subheader("News")
+    st.caption(
+        "Recent headlines per ticker from Polygon — read-only context. Nothing here places or "
+        "influences a trade; it's also the groundwork for feeding news sentiment into conviction later."
+    )
+    if not keystore.get_key("POLYGON_API_KEY"):
+        st.info("No Polygon API key set. Add one in **Settings → API keys** to load news.")
+        return
+
+    ticker = st.text_input("Ticker", value="AAPL", key="news_ticker").upper().strip()
+    limit = st.slider("Number of headlines", min_value=5, max_value=50, value=10, key="news_limit")
+    if not ticker:
+        st.info("Enter a ticker to see its latest headlines.")
+        return
+
+    try:
+        articles = _fetch_news(ticker, limit)
+    except PolygonError as e:
+        msg = str(e)
+        if "NOT_AUTHORIZED" in msg.upper() or "NOT ENTITLED" in msg.upper() or "403" in msg:
+            st.warning(
+                "Your Polygon plan doesn't appear to include the News endpoint — headlines need a "
+                "plan tier with news access."
+            )
+        else:
+            st.error(f"Couldn't load news for {ticker}: {msg}")
+        return
+    except Exception as e:  # noqa: BLE001 — never traceback the whole page over a news fetch
+        st.error(f"Couldn't load news for {ticker}: {e}")
+        return
+
+    if not articles:
+        st.caption(f"No recent news found for {ticker}.")
+        return
+
+    badges = {"positive": "🟢 Positive", "negative": "🔴 Negative", "neutral": "⚪ Neutral"}
+    st.caption(f"Showing {len(articles)} recent headlines for {ticker} (cached ~10 min).")
+    for a in articles:
+        with st.container(border=True):
+            title = _md_safe(a.get("title") or "(untitled)")
+            url = a.get("article_url")
+            st.markdown(f"**[{title}]({url})**" if url else f"**{title}**")
+            sentiment = (a.get("sentiment") or "").lower()
+            meta = [b for b in [a.get("publisher"), _news_time(a.get("published_utc")), badges.get(sentiment)] if b]
+            if meta:
+                st.caption(" · ".join(meta))
+            if a.get("description"):
+                st.write(_md_safe(a["description"]))
+            if a.get("sentiment_reasoning"):
+                st.caption(f"Why {sentiment}: {_md_safe(a['sentiment_reasoning'])}")
+
+
 def render_backtest_page() -> None:
     """Backtest tab wrapped as a navigation page: render the form, then run any
     pending backtest inline. The old 'defer to the end of main()' workaround only
@@ -2098,6 +2178,7 @@ def main() -> None:
             st.Page(render_backtest_page, title="Backtest", icon=":material/science:"),
             st.Page(render_scanner_tab, title="Strategy scanner", icon=":material/radar:"),
             st.Page(render_scan_history_tab, title="Scan history", icon=":material/history:"),
+            st.Page(render_news_page, title="News", icon=":material/newspaper:"),
         ],
         "Trading": [
             st.Page(render_accounts_tab, title="Accounts", icon=":material/account_balance:"),
