@@ -192,6 +192,13 @@ class IBKRBroker(BrokerAccount):
                 ib.qualifyContracts(contract)
                 action = "BUY" if side is OrderSide.BUY else "SELL"
 
+                # The REAL rejection reason (e.g. 202 "No market data ... for
+                # market order") arrives on the error event channel, not in the
+                # trade log (which may only carry cosmetic notices like the 10349
+                # TIF preset message). Collect errors for this order as they land.
+                order_errors: list[tuple[int, int, str]] = []
+                ib.errorEvent += lambda reqId, code, msg, *a: order_errors.append((reqId, code, msg))
+
                 if take_profit_price is None and stop_loss_price is None:
                     parent_trade = ib.placeOrder(contract, MarketOrder(action, qty))
                 else:
@@ -199,11 +206,44 @@ class IBKRBroker(BrokerAccount):
                         ib, contract, action, qty, take_profit_price, stop_loss_price
                     )
 
-                # Give the gateway a moment to acknowledge / (maybe) fill before we
-                # disconnect. Once transmitted the order lives on IBKR's servers, so
-                # a quick sleep is only to capture an early status, not to hold it open.
-                ib.sleep(2)
+                # IBKR delivers rejections ASYNCHRONOUSLY on its error channel —
+                # placeOrder() not raising proves nothing. (Found in live paper
+                # testing: error 202 "No market data on major exchange for market
+                # order" cancelled the order ~1s after a clean submit.) Watch the
+                # order briefly and treat a cancelled/inactive outcome as failure,
+                # surfacing the real reason from the trade log. An order still
+                # merely queued (PreSubmitted etc.) after the wait is a success —
+                # it lives on IBKR's servers after we disconnect.
+                dead_states = {"Cancelled", "ApiCancelled", "Inactive"}
+                for _ in range(5):
+                    ib.sleep(1)
+                    if parent_trade.orderStatus.status in dead_states or parent_trade.isDone():
+                        break
                 status = parent_trade.orderStatus
+                if status.status in dead_states:
+                    # The explanatory error event (e.g. 202) can land SECONDS after
+                    # the Cancelled status (observed ~3-4s in live paper testing) —
+                    # poll up to 4 more seconds, stopping as soon as it arrives.
+                    oid = parent_trade.order.orderId
+                    for _ in range(4):
+                        if any(rid == oid and code != 10349 for rid, code, _m in order_errors):
+                            break
+                        ib.sleep(1)
+                    # Prefer the error-channel reason for THIS order (skipping the
+                    # cosmetic 10349 TIF notice); fall back to the trade log.
+                    reason = next(
+                        (msg for rid, code, msg in reversed(order_errors) if rid == oid and code != 10349),
+                        None,
+                    ) or next(
+                        (e.message for e in reversed(parent_trade.log) if e.message),
+                        f"order ended {status.status} without a stated reason",
+                    )
+                    return OrderResult(
+                        account_nickname=self.nickname,
+                        success=False,
+                        broker_order_id=str(parent_trade.order.orderId),
+                        error=f"IBKR {status.status}: {reason}",
+                    )
                 filled = float(status.filled) if status and status.filled else None
                 avg = float(status.avgFillPrice) if status and status.avgFillPrice else None
                 return OrderResult(

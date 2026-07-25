@@ -564,13 +564,38 @@ machine. Entry point: app.py.
   exceptions; (d) check_gateway_reachable fails safe (False, ~2-3s) with no gateway. NOTE: the
   Broker selectbox hit the documented browser-automation quirk again (won't commit a change) — the
   form was click-verified instead by temporarily defaulting the selectbox index to IBKR (reverted).
-- STILL PENDING (needs the USER's gateway): the real paper CONNECTION test — connect to a running IB
-  Gateway (paper login, API enabled on 4002), fetch a real snapshot/positions/market-clock, place one
-  tiny paper order, and confirm the connect-per-op lifecycle works cleanly from Streamlit's thread AND
-  a standalone script mimicking auto_trader. USER SETUP: install IB Gateway, log into the PAPER
-  account, Configure → Settings → API → enable "ActiveX and Socket Clients", note the socket port
-  (4002 paper), add 127.0.0.1 to trusted IPs. Then link it in the Accounts tab and the chip should go
-  🟢. Live account stays behind the existing is_paper=False + confirmation gates.
+- LIVE PAPER CONNECTION TEST DONE (2026-07-25 afternoon, user ran IB Gateway): ALL PASSED, and it
+  caught + fixed a REAL bug. Setup note: IB Gateway has NO "Enable ActiveX and Socket Clients"
+  checkbox — that's TWS-only; the Gateway's socket API is always on (port 4002 was reachable
+  immediately). Results against the user's real paper account [redacted-demo-account-id]:
+  * Snapshot: equity $1,000,175.12 / cash $1M / BP $4M fetched through IBKRBroker. Positions: flat.
+  * Market clock: correctly "closed, next open Mon 09:30 ET" (Saturday, weekend-aware).
+  * Connect-per-op lifecycle: many sequential connect/disconnects across different clientIds, no
+    event-loop errors, no clientId collisions.
+  * Dashboard: "IBKR Paper" account LINKED (stays for the user), row shows "🟢 Gateway · 🔴 Market
+    closed · opens Mon 09:30 ET"; balances fetch clean; equity-history note degrades gracefully.
+  * DEDUP GUARD PROVEN on a real resting order: a far-below-market limit order (1 AAPL @ $100)
+    rested as Submitted and get_open_order_tickers() from a FRESH clientId saw {'AAPL'}; order then
+    cancelled (see gotcha below), account left clean, guard reads empty after.
+- REAL BUG FOUND + FIXED by the live test (commit after 4296800): submit_market_order originally
+  judged success by "placeOrder didn't raise" — but IBKR delivers rejections ASYNCHRONOUSLY on its
+  error channel. A weekend market order returned success=True then got cancelled ~1s later with
+  error 202 "No market data on major exchange for market order" (IBKR paper cancels market orders
+  when there's no market data feed — on a weekend there is none). The auto-trader would have logged a
+  phantom trade. FIX in brokers/ibkr.py: after placing, poll the order status ~5s; a
+  Cancelled/ApiCancelled/Inactive outcome returns success=False with the REAL reason harvested from
+  the error-event channel (which can land 3-4s AFTER the Cancelled status — there's a grace poll; the
+  trade log itself only carries the cosmetic 10349 TIF notice, so the log is only the fallback).
+  Verified live: the same weekend order now returns success=False with the 202 reason.
+- GOTCHAS learned live: (a) an order can only be CANCELLED by the clientId that placed it (client 0
+  couldn't cancel clientId-897's order; reconnecting AS 897 cancelled it instantly) — fine for the
+  app (connect-per-op means the bot cancels nothing today), but remember for any future cancel
+  feature: cancellation must reuse the placing clientId or use reqGlobalCancel. (b) "open orders
+  request timed out" warnings during connect are cosmetic — reqAllOpenOrders still returns correctly.
+- STILL OPEN for Monday (market hours): whether IBKR paper accepts MARKET orders during RTH on this
+  account (no market-data subscription — delayed data usually suffices on paper, but if 202 persists
+  in-hours, the fallback design is marketable LIMIT orders priced off Polygon data). Do the first
+  in-hours 1-share order test Monday before any IBKR auto-trading.
 
 === CONVICTION LOGGING (#25) — measure-first entry-strength dataset (2026-07-25) ===
 - WHY: the bot's goal is to "learn where it made mistakes", but nothing captured HOW STRONG each entry
