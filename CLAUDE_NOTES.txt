@@ -653,6 +653,71 @@ machine. Entry point: app.py.
   keyring swap -> Pi/VPN hosting. Also still pending: the IBKR real paper CONNECTION test (needs the
   user's running IB Gateway).
 
+=== RISK-EVENT STEP-OUT + RANGE/TREND MATCHING + EXPECTANCY (2026-07-25, commit c652d56) ===
+- Origin: a YouTube options podcast the user shared ("The Delta-Neutral Setup", KINFO/Ravish).
+  The options strategies themselves (delta-neutral, iron flies, calendars) do NOT transfer to
+  this long-only equities app — options would be a whole new instrument class (possible via the
+  now-linked IBKR, but same deliberate gate as forex/CFD, plus tail risk vs the family-wealth
+  ethos). Three transferable IDEAS were extracted and built instead. Transcript pulled with
+  youtube-transcript-api (the video had no CC button but an auto-generated 'en' track existed;
+  WebFetch only returned the title — the transcript API was the working route).
+- (1) src/backtester/events.py — FOMC meeting-day calendar, dates verified against the Fed's
+  official calendar page for 2024-2027 (both days of each 2-day meeting blocked; the 2025-08-22
+  notation vote deliberately excluded). Blocks NEW entries only; exits always fire. This is the
+  PROACTIVE counterpart to volatility.py's REACTIVE GARCH storm filter. CALENDAR_COVERS_THROUGH
+  + calendar_covers() exist so that once the listed meetings run out, the auto-trader surfaces a
+  "calendar needs updating" error instead of silently treating unknown dates as safe — ADD THE
+  NEXT YEAR'S FOMC DATES ANNUALLY. Per-ticker EARNINGS dates are the intended phase 2; the
+  `ticker` param on is_event_day/event_reason is the seam. Not built because this Polygon plan
+  lacks the (paid Benzinga) earnings endpoint — verified 403 "not entitled" on
+  /benzinga/v1/earnings. Wiring: BacktestEngine(blocked_dates=...), run_scan(event_filter_enabled=)
+  and checkboxes in Backtest + Scanner (OFF by default, so historical results stay comparable),
+  and AutoTraderControl.block_event_days (ON by default — pure risk reduction; takes effect on the
+  next deliberate restart). NOTE: the next FOMC meeting is Tue/Wed 2026-07-28/29, i.e. the bot
+  will skip new buys those days if armed.
+- (2) Range/trend matching — metrics.efficiency_ratio() is the Kaufman ER (|net change| / sum of
+  |bar-to-bar moves|) computed on SESSION CLOSES, so a minute-bar and a day-bar scan of the same
+  window agree; only comparable across tickers scanned over the SAME window. metrics
+  .classify_ticker_regime() labels <0.25 "range", >0.35 "trend", the gap "either" (deliberate gray
+  zone). Every STRATEGY_REGISTRY entry now has a "regime" tag ("trend"/"range" — judgment calls
+  from each strategy's entry logic, NOT measurements; strategy_regime() returns "either" for
+  anything untagged, which never blocks a match). The scanner stamps each ticker's ER on all its
+  result rows; the roster table shows a ✅/⚠️ match indicator. ENFORCEMENT is opt-in via
+  RosterConfig.regime_match_only (default False, measure-first — same discipline as conviction).
+- (3) Expectancy — metrics.compute_report now returns avg_win_pct/avg_loss_pct/expectancy
+  (win% x avg win + loss% x avg loss, as a fraction of capital committed per trade, so it's
+  comparable across account sizes). None (not 0) when a combo closed no trades. Shown in the
+  Backtest metric row, scan results, and the Scan History leaderboard. DISPLAY ONLY — ranking.py's
+  score weights are deliberately unchanged.
+- scan_results gained expectancy + efficiency_ratio through the existing _migrate() ALTER TABLE
+  path. Verified on a COPY of the real 3,060-row scan_history.db: no rows lost, old rows read back
+  as None. Old roster entries show "—" in the new columns rather than breaking.
+
+=== FIXED: saving a config could SILENTLY KILL a running bot (2026-07-25, commit 6f04d12) ===
+- FOUND BY ACCIDENT while browser-verifying the above: clicking "Save configuration" killed the
+  real auto-trader process (pid 3184) seconds later. The bot was DISARMED at the time so nothing
+  was at stake, but armed on a weekday this is the same "silence looks like no trades" failure
+  mode as the laptop-sleep incident — the process dies quietly and nothing alerts.
+- ROOT CAUSE: save_control used Path.write_text, which TRUNCATES then fills. A reader catching
+  that window gets invalid JSON, and load_control's fail-closed path turns ANY parse failure into
+  killed=True, so auto_trader's main loop hit `if control.killed: break` and exited. Reproduced
+  deterministically: 58 torn reads out of 3,815 under a concurrent reader.
+- FIX 1: auto_trader_state.atomic_write_text() (temp file in the same dir + os.replace), now used
+  by EVERY cross-process JSON state file — control, status, roster, positions, account_risk,
+  notifications, broker_accounts. WINDOWS GOTCHA found by testing it under a hammering reader:
+  os.replace raises PermissionError (WinError 5) if the DESTINATION is open at that instant
+  (Python doesn't open files with FILE_SHARE_DELETE), which would have converted the silent bug
+  into a visible crash in the dashboard's save path — so the replace retries ~20x/20ms. Re-verified
+  after the fix: 0 torn reads, 0 save failures, 0 reads misinterpreted as a kill.
+- FIX 2: an unreadable control file no longer STOPS the process. It still fails closed (run_cycle
+  won't trade), but only a GENUINE kill switch exits — main() now requires `killed AND readable`
+  via the new load_control_checked() (load_control keeps its old one-value contract for all other
+  callers). Rationale: exiting on transient corruption IS the silent-death failure mode; staying
+  alive but not trading keeps the heartbeat visible in the dashboard.
+- LESSON for future work: any state file written by the dashboard and read by the standalone
+  trader must use atomic_write_text, never write_text. memory_report.py's outputs are exempt
+  (report artifacts, never concurrently read).
+
 === VERSION CONTROL / GITHUB (set up 2026-07-21) ===
 - backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester
   (verified private: anonymous fetch 404s). Purpose: enables working on the project from a
