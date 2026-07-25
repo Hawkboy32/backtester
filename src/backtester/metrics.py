@@ -26,13 +26,33 @@ class PerformanceReport:
     avg_win_pct: float | None = None
     avg_loss_pct: float | None = None
     expectancy: float | None = None
+    # Profit factor: gross profit / gross loss (both positive). >1 is profitable.
+    # More informative than win rate, which says nothing about SIZE — a strategy
+    # winning 40% of the time is very profitable if the winners are big enough.
+    # None when it is undefined: either no closed trades, or no losing trades at
+    # all (a divide by zero, which on a small sample means "too few trades to
+    # judge" far more often than it means "flawless").
+    profit_factor: float | None = None
+    # Fraction of the backtest's BARS with a position open. Counted in bars, not
+    # wall-clock, so an overnight hold on minute data isn't scored as 16 hours of
+    # exposure when no bars elapsed. Low time-in-market for the same return means
+    # the same money was at risk for less of the window.
+    time_in_market: float | None = None
+    # Mean capital committed per trade (entry price x shares), in dollars. This
+    # engine is all-in (a BUY commits the whole cash balance), so it tracks the
+    # equity curve rather than saying much about the strategy — it is a sanity
+    # check on position sizes, NOT a comparison metric between combos. That's why
+    # it is shown on the backtest screen but not stored per scan result.
+    avg_trade_value: float | None = None
 
     def __str__(self) -> str:
+        pf = f"{self.profit_factor:.2f}" if self.profit_factor is not None else "n/a"
         return (
             f"Total return:  {self.total_return:.2%}\n"
             f"CAGR:          {self.cagr:.2%}\n"
             f"Max drawdown:  {self.max_drawdown:.2%}\n"
             f"Sharpe ratio:  {self.sharpe_ratio:.2f}\n"
+            f"Profit factor: {pf}\n"
             f"Trades:        {self.num_trades} (win rate {self.win_rate:.1%})"
         )
 
@@ -88,6 +108,19 @@ def compute_report(
     if num_trades:
         expectancy = win_rate * (avg_win_pct or 0.0) + (1 - win_rate) * (avg_loss_pct or 0.0)
 
+    # Profit factor works in RAW DOLLARS, not per-trade fractions: it asks how many
+    # dollars the winners made per dollar the losers gave back, so the totals are
+    # the meaningful quantity. Undefined (None) with no trades or no losses.
+    gross_profit = sum(t.pnl for t in winners)
+    gross_loss = -sum(t.pnl for t in losers)  # losers have pnl <= 0, so this is >= 0
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+
+    avg_trade_value = (
+        sum(t.entry_price * t.shares for t in closed_trades) / num_trades if num_trades else None
+    )
+
+    time_in_market = _time_in_market(equity_curve.index, closed_trades)
+
     return PerformanceReport(
         total_return=total_return,
         cagr=cagr,
@@ -98,7 +131,35 @@ def compute_report(
         avg_win_pct=avg_win_pct,
         avg_loss_pct=avg_loss_pct,
         expectancy=expectancy,
+        profit_factor=profit_factor,
+        time_in_market=time_in_market,
+        avg_trade_value=avg_trade_value,
     )
+
+
+def _time_in_market(index: pd.DatetimeIndex, closed_trades: list) -> float | None:
+    """Fraction of `index`'s bars during which a position was open.
+
+    Counted in BARS via searchsorted rather than by summing wall-clock holding
+    time: on minute data an overnight hold spans ~16 hours in which no bar
+    exists, and charging the strategy for that exposure would be wrong (and
+    could push the fraction above 1). Half-open [entry, exit) so the entry bar
+    counts as held and the exit bar does not — an entry and exit on the same
+    bar is 0 bars of exposure, which is correct.
+
+    The engine is long-only single-position, so trades never overlap and a
+    plain sum needs no interval merging.
+    """
+    if len(index) == 0 or not closed_trades:
+        return None
+    entries = [t.entry_time for t in closed_trades if t.exit_time is not None]
+    exits = [t.exit_time for t in closed_trades if t.exit_time is not None]
+    if not entries:
+        return None
+    starts = index.searchsorted(pd.DatetimeIndex(entries), side="left")
+    ends = index.searchsorted(pd.DatetimeIndex(exits), side="left")
+    bars_held = int(np.maximum(ends - starts, 0).sum())
+    return bars_held / len(index)
 
 
 def efficiency_ratio(bars: pd.DataFrame) -> float | None:

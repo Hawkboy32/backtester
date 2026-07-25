@@ -50,6 +50,8 @@ def _results_to_frame(rows: list[ScanResultRow]) -> pd.DataFrame:
                 "num_bars": r.num_bars,
                 # Display/learning columns — NOT part of the score weights.
                 "expectancy": r.expectancy,
+                "profit_factor": r.profit_factor,
+                "time_in_market": r.time_in_market,
                 "efficiency_ratio": r.efficiency_ratio,
                 "error": r.error,
             }

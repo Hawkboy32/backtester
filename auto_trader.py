@@ -50,7 +50,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from backtester import account_risk, accounts as accounts_module
-from backtester import events, live_trades, notifications, position_attribution, roster, volatility
+from backtester import events, heartbeat, live_trades, notifications, position_attribution, roster, volatility
 from backtester.auto_trader_state import (
     AutoTraderStatus, load_control, load_control_checked, load_status, save_status,
 )
@@ -302,6 +302,11 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
     status.running = True
     status.pid = os.getpid()
     status.last_heartbeat = datetime.now(timezone.utc).isoformat()
+    # The external twin of the heartbeat above (#34). Deliberately fires before
+    # every early return below, so it reports PROCESS LIVENESS, not armed-ness —
+    # a disarmed-but-running bot is healthy and must not page anyone. Throttled
+    # and exception-proof inside; it can never delay or block a trade.
+    heartbeat.ping()
 
     today = _today_str()
     if status.trades_date != today:

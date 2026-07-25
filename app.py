@@ -56,7 +56,7 @@ from backtester.strategies import STRATEGY_REGISTRY, build_strategy, strategy_re
 from backtester.strategies.sma_crossover import SmaCrossoverStrategy
 from backtester.universe import UNIVERSE_REGISTRY, load_universe, sector_for_ticker
 from backtester.walkforward import aggregate_walkforward, run_walkforward_scan
-from backtester import account_risk, app_settings, live_trades, notifications, playlist, position_attribution, roster, volatility
+from backtester import account_risk, app_settings, heartbeat, live_trades, notifications, playlist, position_attribution, roster, volatility
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 AUTO_TRADER_SCRIPT = PROJECT_ROOT / "auto_trader.py"
@@ -223,12 +223,12 @@ def require_auth() -> tuple[stauth.Authenticate, str]:
 
 def render_settings_page() -> None:
     """One home for all configuration: API keys, phone notifications, the
-    execution-cost defaults new Backtest/Scanner runs start from, and the
-    account-level max-drawdown circuit breaker. Consolidated here so settings
-    stop being scattered across the API Keys tab, the Backtest/Scanner sidebars,
-    and the Auto Trading tab."""
+    bot-down dead-man's switch, the execution-cost defaults new Backtest/Scanner
+    runs start from, and the account-level max-drawdown circuit breaker.
+    Consolidated here so settings stop being scattered across the API Keys tab,
+    the Backtest/Scanner sidebars, and the Auto Trading tab."""
     st.subheader("Settings")
-    st.caption("API keys, notifications, execution-cost defaults, and the account-risk limit — all in one place.")
+    st.caption("API keys, notifications, the bot-down alert, execution-cost defaults, and the account-risk limit — all in one place.")
 
     st.markdown("### API keys")
     st.caption(
@@ -291,6 +291,71 @@ def render_settings_page() -> None:
                 st.error("Enter a topic name first.")
             else:
                 st.error("Send failed — check your internet connection and the topic name.")
+
+    st.divider()
+    st.markdown("### Bot-down alert (dead-man's switch)")
+    st.caption(
+        "Alerts you when the bot **stops** running — the one failure the phone notifications "
+        "above can't catch, because a dead bot sends nothing and silence looks just like a quiet "
+        "trading day. (On 22 July the bot died when the laptop slept and stayed down ~29 hours "
+        "with a position open; nothing alerted.) A watchdog on this laptop can't fix that either "
+        "— whatever kills the bot kills the watchdog. So the check is inverted: the bot pings an "
+        "outside service every minute, and **that service** alerts you when the pings stop."
+    )
+    with st.expander("How to set this up (one-time, free)", expanded=False):
+        st.markdown(
+            """
+1. Create a free account at **healthchecks.io** and add a new check.
+2. Copy its **ping URL** (looks like `https://hc-ping.com/<uuid>`) and paste it below.
+3. On the check's page, set **Schedule → Cron** to the hours the bot is meant to be up, e.g.
+   `*/5 13-21 * * 1-5` (UTC — roughly US market hours, weekdays only), with a grace period
+   of ~15 minutes.
+4. Add your phone/email under **Notification methods** on healthchecks.io.
+
+**Step 3 is the one that matters.** You shut the laptop down overnight, so the bot is
+*supposed* to go quiet then. Without a schedule you'd get paged every single night, and an
+alert you learn to ignore is worse than no alert at all. With it, silence at 3pm on a
+Tuesday pages you and silence at 3am doesn't.
+
+Pausing the check on that site is also how you silence it for a planned break — the bot has
+no way to say "I'm off on purpose".
+            """
+        )
+    hb_cfg = heartbeat.load_config()
+    hb_enabled = st.checkbox(
+        "Enable bot-down alert", value=hb_cfg.get("enabled", False), key="hb_enabled"
+    )
+    hb_url = st.text_input(
+        "Ping URL",
+        value=hb_cfg.get("ping_url", ""),
+        key="hb_url",
+        help=(
+            "From healthchecks.io (or any compatible/self-hosted monitor). Kept in a local "
+            "gitignored file. It can't trade or move money — worst case someone with the URL "
+            "could fake an 'alive' ping — so it isn't stored in the credential manager."
+        ),
+    )
+    hcol1, hcol2 = st.columns(2)
+    with hcol1:
+        if st.button("Save bot-down alert settings", key="hb_save"):
+            if hb_enabled and not heartbeat.is_valid_ping_url(hb_url):
+                st.error("That doesn't look like a ping URL — it should start with https://")
+            else:
+                heartbeat.save_config({"enabled": hb_enabled, "ping_url": hb_url.strip()})
+                st.success("Bot-down alert settings saved. Takes effect on the bot's next cycle.")
+    with hcol2:
+        if st.button("Send test ping", key="hb_test"):
+            if not heartbeat.is_valid_ping_url(hb_url):
+                st.error("Enter a valid https:// ping URL first.")
+            elif heartbeat.ping(
+                config={"enabled": True, "ping_url": hb_url.strip()}, force=True
+            ):
+                st.success(
+                    "Ping delivered — the check on healthchecks.io should now show as up. "
+                    "Confirm it went green there before relying on it."
+                )
+            else:
+                st.error("Ping failed — check the URL and your internet connection.")
 
     st.divider()
     st.markdown("### Execution-cost defaults")
@@ -661,6 +726,35 @@ def _execute_backtest_body(params: dict) -> None:
         e2.metric("Avg winning trade", f"{report.avg_win_pct:+.2%}" if report.avg_win_pct is not None else "—")
         e3.metric("Avg losing trade", f"{report.avg_loss_pct:+.2%}" if report.avg_loss_pct is not None else "—")
 
+        p1, p2, p3 = st.columns(3)
+        p1.metric(
+            "Profit factor",
+            f"{report.profit_factor:.2f}" if report.profit_factor is not None else "—",
+            help=(
+                "Gross profit ÷ gross loss. Above 1.0 means the winners outweighed the losers; "
+                "below 1.0 means they didn't. Says more than win rate, which ignores SIZE — a "
+                "strategy can win 40% of the time and still be strongly profitable. "
+                "'—' means undefined: either no trades, or no losing trades to divide by "
+                "(which on a small sample usually means too few trades to judge, not perfection)."
+            ),
+        )
+        p2.metric(
+            "Time in market",
+            f"{report.time_in_market:.1%}" if report.time_in_market is not None else "—",
+            help=(
+                "Share of the window's bars holding a position. Lower for the same return means "
+                "your money was exposed to the market for less of the time."
+            ),
+        )
+        p3.metric(
+            "Avg trade value",
+            f"${report.avg_trade_value:,.0f}" if report.avg_trade_value is not None else "—",
+            help=(
+                "Average capital committed per trade. This engine goes all-in on a BUY, so this "
+                "tracks the equity curve — a sanity check on position size, not a strategy metric."
+            ),
+        )
+
     if vol_target_enabled and latest_regime is not None:
         rc1, rc2, rc3 = st.columns(3)
         rc1.metric("Current vol regime", latest_regime.regime.upper())
@@ -968,14 +1062,23 @@ def render_scanner_tab() -> None:
     st.subheader("Top combos")
     st.caption(
         "Expectancy = what an average trade returned (win% × avg win + loss% × avg loss). "
+        "PF = profit factor (gross profit ÷ gross loss; above 1 = winners outweighed losers). "
         "ER = the ticker's efficiency ratio over the window: low ≈ range-bound, high ≈ trending "
-        "— match range strategies to low-ER tickers. Both are informational; neither affects the score."
+        "— match range strategies to low-ER tickers. All are informational; none affect the score."
     )
     st.dataframe(
         ranked.head(30),
         width="stretch",
         column_config={
             "expectancy": st.column_config.NumberColumn("Expectancy/trade", format="percent"),
+            "profit_factor": st.column_config.NumberColumn(
+                "PF", format="%.2f",
+                help="Gross profit ÷ gross loss. Blank = undefined (no trades, or no losing trades).",
+            ),
+            "time_in_market": st.column_config.NumberColumn(
+                "In market", format="percent",
+                help="Share of the window's bars holding a position.",
+            ),
             "efficiency_ratio": st.column_config.NumberColumn("ER", format="%.2f"),
         },
     )
@@ -2053,6 +2156,8 @@ def render_scan_history_tab() -> None:
             "pct_profitable": st.column_config.NumberColumn("% profitable", format="percent"),
             "mean_conviction": st.column_config.NumberColumn("Mean conviction", format="%.2f", help="Average entry-signal conviction (0-1) across this strategy's trades. Logged for future learning; does not affect sizing."),
             "mean_expectancy": st.column_config.NumberColumn("Mean expectancy", format="percent", help="Average per-trade expectancy (win% × avg win + loss% × avg loss) across this strategy's results. Positive means an average trade made money."),
+            "mean_profit_factor": st.column_config.NumberColumn("Mean PF", format="%.2f", help="Average profit factor (gross profit ÷ gross loss) across this strategy's results. This averages per-combo RATIOS, so a combo with a huge ratio off two or three trades can drag it upward — read it next to the Results count, as a signpost rather than a measurement."),
+            "mean_time_in_market": st.column_config.NumberColumn("Mean in market", format="percent", help="Average share of each window's bars spent holding a position."),
         },
     )
 
@@ -2090,6 +2195,8 @@ def render_scan_history_tab() -> None:
             "win_rate": st.column_config.NumberColumn("Win rate", format="percent"),
             "conviction": st.column_config.NumberColumn("Conviction", format="%.2f", help="Average entry-signal conviction (0-1) for this combo. Logged for future learning; does not affect sizing."),
             "expectancy": st.column_config.NumberColumn("Expectancy/trade", format="percent", help="Win% × avg win + loss% × avg loss — what an average trade returned."),
+            "profit_factor": st.column_config.NumberColumn("PF", format="%.2f", help="Profit factor: gross profit ÷ gross loss. Above 1 means the winners outweighed the losers. Blank = undefined (no trades, or no losing trades to divide by)."),
+            "time_in_market": st.column_config.NumberColumn("In market", format="percent", help="Share of the scan window's bars this combo spent holding a position."),
             "efficiency_ratio": st.column_config.NumberColumn("ER", format="%.2f", help="Ticker's efficiency ratio over the scan window: low (<0.25) ≈ range-bound, high (>0.35) ≈ trending. Match range strategies to low-ER tickers."),
             "run_at": st.column_config.DatetimeColumn("Scanned at"),
         },
@@ -2315,6 +2422,20 @@ def render_playlist_page() -> None:
         )
 
 
+def _format_age(seconds: float | None) -> str:
+    """'3 minutes ago' / '29 hours ago'. Deliberately coarse — the exact second a
+    dead process last spoke doesn't matter, the order of magnitude does."""
+    if seconds is None:
+        return "at an unknown time"
+    if seconds < 90:
+        return f"{int(seconds)} seconds ago"
+    if seconds < 5400:
+        return f"{round(seconds / 60)} minutes ago"
+    if seconds < 172800:
+        return f"{round(seconds / 3600)} hours ago"
+    return f"{round(seconds / 86400)} days ago"
+
+
 def _render_bot_status(status, control, *, kill_switch: bool = True, kill_key: str = "kill_switch_btn") -> bool:
     """Auto-trader status row (process / armed / trades today / killed) plus the
     last signal/error and an optional kill switch. Shared by the Overview home
@@ -2322,12 +2443,14 @@ def _render_bot_status(status, control, *, kill_switch: bool = True, kill_key: s
     the process is actually running (heartbeat-fresh), which the Auto Trading tab
     uses to decide whether to launch a new process on Start."""
     heartbeat_stale = True
+    age = None
     if status.last_heartbeat:
         try:
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(status.last_heartbeat)).total_seconds()
             heartbeat_stale = age > max(control.poll_interval_seconds * 3, 30)
         except ValueError:
             heartbeat_stale = True
+            age = None
     actually_running = status.running and not heartbeat_stale
 
     c1, c2, c3, c4 = st.columns(4)
@@ -2335,6 +2458,29 @@ def _render_bot_status(status, control, *, kill_switch: bool = True, kill_key: s
     c2.metric("Armed", "🟢 Yes" if control.enabled and not control.killed else "🔴 No")
     c3.metric("Trades today", f"{status.trades_today} / {control.max_trades_per_day}")
     c4.metric("Killed", "⚠ Yes" if control.killed else "No")
+
+    # A bot that STOPPED itself sets running=False on the way out. A stale heartbeat
+    # while running is still True means the process vanished without cleaning up —
+    # sleep, crash, power loss — which is exactly the failure that went unnoticed for
+    # ~29 hours on 22 July. Say so loudly and differently from a deliberate stop.
+    if status.running and heartbeat_stale:
+        st.error(
+            f"**Bot stopped unexpectedly.** It last checked in {_format_age(age)} — the process "
+            "is gone but never recorded a clean shutdown, which usually means the laptop slept "
+            "or the process was killed. Any open position is currently unmanaged."
+        )
+        if not heartbeat.load_config().get("enabled"):
+            st.warning(
+                "You'd only have found this by looking. Turn on the bot-down alert in "
+                "**Settings** to get paged when this happens away from the screen."
+            )
+    elif control.enabled and not control.killed and not actually_running:
+        st.warning(
+            "**Armed, but nothing is running.** The settings say trade, but there's no live "
+            "process to act on them — no orders will be placed until the bot is started."
+        )
+    elif actually_running and age is not None:
+        st.caption(f"Last check-in {_format_age(age)}.")
 
     if status.last_signal:
         st.caption(f"Last signal: {status.last_signal}")

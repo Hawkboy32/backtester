@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS scan_results (
     num_bars INTEGER,
     conviction REAL,
     expectancy REAL,
+    profit_factor REAL,
+    time_in_market REAL,
     efficiency_ratio REAL,
     error TEXT
 );
@@ -82,6 +84,10 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE scan_results ADD COLUMN expectancy REAL")
     if "efficiency_ratio" not in existing:
         conn.execute("ALTER TABLE scan_results ADD COLUMN efficiency_ratio REAL")
+    if "profit_factor" not in existing:
+        conn.execute("ALTER TABLE scan_results ADD COLUMN profit_factor REAL")
+    if "time_in_market" not in existing:
+        conn.execute("ALTER TABLE scan_results ADD COLUMN time_in_market REAL")
 
 
 def init_db() -> None:
@@ -115,8 +121,8 @@ def record_scan(meta: dict, rows: list[ScanResultRow]) -> int:
             """INSERT INTO scan_results
                (run_id, ticker, strategy_name, params, total_return, cagr, max_drawdown,
                 sharpe_ratio, num_trades, win_rate, num_bars, conviction, expectancy,
-                efficiency_ratio, error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                profit_factor, time_in_market, efficiency_ratio, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     run_id,
@@ -132,6 +138,8 @@ def record_scan(meta: dict, rows: list[ScanResultRow]) -> int:
                     r.num_bars,
                     r.avg_conviction,
                     r.expectancy,
+                    r.profit_factor,
+                    r.time_in_market,
                     r.efficiency_ratio,
                     r.error,
                 )
@@ -175,7 +183,7 @@ def query_run_results(run_id: int) -> list[ScanResultRow]:
         rows = conn.execute(
             """SELECT ticker, strategy_name, params, total_return, cagr, max_drawdown,
                       sharpe_ratio, num_trades, win_rate, num_bars, conviction,
-                      expectancy, efficiency_ratio, error
+                      expectancy, profit_factor, time_in_market, efficiency_ratio, error
                FROM scan_results WHERE run_id = ?""",
             (run_id,),
         ).fetchall()
@@ -194,8 +202,10 @@ def query_run_results(run_id: int) -> list[ScanResultRow]:
             num_bars=r[9],
             avg_conviction=r[10],
             expectancy=r[11],
-            efficiency_ratio=r[12],
-            error=r[13],
+            profit_factor=r[12],
+            time_in_market=r[13],
+            efficiency_ratio=r[14],
+            error=r[15],
         )
         for r in rows
     ]
@@ -230,7 +240,8 @@ def query_all_time_top(
         df = pd.read_sql_query(
             f"""SELECT sr.ticker, sr.strategy_name, sr.total_return, sr.cagr, sr.max_drawdown,
                        sr.sharpe_ratio, sr.num_trades, sr.win_rate, sr.conviction,
-                       sr.expectancy, sr.efficiency_ratio, sc.run_at
+                       sr.expectancy, sr.profit_factor, sr.time_in_market,
+                       sr.efficiency_ratio, sc.run_at
                 FROM scan_results sr
                 JOIN scan_runs sc ON sc.id = sr.run_id
                 WHERE {where}
@@ -255,7 +266,13 @@ def query_strategy_leaderboard() -> pd.DataFrame:
                    AVG(total_return) AS mean_return,
                    AVG(CASE WHEN total_return > 0 THEN 1.0 ELSE 0.0 END) AS pct_profitable,
                    AVG(conviction) AS mean_conviction,
-                   AVG(expectancy) AS mean_expectancy
+                   AVG(expectancy) AS mean_expectancy,
+                   -- Mean of per-combo RATIOS, not a pooled profit factor (the gross
+                   -- profit/loss totals aren't stored), so one combo with a huge ratio
+                   -- off a couple of trades can drag it up. Read it alongside
+                   -- num_results, and treat it as a signpost rather than a measurement.
+                   AVG(profit_factor) AS mean_profit_factor,
+                   AVG(time_in_market) AS mean_time_in_market
                FROM scan_results
                WHERE error IS NULL
                GROUP BY strategy_name

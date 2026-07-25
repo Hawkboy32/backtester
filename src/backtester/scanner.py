@@ -38,6 +38,8 @@ class ScanResultRow:
     num_bars: int | None = None
     avg_conviction: float | None = None  # mean entry-signal conviction across this combo's trades (#25)
     expectancy: float | None = None  # avg per-trade return fraction (see metrics.compute_report)
+    profit_factor: float | None = None  # gross profit / gross loss; None when undefined (#36)
+    time_in_market: float | None = None  # fraction of bars holding a position (#36)
     efficiency_ratio: float | None = None  # ticker-level Kaufman ER over the window (see metrics.efficiency_ratio)
     error: str | None = None
 
@@ -152,6 +154,8 @@ def run_scan(
                 num_bars=len(bars),
                 avg_conviction=avg_conviction,
                 expectancy=report.expectancy,
+                profit_factor=report.profit_factor,
+                time_in_market=report.time_in_market,
                 efficiency_ratio=ticker_er,
             )
         except Exception as e:  # noqa: BLE001
