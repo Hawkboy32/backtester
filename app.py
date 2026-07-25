@@ -20,7 +20,7 @@ import streamlit as st
 import streamlit_authenticator as stauth
 import yaml
 
-from backtester import execution_log, keystore
+from backtester import events, execution_log, keystore
 from backtester.accounts import (
     BROKER_META,
     SUPPORTED_BROKERS,
@@ -36,7 +36,7 @@ from backtester.data import PolygonClient, PolygonError
 from backtester.engine import BacktestEngine
 from backtester.execution import AccountOrder, SizingMode, compute_qty_for_account, execute_order_across_accounts
 from backtester.memory_report import save_report
-from backtester.metrics import compute_report
+from backtester.metrics import classify_ticker_regime, compute_report
 from backtester.ranking import aggregate_by_strategy, rank_combos
 from backtester.saved_configs import delete_config, list_configs, load_config, save_config
 from backtester.scan_db import (
@@ -50,7 +50,7 @@ from backtester.scan_db import (
     record_scan,
 )
 from backtester.scanner import run_scan
-from backtester.strategies import STRATEGY_REGISTRY, build_strategy
+from backtester.strategies import STRATEGY_REGISTRY, build_strategy, strategy_regime
 from backtester.strategies.sma_crossover import SmaCrossoverStrategy
 from backtester.universe import UNIVERSE_REGISTRY, load_universe
 from backtester.walkforward import aggregate_walkforward, run_walkforward_scan
@@ -512,7 +512,15 @@ def render_backtest_tab() -> tuple[dict, "st.delta_generator.DeltaGenerator"] | 
             key="bt_target_vol", disabled=not vol_target_enabled,
         )
 
-        run_clicked = st.button("Run backtest", type="primary", use_container_width=True)
+        st.divider()
+        event_filter_enabled = st.checkbox(
+            "Skip entries on FOMC days — proactive step-out around known risk "
+            "events (exits still fire). Off by default so existing results stay "
+            "comparable.",
+            value=False, key="bt_event_filter",
+        )
+
+        run_clicked = st.button("Run backtest", type="primary", width="stretch")
 
     if not run_clicked:
         st.info("Set parameters in the sidebar and click **Run backtest**.")
@@ -540,6 +548,7 @@ def render_backtest_tab() -> tuple[dict, "st.delta_generator.DeltaGenerator"] | 
         "compare_buy_hold": compare_buy_hold,
         "vol_target_enabled": vol_target_enabled,
         "target_vol_ann": target_vol_ann,
+        "event_filter_enabled": event_filter_enabled,
     }
     return params, st.container()
 
@@ -567,6 +576,7 @@ def _execute_backtest_body(params: dict) -> None:
     compare_buy_hold = params["compare_buy_hold"]
     vol_target_enabled = params["vol_target_enabled"]
     target_vol_ann = params["target_vol_ann"]
+    event_filter_enabled = params["event_filter_enabled"]
 
     with st.status("Running backtest...", expanded=True) as status:
         try:
@@ -604,12 +614,20 @@ def _execute_backtest_body(params: dict) -> None:
                     st.warning(f"Daily history fetch failed for the GARCH regime: {e} Running without it.")
 
             st.write("Running strategy over bars...")
+            blocked_dates = None
+            if event_filter_enabled:
+                blocked_dates = events.blocked_dates_in_range(
+                    pd.Timestamp(from_date).date(), pd.Timestamp(to_date).date()
+                )
+                if blocked_dates:
+                    st.write(f"Event step-out: skipping entries on {len(blocked_dates)} FOMC day(s) in this window.")
             strategy = SmaCrossoverStrategy(fast_window=int(fast_window), slow_window=int(slow_window))
             engine = BacktestEngine(
                 starting_cash=starting_cash,
                 commission_per_trade=commission,
                 slippage_bps=slippage_bps,
                 regime_by_date=regime_by_date,
+                blocked_dates=blocked_dates,
             )
             result = engine.run(bars, strategy)
 
@@ -632,6 +650,13 @@ def _execute_backtest_body(params: dict) -> None:
     m3.metric("Max drawdown", f"{report.max_drawdown:.2%}")
     m4.metric("Sharpe ratio", f"{report.sharpe_ratio:.2f}")
     m5.metric("Trades / win rate", f"{report.num_trades} / {report.win_rate:.0%}")
+
+    if report.expectancy is not None:
+        e1, e2, e3 = st.columns(3)
+        e1.metric("Expectancy / trade", f"{report.expectancy:+.3%}",
+                  help="Win% × avg win + loss% × avg loss — what an average trade returned. Positive = the maths is on your side ('be the casino').")
+        e2.metric("Avg winning trade", f"{report.avg_win_pct:+.2%}" if report.avg_win_pct is not None else "—")
+        e3.metric("Avg losing trade", f"{report.avg_loss_pct:+.2%}" if report.avg_loss_pct is not None else "—")
 
     if vol_target_enabled and latest_regime is not None:
         rc1, rc2, rc3 = st.columns(3)
@@ -779,6 +804,14 @@ def render_scanner_tab() -> None:
         key="scan_target_vol", disabled=not vol_target_enabled,
     )
 
+    st.caption("Known risk-event step-out")
+    event_filter_enabled = st.checkbox(
+        "Skip new entries on FOMC meeting days — the proactive \"don't sell insurance during "
+        "a flood warning\" filter (exits still fire). No extra API calls. Off by default so "
+        "existing scan results stay comparable.",
+        value=False, key="scan_event_filter",
+    )
+
     if not strategy_names:
         st.warning("Select at least one strategy.")
         return
@@ -795,7 +828,7 @@ def render_scanner_tab() -> None:
 
     config_key = (
         f"{universe_name}|{max_tickers}|{sorted(strategy_names)}|{from_date}|{to_date}|"
-        f"{multiplier}|{timespan}|{vol_target_enabled}|{target_vol_ann}"
+        f"{multiplier}|{timespan}|{vol_target_enabled}|{target_vol_ann}|{event_filter_enabled}"
     )
     checkpoint_hash = hashlib.sha256(config_key.encode()).hexdigest()[:16]
     results_dir = RESULTS_DIR / checkpoint_hash
@@ -899,6 +932,7 @@ def render_scanner_tab() -> None:
             result_callback=on_result,
             vol_target_enabled=vol_target_enabled,
             target_vol_ann=target_vol_ann,
+            event_filter_enabled=event_filter_enabled,
         )
     except Exception as e:  # noqa: BLE001
         st.error(f"Scan failed: {e}")
@@ -917,6 +951,7 @@ def render_scanner_tab() -> None:
         "strategy_names": strategy_names,
         "vol_target_enabled": vol_target_enabled,
         "target_vol_ann": target_vol_ann,
+        "event_filter_enabled": event_filter_enabled,
     }
     paths = save_report(results, meta, results_dir)
     record_scan(meta, results)
@@ -924,11 +959,23 @@ def render_scanner_tab() -> None:
 
     aggregates = aggregate_by_strategy(results)
     st.subheader("Per-strategy summary")
-    st.dataframe(pd.DataFrame([asdict(a) for a in aggregates]), use_container_width=True)
+    st.dataframe(pd.DataFrame([asdict(a) for a in aggregates]), width="stretch")
 
     ranked = rank_combos(results)
     st.subheader("Top combos")
-    st.dataframe(ranked.head(30), use_container_width=True)
+    st.caption(
+        "Expectancy = what an average trade returned (win% × avg win + loss% × avg loss). "
+        "ER = the ticker's efficiency ratio over the window: low ≈ range-bound, high ≈ trending "
+        "— match range strategies to low-ER tickers. Both are informational; neither affects the score."
+    )
+    st.dataframe(
+        ranked.head(30),
+        width="stretch",
+        column_config={
+            "expectancy": st.column_config.NumberColumn("Expectancy/trade", format="percent"),
+            "efficiency_ratio": st.column_config.NumberColumn("ER", format="%.2f"),
+        },
+    )
 
     if not ranked.empty:
         top = ranked.iloc[0]
@@ -1636,6 +1683,13 @@ def _render_adaptive_roster_section() -> None:
             value=state.config.max_pnl_drawdown_floor, step=50.0, key="roster_max_dd_floor",
         )
 
+    regime_match_only = st.checkbox(
+        "Only promote regime-matched combos — pair range strategies (mean reversion) with "
+        "range-bound tickers and trend strategies with trending ones, measured by each "
+        "ticker's efficiency ratio in the scan. Off by default (measure first).",
+        value=state.config.regime_match_only, key="roster_regime_match",
+    )
+
     new_config = roster.RosterConfig(
         roster_size=int(roster_size),
         min_live_trades=int(min_live_trades),
@@ -1644,6 +1698,7 @@ def _render_adaptive_roster_section() -> None:
         cum_pnl_floor=cum_pnl_floor,
         max_pnl_drawdown_floor=max_pnl_drawdown_floor,
         weights=state.config.weights,
+        regime_match_only=regime_match_only,
     )
 
     bcol1, bcol2 = st.columns(2)
@@ -1672,12 +1727,22 @@ def _render_adaptive_roster_section() -> None:
         rows = []
         for e in state.entries:
             live = e.live_stats or {}
+            ticker_regime = classify_ticker_regime(e.efficiency_ratio)
+            strat_regime = strategy_regime(e.strategy_name)
+            if e.efficiency_ratio is None:
+                match = "—"
+            elif "either" in (ticker_regime, strat_regime) or ticker_regime == strat_regime:
+                match = f"✅ {strat_regime} / {ticker_regime}"
+            else:
+                match = f"⚠️ {strat_regime} / {ticker_regime}"
             rows.append(
                 {
                     "ticker": e.ticker,
                     "strategy": e.strategy_name,
                     "status": e.status,
                     "backtest_score": round(e.backtest_score, 3),
+                    "regime match": match,
+                    "ER": round(e.efficiency_ratio, 2) if e.efficiency_ratio is not None else None,
                     "live_trades": live.get("num_trades"),
                     "live_win_rate": f"{live['win_rate']:.0%}" if live.get("win_rate") is not None else "—",
                     "live_total_pnl": live.get("total_pnl"),
@@ -1686,6 +1751,11 @@ def _render_adaptive_roster_section() -> None:
                 }
             )
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.caption(
+            "Regime match compares the strategy's design (trend/range) against the ticker's "
+            "measured behaviour over the scan window. ⚠️ flags a mismatch — informational unless "
+            "the regime-match setting above is on. Blank for entries from scans before this existed."
+        )
 
     st.markdown("#### Promotion / demotion history")
     events = roster.load_events(limit=50)
@@ -1807,6 +1877,14 @@ def render_auto_trading_tab() -> None:
             key="auto_vol_target_ann", disabled=not vol_target_enabled,
         )
 
+        st.caption("Known risk-event step-out")
+        block_event_days = st.checkbox(
+            "Skip new BUYs on FOMC meeting days (exits unaffected) — step out of events that are "
+            "known in advance to move the market, instead of waiting for volatility to show up in "
+            "the data. On by default.",
+            value=control.block_event_days, key="auto_block_events",
+        )
+
     account_options = {f"{a['nickname']} ({'Paper' if a['is_paper'] else 'LIVE'})": a["id"] for a in linked}
     selected_labels = st.multiselect(
         "Target accounts", options=list(account_options.keys()),
@@ -1853,6 +1931,7 @@ def render_auto_trading_tab() -> None:
             sizing_value=sizing_value,
             vol_target_enabled=vol_target_enabled,
             vol_target_ann=vol_target_ann,
+            block_event_days=block_event_days,
             use_roster=use_roster,
             # Owned by the Settings page now — carry forward from the loaded control so
             # saving here never clobbers the account-risk limit set in Settings.
@@ -1927,6 +2006,7 @@ def render_scan_history_tab() -> None:
             "mean_return": st.column_config.NumberColumn("Mean return", format="percent"),
             "pct_profitable": st.column_config.NumberColumn("% profitable", format="percent"),
             "mean_conviction": st.column_config.NumberColumn("Mean conviction", format="%.2f", help="Average entry-signal conviction (0-1) across this strategy's trades. Logged for future learning; does not affect sizing."),
+            "mean_expectancy": st.column_config.NumberColumn("Mean expectancy", format="percent", help="Average per-trade expectancy (win% × avg win + loss% × avg loss) across this strategy's results. Positive means an average trade made money."),
         },
     )
 
@@ -1963,6 +2043,8 @@ def render_scan_history_tab() -> None:
             "num_trades": st.column_config.NumberColumn("Trades"),
             "win_rate": st.column_config.NumberColumn("Win rate", format="percent"),
             "conviction": st.column_config.NumberColumn("Conviction", format="%.2f", help="Average entry-signal conviction (0-1) for this combo. Logged for future learning; does not affect sizing."),
+            "expectancy": st.column_config.NumberColumn("Expectancy/trade", format="percent", help="Win% × avg win + loss% × avg loss — what an average trade returned."),
+            "efficiency_ratio": st.column_config.NumberColumn("ER", format="%.2f", help="Ticker's efficiency ratio over the scan window: low (<0.25) ≈ range-bound, high (>0.35) ≈ trending. Match range strategies to low-ER tickers."),
             "run_at": st.column_config.DatetimeColumn("Scanned at"),
         },
     )

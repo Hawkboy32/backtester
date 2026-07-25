@@ -19,6 +19,13 @@ class PerformanceReport:
     sharpe_ratio: float
     num_trades: int
     win_rate: float
+    # Per-trade expectancy ("casino maths"): what an average trade returns, as a
+    # fraction of the capital committed to it. expectancy = win_rate * avg_win
+    # + (1 - win_rate) * avg_loss (avg_loss is negative). Display/learning
+    # metric only — deliberately NOT part of ranking's score weights.
+    avg_win_pct: float | None = None
+    avg_loss_pct: float | None = None
+    expectancy: float | None = None
 
     def __str__(self) -> str:
         return (
@@ -66,7 +73,20 @@ def compute_report(
     closed_trades = [t for t in trades if t.pnl is not None]
     num_trades = len(closed_trades)
     winners = [t for t in closed_trades if t.pnl > 0]
+    losers = [t for t in closed_trades if t.pnl <= 0]
     win_rate = len(winners) / num_trades if num_trades else 0.0
+
+    # Per-trade returns as a fraction of the capital committed to that trade
+    # (entry price x shares) — comparable across account sizes, unlike raw $.
+    def _trade_return(t) -> float:
+        committed = t.entry_price * t.shares
+        return t.pnl / committed if committed > 0 else 0.0
+
+    avg_win_pct = sum(_trade_return(t) for t in winners) / len(winners) if winners else None
+    avg_loss_pct = sum(_trade_return(t) for t in losers) / len(losers) if losers else None
+    expectancy = None
+    if num_trades:
+        expectancy = win_rate * (avg_win_pct or 0.0) + (1 - win_rate) * (avg_loss_pct or 0.0)
 
     return PerformanceReport(
         total_return=total_return,
@@ -75,4 +95,52 @@ def compute_report(
         sharpe_ratio=sharpe_ratio,
         num_trades=num_trades,
         win_rate=win_rate,
+        avg_win_pct=avg_win_pct,
+        avg_loss_pct=avg_loss_pct,
+        expectancy=expectancy,
     )
+
+
+def efficiency_ratio(bars: pd.DataFrame) -> float | None:
+    """Kaufman Efficiency Ratio over the SESSION CLOSES of a bar series:
+    |net change| / sum(|close-to-close moves|), in [0, 1].
+
+    High = price travelled efficiently in one direction (TRENDING);
+    low = lots of movement that went nowhere (RANGE-BOUND / choppy).
+    "Trade stocks with a predictable range" — this is the measurable version:
+    range strategies (e.g. Bollinger Mean Reversion) want LOW-ER tickers,
+    trend strategies want HIGH-ER tickers.
+
+    Computed on session (calendar-day) closes rather than raw bars so the
+    value is stable across timespans (a minute-bar scan and a day-bar scan of
+    the same window agree). Only comparable across tickers scanned over the
+    SAME date window. None if there are fewer than 3 sessions.
+    """
+    if bars.empty or "close" not in bars:
+        return None
+    session_closes = bars["close"].groupby(bars.index.date).last()
+    if len(session_closes) < 3:
+        return None
+    net = abs(float(session_closes.iloc[-1]) - float(session_closes.iloc[0]))
+    path = float(session_closes.diff().abs().sum())
+    if path <= 0:
+        return 0.0
+    return net / path
+
+
+# Heuristic ER thresholds for labelling a ticker's behaviour over the scanned
+# window. The gap between them is a deliberate "either" gray zone — only
+# clearly choppy / clearly trending tickers get a hard label.
+RANGE_ER_BELOW = 0.25
+TREND_ER_ABOVE = 0.35
+
+
+def classify_ticker_regime(er: float | None) -> str:
+    """"range" / "trend" / "either" from an efficiency ratio (see above)."""
+    if er is None:
+        return "either"
+    if er < RANGE_ER_BELOW:
+        return "range"
+    if er > TREND_ER_ABOVE:
+        return "trend"
+    return "either"

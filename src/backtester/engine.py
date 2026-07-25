@@ -65,6 +65,7 @@ class BacktestEngine:
         commission_per_trade: float = 0.0,
         slippage_bps: float = 0.0,
         regime_by_date: dict | None = None,
+        blocked_dates: set | None = None,
     ):
         """regime_by_date: optional {date: {"regime": "calm"/"normal"/"storm", "size_multiplier": float}},
         e.g. from backtester.volatility.regime_by_date(). When a bar's date has
@@ -72,11 +73,17 @@ class BacktestEngine:
         cash committed to a new position is scaled by size_multiplier instead
         of using all available cash. Dates with no entry (or when this is
         None) behave exactly as before — all-in, no filter.
+
+        blocked_dates: optional set of datetime.date on which NEW entries are
+        suppressed (exits still fire) — e.g. backtester.events
+        .blocked_dates_in_range() for known risk-event days like FOMC. The
+        proactive complement to the reactive storm-regime block above.
         """
         self.starting_cash = starting_cash
         self.commission_per_trade = commission_per_trade
         self.slippage_bps = slippage_bps
         self.regime_by_date = regime_by_date
+        self.blocked_dates = blocked_dates
 
     def run(self, bars: pd.DataFrame, strategy: Strategy) -> BacktestResult:
         if bars.empty:
@@ -129,7 +136,12 @@ class BacktestEngine:
                     size_multiplier = info["size_multiplier"]
                 regime_values.append(regime)
 
-            if signal is Signal.BUY and shares == 0 and regime != "storm":
+            event_blocked = (
+                self.blocked_dates is not None
+                and pd.Timestamp(current.timestamp).date() in self.blocked_dates
+            )
+
+            if signal is Signal.BUY and shares == 0 and regime != "storm" and not event_blocked:
                 spend = cash * size_multiplier
                 if spend > self.commission_per_trade:
                     shares = (spend - self.commission_per_trade) / fill_price

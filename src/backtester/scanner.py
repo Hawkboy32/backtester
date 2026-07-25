@@ -17,10 +17,10 @@ from typing import Callable
 
 import pandas as pd
 
-from backtester import volatility
+from backtester import events, volatility
 from backtester.data import PolygonClient, PolygonError
 from backtester.engine import BacktestEngine
-from backtester.metrics import compute_report
+from backtester.metrics import compute_report, efficiency_ratio as compute_efficiency_ratio
 from backtester.strategies import STRATEGY_REGISTRY, build_strategy
 
 
@@ -37,6 +37,8 @@ class ScanResultRow:
     win_rate: float | None = None
     num_bars: int | None = None
     avg_conviction: float | None = None  # mean entry-signal conviction across this combo's trades (#25)
+    expectancy: float | None = None  # avg per-trade return fraction (see metrics.compute_report)
+    efficiency_ratio: float | None = None  # ticker-level Kaufman ER over the window (see metrics.efficiency_ratio)
     error: str | None = None
 
 
@@ -83,6 +85,7 @@ def run_scan(
     vol_target_enabled: bool = False,
     target_vol_ann: float = volatility.DEFAULT_TARGET_VOL_ANN,
     daily_lookback_days: int = 1100,
+    event_filter_enabled: bool = False,
 ) -> list[ScanResultRow]:
     """vol_target_enabled: when True, fetches a separate daily-bar history per
     ticker (cached independently of the minute/hour/day bars used for the
@@ -92,6 +95,10 @@ def run_scan(
     across all of that ticker's strategy runs. Tickers with insufficient
     daily history (e.g. recent IPOs) fall back to no filter/sizing rather
     than failing the whole ticker.
+
+    event_filter_enabled: when True, suppresses new entries on known
+    risk-event days (FOMC — see backtester.events). Off by default so
+    existing results stay comparable.
     """
     unknown = [name for name in strategy_names if name not in STRATEGY_REGISTRY]
     if unknown:
@@ -109,7 +116,15 @@ def run_scan(
 
     checkpoint_file = checkpoint_path.open("a", encoding="utf-8") if checkpoint_path else None
 
-    def run_one_strategy(ticker: str, strategy_name: str, bars, regime_by_date: dict | None) -> ScanResultRow:
+    blocked_dates = None
+    if event_filter_enabled:
+        blocked_dates = events.blocked_dates_in_range(
+            pd.Timestamp(from_date).date(), pd.Timestamp(to_date).date()
+        )
+
+    def run_one_strategy(
+        ticker: str, strategy_name: str, bars, regime_by_date: dict | None, ticker_er: float | None
+    ) -> ScanResultRow:
         params = STRATEGY_REGISTRY[strategy_name]["default_params"]
         try:
             strategy = build_strategy(strategy_name)
@@ -118,6 +133,7 @@ def run_scan(
                 commission_per_trade=commission_per_trade,
                 slippage_bps=slippage_bps,
                 regime_by_date=regime_by_date,
+                blocked_dates=blocked_dates,
             )
             result = engine.run(bars, strategy)
             report = compute_report(result.equity_curve, result.trades)
@@ -135,6 +151,8 @@ def run_scan(
                 win_rate=report.win_rate,
                 num_bars=len(bars),
                 avg_conviction=avg_conviction,
+                expectancy=report.expectancy,
+                efficiency_ratio=ticker_er,
             )
         except Exception as e:  # noqa: BLE001
             return ScanResultRow(ticker=ticker, strategy_name=strategy_name, params=params, error=str(e))
@@ -202,9 +220,14 @@ def run_scan(
                 except (PolygonError, volatility.InsufficientHistoryError):
                     ticker_regime_by_date = None  # not enough daily history for this ticker; run unfiltered
 
+            # Ticker-level behaviour label, computed once and stamped on every
+            # strategy row for this ticker (it's a property of the ticker's
+            # price path over the window, not of any strategy).
+            ticker_er = compute_efficiency_ratio(bars)
+
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = [
-                    pool.submit(run_one_strategy, ticker, strategy_name, bars, ticker_regime_by_date)
+                    pool.submit(run_one_strategy, ticker, strategy_name, bars, ticker_regime_by_date, ticker_er)
                     for strategy_name in pending_strategies
                 ]
                 for future in futures:

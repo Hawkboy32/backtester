@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS scan_results (
     win_rate REAL,
     num_bars INTEGER,
     conviction REAL,
+    expectancy REAL,
+    efficiency_ratio REAL,
     error TEXT
 );
 
@@ -76,6 +78,10 @@ def _migrate(conn) -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(scan_results)").fetchall()}
     if "conviction" not in existing:
         conn.execute("ALTER TABLE scan_results ADD COLUMN conviction REAL")
+    if "expectancy" not in existing:
+        conn.execute("ALTER TABLE scan_results ADD COLUMN expectancy REAL")
+    if "efficiency_ratio" not in existing:
+        conn.execute("ALTER TABLE scan_results ADD COLUMN efficiency_ratio REAL")
 
 
 def init_db() -> None:
@@ -108,8 +114,9 @@ def record_scan(meta: dict, rows: list[ScanResultRow]) -> int:
         conn.executemany(
             """INSERT INTO scan_results
                (run_id, ticker, strategy_name, params, total_return, cagr, max_drawdown,
-                sharpe_ratio, num_trades, win_rate, num_bars, conviction, error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                sharpe_ratio, num_trades, win_rate, num_bars, conviction, expectancy,
+                efficiency_ratio, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     run_id,
@@ -124,6 +131,8 @@ def record_scan(meta: dict, rows: list[ScanResultRow]) -> int:
                     r.win_rate,
                     r.num_bars,
                     r.avg_conviction,
+                    r.expectancy,
+                    r.efficiency_ratio,
                     r.error,
                 )
                 for r in rows
@@ -165,7 +174,8 @@ def query_run_results(run_id: int) -> list[ScanResultRow]:
     with _connect() as conn:
         rows = conn.execute(
             """SELECT ticker, strategy_name, params, total_return, cagr, max_drawdown,
-                      sharpe_ratio, num_trades, win_rate, num_bars, conviction, error
+                      sharpe_ratio, num_trades, win_rate, num_bars, conviction,
+                      expectancy, efficiency_ratio, error
                FROM scan_results WHERE run_id = ?""",
             (run_id,),
         ).fetchall()
@@ -183,7 +193,9 @@ def query_run_results(run_id: int) -> list[ScanResultRow]:
             win_rate=r[8],
             num_bars=r[9],
             avg_conviction=r[10],
-            error=r[11],
+            expectancy=r[11],
+            efficiency_ratio=r[12],
+            error=r[13],
         )
         for r in rows
     ]
@@ -217,7 +229,8 @@ def query_all_time_top(
     with _connect() as conn:
         df = pd.read_sql_query(
             f"""SELECT sr.ticker, sr.strategy_name, sr.total_return, sr.cagr, sr.max_drawdown,
-                       sr.sharpe_ratio, sr.num_trades, sr.win_rate, sr.conviction, sc.run_at
+                       sr.sharpe_ratio, sr.num_trades, sr.win_rate, sr.conviction,
+                       sr.expectancy, sr.efficiency_ratio, sc.run_at
                 FROM scan_results sr
                 JOIN scan_runs sc ON sc.id = sr.run_id
                 WHERE {where}
@@ -241,7 +254,8 @@ def query_strategy_leaderboard() -> pd.DataFrame:
                    AVG(sharpe_ratio) AS mean_sharpe,
                    AVG(total_return) AS mean_return,
                    AVG(CASE WHEN total_return > 0 THEN 1.0 ELSE 0.0 END) AS pct_profitable,
-                   AVG(conviction) AS mean_conviction
+                   AVG(conviction) AS mean_conviction,
+                   AVG(expectancy) AS mean_expectancy
                FROM scan_results
                WHERE error IS NULL
                GROUP BY strategy_name

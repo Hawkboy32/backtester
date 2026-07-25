@@ -25,8 +25,10 @@ from typing import Callable
 import pandas as pd
 
 from backtester import ranking
-from backtester.auto_trader_state import STATE_DIR
+from backtester.auto_trader_state import STATE_DIR, atomic_write_text
+from backtester.metrics import classify_ticker_regime
 from backtester.scanner import ScanResultRow
+from backtester.strategies import strategy_regime
 
 ROSTER_PATH = STATE_DIR / "roster.json"
 EVENTS_PATH = STATE_DIR / "roster_events.jsonl"
@@ -45,6 +47,9 @@ class RosterEntry:
     pause_reason: str | None = None
     backtest_score: float = 0.0
     live_stats: dict | None = None
+    # Ticker's efficiency ratio from the scan this entry was last evaluated
+    # against (see metrics.efficiency_ratio) — display/match context only.
+    efficiency_ratio: float | None = None
 
 
 @dataclass
@@ -56,6 +61,11 @@ class RosterConfig:
     cum_pnl_floor: float = 0.0
     max_pnl_drawdown_floor: float = 500.0
     weights: dict = field(default_factory=lambda: dict(ranking.DEFAULT_WEIGHTS))
+    # Opt-in: only promote combos whose strategy regime tag (trend/range, see
+    # STRATEGY_REGISTRY) matches the ticker's measured behaviour over the scan
+    # window (efficiency ratio -> metrics.classify_ticker_regime). "either" on
+    # either side never blocks. Off by default — measure-first, like conviction.
+    regime_match_only: bool = False
 
 
 @dataclass
@@ -82,7 +92,7 @@ def save_roster(state: RosterState) -> None:
         "entries": [asdict(e) for e in state.entries],
         "config": asdict(state.config),
     }
-    ROSTER_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    atomic_write_text(ROSTER_PATH, json.dumps(data, indent=2))
 
 
 def append_event(ticker: str, strategy_name: str, action: str, reason: str) -> None:
@@ -199,6 +209,35 @@ def evaluate_roster(
         if ticker in claimed_tickers:
             continue  # a higher-scored combo already claimed this ticker
 
+        # Ticker behaviour over the scanned window — recorded on every entry for
+        # display, and (only when regime_match_only) used to gate promotion.
+        raw_er = row.get("efficiency_ratio")
+        er = None if raw_er is None or pd.isna(raw_er) else float(raw_er)
+
+        if config.regime_match_only:
+            ticker_regime = classify_ticker_regime(er)
+            strat_regime = strategy_regime(strategy_name)
+            if "either" not in (ticker_regime, strat_regime) and ticker_regime != strat_regime:
+                # Mismatch (e.g. a range strategy on a trending ticker): not
+                # promotable this pass. Kept as a candidate for audit; an
+                # existing active entry gets a visible demotion event.
+                existing = existing_by_key.get(key)
+                was_active = existing is not None and existing.status == "active"
+                entry = RosterEntry(
+                    ticker=ticker, strategy_name=strategy_name, params=params_lookup.get(key, {}),
+                    status="candidate", promoted_at=existing.promoted_at if existing else None,
+                    backtest_score=score, efficiency_ratio=er,
+                )
+                if was_active:
+                    append_event(
+                        ticker, strategy_name, "demoted",
+                        f"regime mismatch: {strategy_name} is a {strat_regime} strategy but "
+                        f"{ticker} measured {ticker_regime} (ER {er:.2f}) over the scan window",
+                    )
+                new_entries.append(entry)
+                seen_keys.add(key)
+                continue
+
         existing = existing_by_key.get(key)
         was_active = existing is not None and existing.status == "active"
         stats = live_perf_fn(ticker, strategy_name)
@@ -210,7 +249,7 @@ def evaluate_roster(
                 status="paused",
                 promoted_at=existing.promoted_at if existing else None,
                 paused_at=datetime.now(timezone.utc).isoformat(), pause_reason=reason,
-                backtest_score=score, live_stats=asdict(stats),
+                backtest_score=score, live_stats=asdict(stats), efficiency_ratio=er,
             )
             if was_active:
                 append_event(ticker, strategy_name, "paused", reason)
@@ -222,7 +261,7 @@ def evaluate_roster(
             entry = RosterEntry(
                 ticker=ticker, strategy_name=strategy_name, params=params_lookup.get(key, {}),
                 status="candidate", promoted_at=existing.promoted_at if existing else None,
-                backtest_score=score, live_stats=asdict(stats),
+                backtest_score=score, live_stats=asdict(stats), efficiency_ratio=er,
             )
             if was_active:
                 append_event(ticker, strategy_name, "demoted", f"no longer in top {config.roster_size} by backtest score")
@@ -234,7 +273,7 @@ def evaluate_roster(
             ticker=ticker, strategy_name=strategy_name, params=params_lookup.get(key, {}),
             status="active",
             promoted_at=existing.promoted_at if was_active else datetime.now(timezone.utc).isoformat(),
-            backtest_score=score, live_stats=asdict(stats),
+            backtest_score=score, live_stats=asdict(stats), efficiency_ratio=er,
         )
         if not was_active:
             append_event(ticker, strategy_name, "promoted", f"backtest score {score:.3f}")
