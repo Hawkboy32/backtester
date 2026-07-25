@@ -112,3 +112,113 @@ execution adapter — it's:
 - Priority: breadth of markets now (CFD broker) vs a solid long-term real-asset broker
   (IBKR) even if it's more setup?
 - Appetite for sourcing forex/CFD historical data (needed to validate before trading)?
+
+---
+
+# 2026-07-25 update — working the two blockers
+
+_Since the above was written, IBKR (#30) has been BUILT and live-tested against a real paper
+account. That changes the picture materially, and is the single most important thing on this
+page now. Research only — nothing here is built, and no leverage decision has been made._
+
+## The reframe: you may not need IG at all
+
+The original goal was "access more markets — forex, gold, indices". IG was the candidate
+because it has the cleanest CFD API. But **IBKR is now connected and working**, and IBKR
+trades **real spot forex** — unleveraged-capable, actual asset ownership, through a gateway
+connection that is already proven (paper account [redacted-demo-account-id], snapshot/positions/clock/orders
+all verified 2026-07-25).
+
+So the honest question is no longer "how do we integrate IG?" but:
+
+> **Do you actually want leveraged CFDs, or did you want access to forex?**
+
+Because those have different answers:
+
+| If what you want is... | The right move is... |
+|---|---|
+| Forex exposure, owning the position, no gearing | **Extend the existing IBKR adapter to spot FX.** No new broker, no new credentials, no leverage decision, reuses a working connection. |
+| Spread betting specifically (UK tax treatment) | IG — it is genuinely the only one of these that offers it. This is a tax question, not a technical one; worth an accountant's view before it drives an architecture decision. |
+| Geared exposure — controlling more than you put in | IG/Capital.com CFDs — and this is the risk-category change the whole document warns about. |
+
+**Recommendation: extend IBKR to spot forex rather than integrating IG**, unless spread
+betting's tax treatment is the actual draw. It is less work, less new surface, no new
+credential store, and it does not require accepting leverage. IG stays documented here if
+that changes.
+
+## Blocker (a): the leverage decision — laid out for a deliberate call
+
+This has been "pending" since 21 July. It cannot be resolved by research, only by choosing.
+The facts, stated plainly:
+
+- CFD brokers are legally required to display that **~70–80% of retail CFD accounts lose
+  money**. That figure is for humans trading discretionarily; an automated system is not
+  obviously better and may be worse, because it can act on a broken edge faster than you
+  can notice.
+- Leverage does not improve an edge. It multiplies whatever is already there — including a
+  negative one. This system currently has **no demonstrated edge**: one live trade in week
+  one, and `live_trades.db` still holds zero completed round trips.
+- The engine is long-only, flat-entry, no shorting, and cannot currently express a margin
+  position. Gearing it is not a config flag; it is new position-sizing, new margin
+  accounting, and a real risk of a margin call the existing `account_risk.py` breaker was
+  never designed for.
+- Against the stated goal — building family wealth, defaulting to the cautious option —
+  **the recommendation is to decline leverage entirely, or cap it hard at 1x** (i.e. use a
+  CFD purely as an access mechanism, never as gearing).
+
+**This is your call, not mine. But nothing should be built on the CFD path until it is made,
+and the cautious answer is also the cheapest one: it deletes most of the remaining work.**
+
+## Blocker (b): forex/CFD backtest data — options, ranked
+
+Verified 2026-07-25.
+
+1. **Polygon / Massive "Currencies" plan — CHECK THIS FIRST.** Same vendor already in use, so
+   `data.py` already speaks the aggregates shape; forex and crypto are licensed together.
+   Reported as a free Basic tier (5 calls/min, ~2 years history, reference + aggregate bars)
+   with paid tiers above it. **UNVERIFIED and important:** whether MINUTE aggregates are on
+   the free tier, or only end-of-day — the pricing page renders its Currencies tab
+   client-side and could not be read programmatically. This project backtests on minute bars,
+   so that one fact decides whether this option is nearly-free or costs money.
+   **Action: open massive.com/pricing → Currencies tab and read off the minute-aggregate and
+   history rows.** One page, no code, and it determines everything below.
+2. **Dukascopy** — free, genuinely deep (tick through monthly, history to ~2003–2007), with a
+   maintained `dukascopy-python` library. The best free option for forex depth. Cost: a
+   second data path with a different shape, plus a new dependency.
+3. **OANDA practice API** — real FX data, long daily history, another integration to write.
+4. **IG's own historical prices — NOT a backtesting source.** Worth recording as a dead end
+   so nobody tries it: IG's API has a finite **weekly datapoint allowance** and stores only
+   limited history, and the consensus (including IG's own Labs material) is that it is
+   insufficient for systematic backtesting. The tempting shortcut of "just use the broker's
+   own data" does not work here.
+
+## Crypto data — Binance public API (from the #36 source)
+
+Answers the separately-noted "no crypto backtest data" gap behind the already-linked (and
+deliberately empty) Coinbase/Kraken accounts.
+
+- `GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m` — **no API key, no
+  account, no signature.** 1000 candles per request; paginate with `startTime`/`endTime`.
+  Intervals 1s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M.
+- Caveats to carry into any build:
+  - Binance quotes in **USDT**, not USD (`BTCUSDT`). Coinbase/Kraken USD pairs are close but
+    not identical; one exchange's candles are not the other's fills.
+  - Public market data is readable regardless of regional trading restrictions, but if a
+    request ever returns HTTP 451 that is a geo-block, not a bug.
+- **Not built, and shouldn't be yet.** Crypto needs its own strategy validation pass first —
+  the GLD result (only 2/18 strategies profitable, Bollinger Mean Reversion going from +10.76%
+  on equities to -1.66% on gold) is direct evidence that equity-tuned strategies do not
+  transfer across instrument classes. Crypto is further away than gold was.
+- 24/7 markets also break assumptions baked into the engine: `session_dates`, the
+  `periods_per_year=252` default in metrics, `time_in_market` denominators, the market-hours
+  guard, and the FOMC event calendar all assume a weekday session model. `volatility.py`
+  already supports `periods_per_year=365`, which is the only piece currently ready.
+
+## Revised sequence
+
+1. **Read the Currencies pricing tab** (5 minutes, decides the data path).
+2. **Make the leverage call** — recommendation above is to decline it.
+3. If forex is still wanted after 1–2: **extend the IBKR adapter to spot FX**, and only then
+   revisit IG if spread betting specifically matters.
+4. Validate strategies on the new instrument class before any paper auto-trading, exactly as
+   gold was validated (and rejected).

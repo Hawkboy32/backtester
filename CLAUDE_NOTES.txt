@@ -765,6 +765,101 @@ machine. Entry point: app.py.
   singleton guard (blocks a live second runner, takes over from a dead one). Add + delete were
   also round-tripped through the real browser UI.
 
+=== PROFIT FACTOR + TIME IN MARKET (#36, 2026-07-25, commit 7b4ed08) ===
+- Origin: same source as the Binance note below — user-supplied ideas to borrow. Profit factor
+  is a metric the project genuinely lacked: gross profit / gross loss, where >1 means the
+  winners outweighed the losers. It says what win rate cannot, because win rate ignores SIZE
+  (a 40%-win strategy is strongly profitable if its winners are big enough).
+- metrics.compute_report now also returns profit_factor, time_in_market and avg_trade_value.
+  DESIGN CALLS worth keeping:
+  * profit_factor is None (not infinity) when there are no LOSING trades. Storing inf would
+    break JSON and rank nonsense to the top; on a small sample "no losses" almost always means
+    too few trades to judge rather than perfection. It is also None with no trades at all —
+    the UI help text says "—" covers both cases, deliberately not distinguishing them.
+  * time_in_market counts BARS via searchsorted, not wall-clock. On minute data an overnight
+    hold spans ~16 hours in which no bar exists; charging the strategy for that exposure would
+    be wrong and could push the fraction above 1. Half-open [entry, exit), so a same-bar round
+    trip is 0 bars. Verified explicitly with an overnight-gap test (wall-clock would read
+    99.7% where the bar count correctly reads 50%).
+  * avg_trade_value is BACKTEST SCREEN ONLY, no DB column. This engine goes all-in on a BUY,
+    so it tracks the equity curve rather than distinguishing combos — useless as a comparison
+    column, useful as a position-size sanity check.
+- profit_factor + time_in_market threaded through scanner.ScanResultRow -> scan_db (idempotent
+  ALTER TABLE _migrate) -> ranking._results_to_frame -> the Scanner "Top combos" table, Scan
+  History all-time top, and the strategy leaderboard. ranking.py's SCORE WEIGHTS ARE UNCHANGED
+  — these are display/learning columns, same discipline as expectancy and conviction.
+- The strategy leaderboard's "Mean PF" averages per-combo RATIOS (gross totals aren't stored),
+  so one combo with a huge ratio off two trades drags it up. Said so in the column help text
+  rather than quietly shipping a misleading number.
+- MIGRATION: verified on a COPY of the real scan_history.db first (3,060 results / 6 runs
+  preserved, old rows read back NULL, idempotent on a second pass), then the real DB migrated
+  when the dashboard loaded Scan History. NOTE: that same load also applied the expectancy +
+  efficiency_ratio columns from commit c652d56 — the real DB had never been opened through
+  that path, so it was still missing them. Confirmed after: 3,060 rows and 6 runs intact.
+
+=== BOT-DOWN DEAD-MAN'S SWITCH (#34, 2026-07-25, commit 7b4ed08) ===
+- Closes the gap the 2026-07-22 incident exposed: the bot died when the laptop slept, stayed
+  dead ~29h with a position open, and NOTHING alerted because silence looks exactly like a
+  quiet trading day.
+- KEY DESIGN POINT, decided with the user: this CANNOT be a local watchdog. Whatever kills the
+  bot (sleep, shutdown, power cut) freezes a watchdog on the same laptop too. The only thing
+  that can notice absence is something running elsewhere, so the check is inverted — the bot
+  proves it is alive on a schedule and an EXTERNAL service (healthchecks.io, or self-hosted)
+  alerts when the proof stops. User chose this over the two local-only options.
+- src/backtester/heartbeat.py: ping() is called from run_cycle right after the local heartbeat
+  is written, BEFORE every early return, so it reports PROCESS LIVENESS, not armed-ness. A
+  disarmed-but-running bot is healthy and must never page anyone. Same safety contract as
+  notifications.notify(): never raises, never blocks trading, 5s timeout. Throttled to one
+  ping/minute; a FAILED ping does not reset the throttle, so a monitor outage can't silence us
+  for a minute after each failure.
+- HTTPS required EXCEPT for loopback / private-range / .local hosts, so the future Pi can
+  self-host without a certificate while the URL (a bearer token in the path) is never sent in
+  clear text over the internet. This was found by testing: the first version was https-only,
+  which would have broken the self-hosting the docstring promised.
+- THE THING THAT MAKES OR BREAKS THIS is on the healthchecks.io side, not in the code: the
+  check needs a CRON SCHEDULE matching market hours (e.g. */5 13-21 * * 1-5 UTC). The user
+  shuts the laptop down overnight, so without a schedule it would page every single night and
+  they would learn to ignore it. Setup steps are in the Settings expander.
+- Dashboard now distinguishes a bot that stopped ITSELF (running=False -> calm, no banner)
+  from a stale heartbeat while running is still True -> the silent-death signature -> a loud
+  red banner naming how long it has been gone and warning that open positions are unmanaged.
+  Armed-but-no-process gets its own warning. Verified BOTH ways in the real dashboard by
+  simulating the 29h signature in status.json (backed up and restored immediately after).
+- DEFAULTS OFF. Nothing changes for the running bot until the user configures a ping URL.
+
+=== TWO-FACTOR AUTH GROUNDWORK (#22, 2026-07-25) — BUILT BUT NOT ENFORCED ===
+- IMPORTANT FINDING that saves a wrong turn: streamlit-authenticator 0.4.2's built-in
+  `two_factor_auth` flag exists ONLY on forgot_password / forgot_username / register_user —
+  NOT on login, which is the one flow #22 needs. Its mechanism also emails a code through the
+  library author's CLOUD service (api_key + cloud_model.py), i.e. routing the user's address
+  and login codes through a third party. Unusable for this. Hence a custom TOTP layer.
+- src/backtester/two_factor.py: standard RFC 6238 TOTP via pyotp (new dependency, added to
+  requirements.txt + pyproject.toml), verified locally, nothing leaves the machine. Works with
+  Google Authenticator / Authy / 1Password. Secret lives in the OS KEYRING (it is a credential
+  equal to the password), matching accounts.py; recovery codes are stored as SHA-256 HASHES in
+  auto_trader_state/recovery_codes.json so the file can't be replayed to get in.
+- ANTI-LOCKOUT is the whole design, since there is no support desk: (1) ten single-use recovery
+  codes; (2) two_factor.disable(username) from a local terminal needs no code at all —
+  legitimate because physical access to this machine is already game over for a local app;
+  (3) begin_enrolment() stores NOTHING — the secret is only persisted by complete_enrolment()
+  after the user's app has produced a valid code, so a mis-scanned QR can never lock anyone out.
+  valid_window=1 tolerates ~30s of phone clock drift.
+- STATUS: the core module is built and tested (40 assertions: enrolment ordering, wrong-code
+  rejection, drift tolerance, single-use recovery, per-user isolation, corrupt-file handling,
+  disable()). It is NOT wired into the login flow and 2FA is NOT enforced — is_enrolled() is
+  false for every user, so nothing is challenged. Enforcement is the deliberate next step and
+  should be done WITH THE USER PRESENT so they can scan the QR and confirm a working code
+  before it starts gating access.
+- REAL BUG FOUND AND FIXED while verifying: a session cookie naming a user who no longer
+  exists in auth_config.yaml (last session's throwaway qa_temp, since removed) made
+  authenticator.login() raise LoginError straight out of require_auth — the whole page became
+  a traceback with no login form and no way back in without knowing to clear cookies by hand.
+  Now caught: the stale cookie is deleted and the login form shown. Exactly the class of
+  lockout #22 must not add.
+- WHEN 2FA ACTUALLY MATTERS: today the dashboard is localhost-only and an attacker would
+  already need this machine. It earns its keep the moment the dashboard is reachable remotely
+  (the Pi + Tailscale plan), because from then on a stolen password alone could arm a bot.
+
 === VERSION CONTROL / GITHUB (set up 2026-07-21) ===
 - backtester/ is now a git repo, pushed to PRIVATE GitHub repo Hawkboy32/backtester
   (verified private: anonymous fetch 404s). Purpose: enables working on the project from a

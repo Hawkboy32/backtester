@@ -21,6 +21,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit_authenticator as stauth
 import yaml
+from streamlit_authenticator.utilities.exceptions import LoginError
 
 from backtester import events, execution_log, keystore
 from backtester.accounts import (
@@ -207,7 +208,17 @@ def require_auth() -> tuple[stauth.Authenticate, str]:
         config["cookie"]["key"],
         config["cookie"]["expiry_days"],
     )
-    authenticator.login("main")
+    try:
+        authenticator.login("main")
+    except LoginError:
+        # A saved session cookie naming a user who no longer exists in
+        # auth_config.yaml (e.g. a temporary account that was since removed)
+        # otherwise raises straight out of login() and replaces the whole page
+        # with a traceback — no login form, no way back in without knowing to
+        # clear cookies by hand. Drop the stale cookie and show the form.
+        authenticator.cookie_controller.delete_cookie()
+        st.warning("Your saved session is no longer valid. Please log in again.")
+        st.stop()
 
     auth_status = st.session_state.get("authentication_status")
     if auth_status is False:
