@@ -13,6 +13,16 @@ import pandas as pd
 from backtester.conviction import compute_conviction
 from backtester.strategy import Bar, Signal, Strategy
 
+# Bump whenever a change affects backtest CORRECTNESS (not cosmetics) — lets
+# scan_db.py tag every recorded run with the engine that produced it, so a
+# later analysis or roster re-evaluation can tell a pre-fix result from a
+# post-fix one instead of trusting insertion order. First real use: the
+# 2026-07-27 fix below, where slippage was applied in the same direction for
+# both BUY and SELL fills, making a round trip's real transaction cost
+# silently near-zero regardless of the slippage_bps setting — every scan run
+# before this tag existed was computed under that bug.
+ENGINE_VERSION = "2026-07-27-directional-slippage-fix"
+
 
 def _session_window_starts(index: pd.DatetimeIndex, sessions_needed: int) -> list[int]:
     """For every bar position i, the start index of a window covering the
@@ -125,7 +135,18 @@ class BacktestEngine:
             )
 
             signal = strategy.on_bar(history, current)
-            fill_price = current.close * (1 + self.slippage_bps / 10_000)
+            # Slippage must be DIRECTIONAL — it costs the trader on both sides of a
+            # round trip, never nets to ~zero. A BUY fills at a WORSE (higher) price;
+            # a SELL fills at a WORSE (lower) price. (Bug found 2026-07-27: a single
+            # shared `close * (1 + bps)` fill price for both sides made a round trip's
+            # P&L nearly slippage-INVARIANT — the extra cost on entry and the extra
+            # "benefit" on exit almost exactly canceled, confirmed with a flat-price
+            # repro showing a literal $0.00 slippage cost on a 1% slippage round trip.
+            # This silently understated every backtest's real transaction costs since
+            # this engine was first written.)
+            slip = self.slippage_bps / 10_000
+            buy_fill_price = current.close * (1 + slip)
+            sell_fill_price = current.close * (1 - slip)
 
             regime = None
             size_multiplier = 1.0
@@ -144,20 +165,20 @@ class BacktestEngine:
             if signal is Signal.BUY and shares == 0 and regime != "storm" and not event_blocked:
                 spend = cash * size_multiplier
                 if spend > self.commission_per_trade:
-                    shares = (spend - self.commission_per_trade) / fill_price
-                    cash -= shares * fill_price + self.commission_per_trade
+                    shares = (spend - self.commission_per_trade) / buy_fill_price
+                    cash -= shares * buy_fill_price + self.commission_per_trade
                     # Conviction is scored at the entry bar and stored for later learning
                     # (#25). It does NOT influence sizing here — spend/shares are unchanged.
                     conviction = compute_conviction(strategy, history, current)
                     open_trade = Trade(
-                        entry_time=current.timestamp, entry_price=fill_price,
+                        entry_time=current.timestamp, entry_price=buy_fill_price,
                         shares=shares, conviction=conviction,
                     )
             elif signal is Signal.SELL and shares > 0:
-                cash += shares * fill_price - self.commission_per_trade
+                cash += shares * sell_fill_price - self.commission_per_trade
                 if open_trade is not None:
                     open_trade.exit_time = current.timestamp
-                    open_trade.exit_price = fill_price
+                    open_trade.exit_price = sell_fill_price
                     trades.append(open_trade)
                     open_trade = None
                 shares = 0.0
@@ -181,8 +202,12 @@ class BacktestEngine:
 
         if open_trade is not None:
             last_row = bars.iloc[-1]
+            # A forced liquidation at the end of the window is still a real SELL —
+            # it must slip the same way an in-loop exit would, not fill at a
+            # frictionless raw close (that was a second, smaller instance of the
+            # same "final exit gets a free ride" gap fixed above).
             open_trade.exit_time = bars.index[-1]
-            open_trade.exit_price = last_row["close"]
+            open_trade.exit_price = last_row["close"] * (1 - self.slippage_bps / 10_000)
             trades.append(open_trade)
 
         equity_curve = pd.Series(equity_values, index=bars.index, name="equity")

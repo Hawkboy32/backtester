@@ -20,7 +20,12 @@ import pandas as pd
 from backtester import events, volatility
 from backtester.data import PolygonClient, PolygonError
 from backtester.engine import BacktestEngine
-from backtester.metrics import compute_report, efficiency_ratio as compute_efficiency_ratio
+from backtester.metrics import (
+    MARKET_CALENDARS,
+    compute_report,
+    efficiency_ratio as compute_efficiency_ratio,
+    periods_per_year_for_calendar,
+)
 from backtester.strategies import STRATEGY_REGISTRY, build_strategy
 
 
@@ -88,8 +93,18 @@ def run_scan(
     target_vol_ann: float = volatility.DEFAULT_TARGET_VOL_ANN,
     daily_lookback_days: int = 1100,
     event_filter_enabled: bool = False,
+    market_calendar: str = "equity",
+    strategy_params: dict[str, dict] | None = None,
 ) -> list[ScanResultRow]:
-    """vol_target_enabled: when True, fetches a separate daily-bar history per
+    """strategy_params: optional {strategy_name: {param: value}} overrides,
+    merged over that strategy's STRATEGY_REGISTRY defaults (same merge
+    build_strategy() already does — {**default_params, **override}). A
+    strategy absent from this dict runs with its plain defaults, same as
+    before this parameter existed. This is the seam paramsweep.py uses to
+    run the same ticker/window/cost setup across a parameter grid without
+    duplicating run_scan's fetch/cost/threading machinery.
+
+    vol_target_enabled: when True, fetches a separate daily-bar history per
     ticker (cached independently of the minute/hour/day bars used for the
     actual backtest) and uses a walk-forward GARCH(1,1) volatility regime to
     block new entries during "storm" regimes and scale position size the rest
@@ -101,10 +116,26 @@ def run_scan(
     event_filter_enabled: when True, suppresses new entries on known
     risk-event days (FOMC — see backtester.events). Off by default so
     existing results stay comparable.
+
+    market_calendar: one of metrics.MARKET_CALENDARS ("equity"/"crypto"/
+    "forex") — fixes Sharpe annualization (compute_report) and the GARCH vol
+    regime (volatility.compute_regime_table) to the right session-length/
+    trading-days-per-year pair. "crypto" is a real 24/7 market (365 days, a
+    24h session); "forex" trades a 24h session too but CLOSES on weekends
+    (252 days, like equities) — conflating the two overstates forex Sharpe
+    by treating Saturday/Sunday as tradable. Leaving this at the default
+    "equity" reproduces every existing equities scan's numbers exactly —
+    getting this wrong doesn't error, it silently mis-annualizes Sharpe, so
+    it must be set explicitly per-scan rather than guessed from the ticker.
     """
     unknown = [name for name in strategy_names if name not in STRATEGY_REGISTRY]
     if unknown:
         raise ValueError(f"Unknown strategies: {unknown}")
+    if market_calendar not in MARKET_CALENDARS:
+        raise ValueError(f"Unknown market_calendar {market_calendar!r}. Available: {list(MARKET_CALENDARS)}")
+
+    periods_per_year = periods_per_year_for_calendar(timespan, multiplier, market_calendar)
+    vol_periods_per_year = MARKET_CALENDARS[market_calendar][1]
 
     checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
     results: list[ScanResultRow] = []
@@ -127,9 +158,10 @@ def run_scan(
     def run_one_strategy(
         ticker: str, strategy_name: str, bars, regime_by_date: dict | None, ticker_er: float | None
     ) -> ScanResultRow:
-        params = STRATEGY_REGISTRY[strategy_name]["default_params"]
+        override = (strategy_params or {}).get(strategy_name)
+        params = {**STRATEGY_REGISTRY[strategy_name]["default_params"], **(override or {})}
         try:
-            strategy = build_strategy(strategy_name)
+            strategy = build_strategy(strategy_name, params=override)
             engine = BacktestEngine(
                 starting_cash=starting_cash,
                 commission_per_trade=commission_per_trade,
@@ -138,7 +170,7 @@ def run_scan(
                 blocked_dates=blocked_dates,
             )
             result = engine.run(bars, strategy)
-            report = compute_report(result.equity_curve, result.trades)
+            report = compute_report(result.equity_curve, result.trades, periods_per_year=periods_per_year)
             convictions = [t.conviction for t in result.trades if t.conviction is not None]
             avg_conviction = sum(convictions) / len(convictions) if convictions else None
             return ScanResultRow(
@@ -219,7 +251,9 @@ def run_scan(
                     daily_bars = client.get_aggregates(
                         ticker=ticker, from_date=daily_from, to_date=to_date, multiplier=1, timespan="day",
                     )
-                    regime_table = volatility.compute_regime_table(daily_bars, target_vol_ann=target_vol_ann)
+                    regime_table = volatility.compute_regime_table(
+                        daily_bars, target_vol_ann=target_vol_ann, periods_per_year=vol_periods_per_year,
+                    )
                     ticker_regime_by_date = volatility.regime_by_date(regime_table)
                 except (PolygonError, volatility.InsufficientHistoryError):
                     ticker_regime_by_date = None  # not enough daily history for this ticker; run unfiltered

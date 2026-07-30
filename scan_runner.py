@@ -28,11 +28,12 @@ from dotenv import load_dotenv
 
 from backtester import playlist
 from backtester.data import PolygonClient
+from backtester.engine import ENGINE_VERSION
 from backtester.memory_report import save_report
 from backtester.playlist import PlaylistItem, PlaylistStatus
 from backtester.scan_db import record_scan
 from backtester.scanner import run_scan
-from backtester.universe import load_universe
+from backtester.universe import load_universe, sample_universe
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 IDLE_EXIT_MESSAGE = "queue empty — nothing left to run"
@@ -84,7 +85,7 @@ def run_item(item: PlaylistItem, status: PlaylistStatus) -> None:
     # "running" forever and abort the whole queue, which a test caught.
     try:
         universe_df = load_universe(item.universe)
-        tickers = universe_df["ticker"].head(item.max_tickers).tolist()
+        tickers = sample_universe(universe_df, item.max_tickers)["ticker"].tolist()
         client = PolygonClient(requests_per_minute=int(item.requests_per_minute))
 
         # Same checkpoint scheme as the Scanner tab: an interrupted item resumes
@@ -137,6 +138,7 @@ def run_item(item: PlaylistItem, status: PlaylistStatus) -> None:
         "multiplier": int(item.multiplier),
         "timespan": item.timespan,
         "strategy_names": item.strategy_names,
+        "engine_version": ENGINE_VERSION,
         "vol_target_enabled": item.vol_target_enabled,
         "target_vol_ann": item.target_vol_ann,
         "event_filter_enabled": item.event_filter_enabled,

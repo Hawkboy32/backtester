@@ -35,6 +35,20 @@ class StrategyAggregate:
     total_trades: int
 
 
+# Explicit column list so an EMPTY `rows` list still produces a frame with
+# the right columns (just zero rows) instead of a columnless DataFrame that
+# raises KeyError the moment anything indexes df["error"] or groups by
+# "strategy_name" — found 2026-07-26 during a full-app QA pass: an empty
+# list is exactly what the UI already guards against at every call site
+# today, but the guard living only in the caller left this a landmine for
+# any future direct call (e.g. from a script, or a future UI path).
+_RESULT_COLUMNS = [
+    "ticker", "strategy_name", "total_return", "cagr", "max_drawdown", "sharpe_ratio",
+    "num_trades", "win_rate", "num_bars", "expectancy", "profit_factor", "time_in_market",
+    "efficiency_ratio", "error",
+]
+
+
 def _results_to_frame(rows: list[ScanResultRow]) -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -56,7 +70,8 @@ def _results_to_frame(rows: list[ScanResultRow]) -> pd.DataFrame:
                 "error": r.error,
             }
             for r in rows
-        ]
+        ],
+        columns=_RESULT_COLUMNS,
     )
 
 

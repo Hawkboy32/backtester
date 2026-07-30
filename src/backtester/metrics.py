@@ -10,6 +10,66 @@ import pandas as pd
 TRADING_DAYS_PER_YEAR = 252
 MINUTES_PER_TRADING_DAY = 390
 
+# A 24/7 market (crypto) has no session close and no weekends — every calendar
+# day is a trading day and the "session" is the whole day.
+CONTINUOUS_DAYS_PER_YEAR = 365
+CONTINUOUS_MINUTES_PER_DAY = 1440
+
+# Named (session_minutes_per_day, trading_days_per_year) presets for
+# periods_per_year_for() below, keyed the same way callers pick a universe.
+# Forex is its own case, NOT the same as crypto: it trades a ~24h session but
+# CLOSES on weekends (~Fri 5pm ET to Sun 5pm ET), so the daily-session length
+# matches crypto's continuous day but the days/year count matches equities'
+# weekdays-only calendar — reusing crypto's 365 here would overstate forex
+# Sharpe by treating Saturday/Sunday as tradable. 252 (not the arithmetic
+# 5*52.14=~260.7 weekdays/year) is used for consistency with the equities
+# convention already in this file, matching common industry practice for
+# forex Sharpe annualization — an intentional choice, not an oversight.
+MARKET_CALENDARS: dict[str, tuple[float, float]] = {
+    "equity": (MINUTES_PER_TRADING_DAY, TRADING_DAYS_PER_YEAR),
+    "crypto": (CONTINUOUS_MINUTES_PER_DAY, CONTINUOUS_DAYS_PER_YEAR),
+    "forex": (CONTINUOUS_MINUTES_PER_DAY, TRADING_DAYS_PER_YEAR),
+}
+
+
+def periods_per_year_for(
+    timespan: str,
+    multiplier: int,
+    session_minutes_per_day: float = MINUTES_PER_TRADING_DAY,
+    trading_days_per_year: float = TRADING_DAYS_PER_YEAR,
+) -> float:
+    """How many bars of this timespan/multiplier occur in a year, for Sharpe
+    annualization (sqrt(periods_per_year) in compute_report below).
+
+    Every existing call site keeps its exact prior behavior (minute bars,
+    390 min/252-day equity session) by using the defaults. Pass
+    session_minutes_per_day=CONTINUOUS_MINUTES_PER_DAY and
+    trading_days_per_year=CONTINUOUS_DAYS_PER_YEAR for a 24/7 market
+    (crypto) — getting this wrong doesn't crash anything, it just silently
+    mis-annualizes Sharpe (crypto trades ~5.4x more minute bars/day than an
+    equity session), which is why this must be set explicitly, not guessed.
+    """
+    if timespan == "day":
+        return trading_days_per_year
+    if timespan == "hour":
+        bar_minutes = 60 * multiplier
+    elif timespan == "minute":
+        bar_minutes = multiplier
+    else:
+        raise ValueError(f"Unsupported timespan for annualization: {timespan!r}")
+    return (session_minutes_per_day / bar_minutes) * trading_days_per_year
+
+
+def periods_per_year_for_calendar(timespan: str, multiplier: int, market_calendar: str = "equity") -> float:
+    """periods_per_year_for() looked up by name via MARKET_CALENDARS, so callers
+    pick "equity" / "crypto" / "forex" instead of remembering the right
+    (minutes, days) pair themselves.
+    """
+    if market_calendar not in MARKET_CALENDARS:
+        raise ValueError(f"Unknown market_calendar {market_calendar!r}. Available: {list(MARKET_CALENDARS)}")
+    session_minutes_per_day, trading_days_per_year = MARKET_CALENDARS[market_calendar]
+    return periods_per_year_for(timespan, multiplier, session_minutes_per_day, trading_days_per_year)
+
 
 @dataclass
 class PerformanceReport:

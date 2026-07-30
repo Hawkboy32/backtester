@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     to_date TEXT,
     multiplier INTEGER,
     timespan TEXT,
-    strategy_names TEXT
+    strategy_names TEXT,
+    engine_version TEXT
 );
 
 CREATE TABLE IF NOT EXISTS scan_results (
@@ -74,9 +75,10 @@ def _connect():
 
 
 def _migrate(conn) -> None:
-    """Bring an older scan_results table up to date. CREATE TABLE IF NOT EXISTS
-    won't add columns to a pre-existing table, so add any missing ones here.
-    Idempotent (guarded by a table_info check) — safe to run on every startup."""
+    """Bring an older scan_results/scan_runs table up to date. CREATE TABLE IF
+    NOT EXISTS won't add columns to a pre-existing table, so add any missing
+    ones here. Idempotent (guarded by a table_info check) — safe to run on
+    every startup."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(scan_results)").fetchall()}
     if "conviction" not in existing:
         conn.execute("ALTER TABLE scan_results ADD COLUMN conviction REAL")
@@ -88,6 +90,14 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE scan_results ADD COLUMN profit_factor REAL")
     if "time_in_market" not in existing:
         conn.execute("ALTER TABLE scan_results ADD COLUMN time_in_market REAL")
+
+    existing_runs = {row[1] for row in conn.execute("PRAGMA table_info(scan_runs)").fetchall()}
+    if "engine_version" not in existing_runs:
+        # Legacy rows (every scan before this column existed) get NULL — an
+        # honest "unknown/pre-tagging", never backfilled with a guessed
+        # value. query_latest_run_id(engine_version=...) treats NULL as
+        # never matching a specific version filter.
+        conn.execute("ALTER TABLE scan_runs ADD COLUMN engine_version TEXT")
 
 
 def init_db() -> None:
@@ -102,8 +112,9 @@ def record_scan(meta: dict, rows: list[ScanResultRow]) -> int:
     with _connect() as conn:
         cursor = conn.execute(
             """INSERT INTO scan_runs
-               (run_at, universe, num_tickers, from_date, to_date, multiplier, timespan, strategy_names)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (run_at, universe, num_tickers, from_date, to_date, multiplier, timespan,
+                strategy_names, engine_version)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 meta.get("run_at", datetime.now(timezone.utc).isoformat()),
                 meta.get("universe"),
@@ -113,6 +124,7 @@ def record_scan(meta: dict, rows: list[ScanResultRow]) -> int:
                 meta.get("multiplier"),
                 meta.get("timespan"),
                 json.dumps(meta.get("strategy_names", [])),
+                meta.get("engine_version"),
             ),
         )
         run_id = cursor.lastrowid
@@ -166,10 +178,21 @@ def query_summary_counts() -> dict:
     }
 
 
-def query_latest_run_id() -> int | None:
+def query_latest_run_id(engine_version: str | None = None) -> int | None:
+    """The most recent scan run, or the most recent run stamped with a
+    SPECIFIC engine_version when given — use this from anywhere that must not
+    silently score off a run computed under an older, possibly-buggy engine
+    (e.g. re-evaluating the roster). Without the filter this is still bare
+    insertion order, same as before engine_version existed."""
     init_db()
     with _connect() as conn:
-        row = conn.execute("SELECT id FROM scan_runs ORDER BY id DESC LIMIT 1").fetchone()
+        if engine_version is not None:
+            row = conn.execute(
+                "SELECT id FROM scan_runs WHERE engine_version = ? ORDER BY id DESC LIMIT 1",
+                (engine_version,),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT id FROM scan_runs ORDER BY id DESC LIMIT 1").fetchone()
     return row[0] if row else None
 
 

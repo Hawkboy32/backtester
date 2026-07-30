@@ -87,7 +87,7 @@ STRATEGY_REGISTRY: dict[str, dict] = {
     },
     "VWAP Mean Reversion": {
         "class": VwapMeanReversionStrategy,
-        "default_params": {"min_bars": 5, "entry_deviation_pct": 0.5},
+        "default_params": {"min_bars": 5, "entry_deviation_pct": 0.3},
         "regime": "range",
     },
     "EMA Crossover Momentum": {
@@ -107,7 +107,7 @@ STRATEGY_REGISTRY: dict[str, dict] = {
     },
     "Bollinger Mean Reversion": {
         "class": BollingerMeanReversionStrategy,
-        "default_params": {"period": 20, "num_std": 2.0},
+        "default_params": {"period": 15, "num_std": 3.0},
         "regime": "range",
     },
     "RSI Divergence": {
