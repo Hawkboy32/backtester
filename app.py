@@ -36,10 +36,15 @@ from backtester.auto_trader_state import AutoTraderControl, load_control, load_s
 from backtester.brokers.base import OrderSide
 from backtester.brokers.ibkr import check_gateway_reachable
 from backtester.data import PolygonClient, PolygonError
-from backtester.engine import BacktestEngine
+from backtester.engine import ENGINE_VERSION, BacktestEngine
 from backtester.execution import AccountOrder, SizingMode, compute_qty_for_account, execute_order_across_accounts
 from backtester.memory_report import save_report
-from backtester.metrics import classify_ticker_regime, compute_report
+from backtester.metrics import (
+    MARKET_CALENDARS,
+    classify_ticker_regime,
+    compute_report,
+    periods_per_year_for_calendar,
+)
 from backtester.ranking import aggregate_by_strategy, rank_combos
 from backtester.saved_configs import delete_config, list_configs, load_config, save_config
 from backtester.scan_db import (
@@ -55,7 +60,7 @@ from backtester.scan_db import (
 from backtester.scanner import run_scan
 from backtester.strategies import STRATEGY_REGISTRY, build_strategy, strategy_regime
 from backtester.strategies.sma_crossover import SmaCrossoverStrategy
-from backtester.universe import UNIVERSE_REGISTRY, load_universe, sector_for_ticker
+from backtester.universe import UNIVERSE_REGISTRY, load_universe, sample_universe, sector_for_ticker
 from backtester.walkforward import aggregate_walkforward, run_walkforward_scan
 from backtester import account_risk, app_settings, heartbeat, live_trades, notifications, playlist, position_attribution, roster, volatility
 
@@ -656,6 +661,17 @@ def _execute_backtest_body(params: dict) -> None:
     vol_target_enabled = params["vol_target_enabled"]
     target_vol_ann = params["target_vol_ann"]
     event_filter_enabled = params["event_filter_enabled"]
+    # Polygon's own ticker namespace, not a guess: crypto tickers are always
+    # prefixed "X:" and forex "C:" (vs a bare equity symbol) — see
+    # metrics.MARKET_CALENDARS for why they need different annualization
+    # (crypto: 24/7, 365 days; forex: 24h session but closed weekends, 252
+    # days), same reasoning as the Scanner tab's universe-derived pick.
+    if ticker.startswith("X:"):
+        market_calendar = "crypto"
+    elif ticker.startswith("C:"):
+        market_calendar = "forex"
+    else:
+        market_calendar = "equity"
 
     with st.status("Running backtest...", expanded=True) as status:
         try:
@@ -684,7 +700,10 @@ def _execute_backtest_body(params: dict) -> None:
                     daily_bars = client.get_aggregates(
                         ticker=ticker, from_date=daily_from, to_date=str(to_date), multiplier=1, timespan="day",
                     )
-                    regime_table = volatility.compute_regime_table(daily_bars, target_vol_ann=target_vol_ann)
+                    regime_table = volatility.compute_regime_table(
+                        daily_bars, target_vol_ann=target_vol_ann,
+                        periods_per_year=MARKET_CALENDARS[market_calendar][1],
+                    )
                     regime_by_date = volatility.regime_by_date(regime_table)
                     latest_regime = volatility.latest_regime_info(regime_table)
                 except volatility.InsufficientHistoryError as e:
@@ -711,7 +730,8 @@ def _execute_backtest_body(params: dict) -> None:
             result = engine.run(bars, strategy)
 
             st.write("Computing performance metrics...")
-            report = compute_report(result.equity_curve, result.trades)
+            ppy = periods_per_year_for_calendar(timespan, int(multiplier), market_calendar)
+            report = compute_report(result.equity_curve, result.trades, periods_per_year=ppy)
 
             status.update(label="Done", state="complete")
         except PolygonError as e:
@@ -825,13 +845,37 @@ def render_scanner_tab() -> None:
         "ranks the results by a composite score, and writes a bot_memory.txt summary."
     )
     _render_saved_config_ui("scanner", SCANNER_CONFIG_KEYS, "_scan_pending_load", SCANNER_DATE_KEYS)
-    st.caption(
-        "⚠ Both universes below are today's constituent list applied retroactively over "
-        "the historical window — this overstates performance somewhat, since companies "
-        "removed/delisted from the index along the way aren't included (survivorship bias)."
-    )
 
     universe_name = st.selectbox("Universe", options=list(UNIVERSE_REGISTRY.keys()), key="scan_universe")
+    # Sharpe annualization needs the right session-length/trading-days-per-year
+    # pair for whichever asset class this universe is — derived from the
+    # universe pick so it can never be forgotten per-scan the way a manual
+    # checkbox could be. See metrics.MARKET_CALENDARS for why crypto (24/7,
+    # 365 days) and forex (24h session but closed weekends, 252 days) are NOT
+    # the same calendar despite both trading a "continuous" daily session.
+    if universe_name.startswith("Crypto"):
+        market_calendar = "crypto"
+        st.caption(
+            "Crypto trades 24/7 — Sharpe is annualized on a 365-day, 24-hour-session "
+            "calendar instead of the equity default. No survivorship bias here (this is "
+            "a fixed hand-picked list, not a historical index membership snapshot)."
+        )
+    elif universe_name.startswith("Forex"):
+        market_calendar = "forex"
+        st.caption(
+            "Forex trades a 24-hour session but closes on weekends — Sharpe is annualized "
+            "on a 252-trading-day year (like equities) with a 24-hour session (unlike "
+            "equities), not the crypto 365-day calendar. No survivorship bias here (this is "
+            "a fixed list of major pairs, not a historical index membership snapshot)."
+        )
+    else:
+        market_calendar = "equity"
+        st.caption(
+            "⚠ Both universes below are today's constituent list applied retroactively over "
+            "the historical window — this overstates performance somewhat, since companies "
+            "removed/delisted from the index along the way aren't included (survivorship bias)."
+        )
+
     try:
         universe_df = load_universe(universe_name)
     except FileNotFoundError as e:
@@ -841,7 +885,7 @@ def render_scanner_tab() -> None:
     col1, col2 = st.columns(2)
     with col1:
         max_tickers = st.slider(
-            f"Number of {universe_name} tickers to scan (alphabetical subset)",
+            f"Number of {universe_name} tickers to scan (evenly sampled across the whole list)",
             min_value=1,
             max_value=len(universe_df),
             value=min(25, len(universe_df)),
@@ -954,7 +998,7 @@ def render_scanner_tab() -> None:
         st.error("No Polygon API key set. Add one in the **API Keys** tab first.")
         return
 
-    tickers = universe_df["ticker"].head(max_tickers).tolist()
+    tickers = sample_universe(universe_df, max_tickers)["ticker"].tolist()
     client = PolygonClient(requests_per_minute=int(requests_per_minute))
 
     progress_bar = st.progress(0.0)
@@ -999,6 +1043,7 @@ def render_scanner_tab() -> None:
                 checkpoint_dir=results_dir / "walkforward",
                 fold_progress_callback=on_fold_progress,
                 result_callback=on_result,
+                market_calendar=market_calendar,
             )
         except Exception as e:  # noqa: BLE001
             st.error(f"Walk-forward scan failed: {e}")
@@ -1041,6 +1086,7 @@ def render_scanner_tab() -> None:
             vol_target_enabled=vol_target_enabled,
             target_vol_ann=target_vol_ann,
             event_filter_enabled=event_filter_enabled,
+            market_calendar=market_calendar,
         )
     except Exception as e:  # noqa: BLE001
         st.error(f"Scan failed: {e}")
@@ -1057,6 +1103,7 @@ def render_scanner_tab() -> None:
         "multiplier": int(multiplier),
         "timespan": timespan,
         "strategy_names": strategy_names,
+        "engine_version": ENGINE_VERSION,
         "vol_target_enabled": vol_target_enabled,
         "target_vol_ann": target_vol_ann,
         "event_filter_enabled": event_filter_enabled,
@@ -1178,6 +1225,57 @@ def _market_status_label(status: dict) -> str:
     return "⚪ Status unavailable"
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_account_balances(account_ids: tuple[str, ...], history_period: str) -> dict:
+    """Cached so the Accounts tab's balance/history section only actually hits
+    each broker once per 60s, not on every Streamlit rerun (any widget
+    interaction anywhere on the page reruns the whole script, and this used
+    to call build_broker_accounts + get_account_snapshot unconditionally every
+    time balances were toggled on). IG specifically tolerates only one fresh
+    login per short window (see ig.py's session-reuse notes) — an uncached
+    per-rerun call here would keep re-triggering that. Returns plain
+    JSON-safe data (not live broker objects), so st.cache_data can hash/store
+    it; friendly error strings are computed here too, before the original
+    exception goes out of scope."""
+    result: dict = {"connect_error": None, "rows": [], "row_errors": [], "history": []}
+    try:
+        broker_accounts = build_broker_accounts(list(account_ids))
+    except Exception as e:  # noqa: BLE001
+        result["connect_error"] = str(e)
+        return result
+
+    for broker_account in broker_accounts:
+        try:
+            snapshot = broker_account.get_account_snapshot()
+            result["rows"].append(
+                {
+                    "account": broker_account.nickname,
+                    "mode": "Paper" if broker_account.is_paper else "LIVE",
+                    "equity": snapshot.equity,
+                    "cash": snapshot.cash,
+                    "buying_power": snapshot.buying_power,
+                }
+            )
+        except Exception as e:  # noqa: BLE001
+            result["row_errors"].append((broker_account.nickname, "balance", _friendly_account_error(e)))
+            continue
+
+        try:
+            points = broker_account.get_equity_history(period=history_period, timeframe="1D")
+            if points:
+                result["history"].append(
+                    {
+                        "name": broker_account.nickname,
+                        "x": [p.timestamp for p in points],
+                        "y": [p.equity for p in points],
+                    }
+                )
+        except Exception as e:  # noqa: BLE001
+            result["row_errors"].append((broker_account.nickname, "equity history", _friendly_account_error(e)))
+
+    return result
+
+
 def _friendly_account_error(exc: Exception) -> str:
     """Plain-English reason for a broker data-fetch failure, so the empty crypto
     placeholder accounts degrade to a neutral note instead of a scary traceback."""
@@ -1288,50 +1386,28 @@ def render_accounts_tab() -> None:
             )
 
         if st.session_state.get("show_balances"):
-            try:
-                balance_accounts = build_broker_accounts([a["id"] for a in linked])
-            except Exception as e:  # noqa: BLE001
-                st.error(f"Failed to connect to linked accounts: {e}")
-                balance_accounts = []
+            fetched = _fetch_account_balances(tuple(a["id"] for a in linked), history_period)
 
-            balance_rows = []
-            history_fig = go.Figure()
-            any_history = False
-            for broker_account in balance_accounts:
-                try:
-                    snapshot = broker_account.get_account_snapshot()
-                    balance_rows.append(
-                        {
-                            "account": broker_account.nickname,
-                            "mode": "Paper" if broker_account.is_paper else "LIVE",
-                            "equity": snapshot.equity,
-                            "cash": snapshot.cash,
-                            "buying_power": snapshot.buying_power,
-                        }
-                    )
-                except Exception as e:  # noqa: BLE001
-                    st.info(f"{broker_account.nickname}: balance {_friendly_account_error(e)}")
-                    continue
+            if fetched["connect_error"]:
+                st.error(f"Failed to connect to linked accounts: {fetched['connect_error']}")
 
-                try:
-                    points = broker_account.get_equity_history(period=history_period, timeframe="1D")
-                    if points:
-                        history_fig.add_trace(
-                            go.Scatter(
-                                x=[p.timestamp for p in points],
-                                y=[p.equity for p in points],
-                                mode="lines",
-                                name=broker_account.nickname,
-                            )
-                        )
-                        any_history = True
-                except Exception as e:  # noqa: BLE001
-                    st.caption(f"{broker_account.nickname}: equity history {_friendly_account_error(e)}")
+            for nickname, kind, err in fetched["row_errors"]:
+                if kind == "balance":
+                    st.info(f"{nickname}: balance {err}")
+                else:
+                    st.caption(f"{nickname}: equity history {err}")
 
+            balance_rows = fetched["rows"]
             if balance_rows:
                 st.dataframe(pd.DataFrame(balance_rows), use_container_width=True)
 
-            if any_history:
+            history_fig = go.Figure()
+            for series in fetched["history"]:
+                history_fig.add_trace(
+                    go.Scatter(x=series["x"], y=series["y"], mode="lines", name=series["name"])
+                )
+
+            if fetched["history"]:
                 history_fig.update_layout(
                     title="Account equity over time (all linked accounts)",
                     xaxis_title="Date",
@@ -1341,6 +1417,7 @@ def render_accounts_tab() -> None:
                 st.plotly_chart(history_fig, use_container_width=True)
             elif balance_rows:
                 st.caption("No balance history available yet for the selected range.")
+            st.caption("Balances are cached for 60s.")
 
     if linked:
         st.caption("Live positions with colour-coded P&L are now on the **Overview** page.")
@@ -1352,6 +1429,7 @@ def render_accounts_tab() -> None:
     )
     broker_meta = BROKER_META[broker]
     uses_gateway = broker_meta.get("uses_gateway", False)
+    extra_cred_label = broker_meta.get("extra_cred_field")
     cred_label_1, cred_label_2 = broker_meta["cred_fields"]
 
     with st.form("add_account_form", clear_on_submit=True):
@@ -1366,9 +1444,10 @@ def render_accounts_tab() -> None:
             )
             mode = "Live (real money)"
 
-        api_key = secret_key = ""
+        api_key = secret_key = extra_cred = ""
         ibkr_host = ibkr_account = ""
         ibkr_port, ibkr_client_id = 4002, 1
+
         if uses_gateway:
             # IBKR connects to a local gateway the user runs and logs into — no API
             # key/secret, just connection config. Rendered as normal (non-masked) inputs.
@@ -1390,6 +1469,19 @@ def render_accounts_tab() -> None:
             ibkr_account = st.text_input(
                 "IBKR account code", placeholder="e.g. DU1234567 (paper) or U1234567 (live)"
             )
+        elif extra_cred_label:
+            # IG-shaped brokers: 3 credentials, not the usual 2 — its own
+            # account PASSWORD stands in for a "secret", plus a username IG
+            # needs to identify the session (see accounts.py's
+            # extra_cred_field / add_account's extra_cred param).
+            st.caption(
+                f"{broker_meta['label']} doesn't use a key+secret pair — it needs your "
+                f"account username and password alongside the API key you generated on "
+                f"their platform."
+            )
+            extra_cred = st.text_input(extra_cred_label, type="password")
+            api_key = st.text_input(cred_label_1, type="password")
+            secret_key = st.text_input(cred_label_2, type="password")
         else:
             api_key = st.text_input(cred_label_1, type="password")
             secret_key = st.text_input(cred_label_2, type="password")
@@ -1419,6 +1511,15 @@ def render_accounts_tab() -> None:
                     )
                     st.success(f"Linked {nickname}.")
                     st.rerun()
+            elif extra_cred_label:
+                if not nickname or not api_key or not secret_key or not extra_cred:
+                    st.error(f"Nickname, {extra_cred_label}, {cred_label_1}, and {cred_label_2} are all required.")
+                elif not is_paper and not live_confirm:
+                    st.error("Check the confirmation box to link this account.")
+                else:
+                    add_account(nickname, broker, is_paper, api_key, secret_key, extra_cred=extra_cred)
+                    st.success(f"Linked {nickname}.")
+                    st.rerun()
             else:
                 if not nickname or not api_key or not secret_key:
                     st.error(f"Nickname, {cred_label_1}, and {cred_label_2} are all required.")
@@ -1443,7 +1544,24 @@ def render_execution_tab() -> None:
         st.info("Link at least one account in the **Accounts** tab first.")
         return
 
-    ticker = st.text_input("Ticker", value="AAPL", key="exec_ticker").upper().strip()
+    known = _known_tickers()
+    ticker_options = sorted(known)
+    # A crypto/forex pair, IG epic, or anything else not in the equity
+    # universe CSVs may still be a valid symbol for the selected broker —
+    # accept_new_options keeps free-text entry available, same as the
+    # Backtest tab's ticker picker.
+    current_ticker = st.session_state.get("exec_ticker")
+    if current_ticker and current_ticker not in known:
+        ticker_options = [current_ticker] + ticker_options
+    ticker_choice = st.selectbox(
+        "Ticker (type to search, or enter any symbol not listed)",
+        options=ticker_options,
+        index=ticker_options.index("AAPL") if "AAPL" in ticker_options else 0,
+        format_func=lambda t: f"{t} — {known[t]}" if known.get(t) else t,
+        key="exec_ticker",
+        accept_new_options=True,
+    )
+    ticker = (ticker_choice or "AAPL").upper().strip()
     side = st.radio("Side", ["Buy", "Sell"], horizontal=True, key="exec_side")
 
     def _apply_size_preset(pct: float) -> None:
