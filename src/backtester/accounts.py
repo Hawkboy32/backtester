@@ -23,6 +23,7 @@ from backtester.brokers.alpaca import AlpacaBroker
 from backtester.brokers.base import BrokerAccount
 from backtester.brokers.coinbase import CoinbaseBroker
 from backtester.brokers.ibkr import IBKRBroker
+from backtester.brokers.ig import IGBroker
 from backtester.brokers.kraken import KrakenBroker
 from backtester.brokers.tastytrade_broker import TastytradeBroker
 from backtester.auto_trader_state import atomic_write_text
@@ -69,6 +70,17 @@ BROKER_META: dict[str, dict] = {
         # different link form for these, and build_broker_accounts skips the keyring.
         "uses_gateway": True,
     },
+    "ig": {
+        "label": "IG (Phase 3 — forex CFDs, mechanical scaffolding only, NOT live-verified)",
+        "cred_fields": ("API key", "Password"),
+        # IG's session auth needs THREE credentials (username, password, api_key),
+        # not the usual two — this is a deliberate extension of the keyring
+        # scheme (see add_account/build_broker_accounts) rather than forcing
+        # IG's username into a field labeled "secret key" or similar.
+        "extra_cred_field": "Username",
+        "supports_paper": True,  # IG has a real, documented demo account (verified 2026-07-21/27)
+        "has_market_hours": True,  # forex CFDs — closed weekends, unlike crypto's real 24/7
+    },
 }
 SUPPORTED_BROKERS = list(BROKER_META.keys())
 
@@ -112,6 +124,7 @@ def add_account(
     api_key: str = "",
     secret_key: str = "",
     conn_params: dict | None = None,
+    extra_cred: str = "",
 ) -> str:
     if broker not in SUPPORTED_BROKERS:
         raise ValueError(f"Unsupported broker '{broker}'. Supported: {SUPPORTED_BROKERS}")
@@ -122,6 +135,9 @@ def add_account(
     accounts = _load_raw()
     account_id = str(uuid.uuid4())
     row: dict = {"id": account_id, "nickname": nickname, "broker": broker, "is_paper": is_paper}
+
+    if BROKER_META[broker].get("extra_cred_field"):
+        keyring.set_password(KEYRING_SERVICE, _keyring_key(account_id, "extra"), extra_cred)
 
     if BROKER_META[broker].get("uses_gateway"):
         # IBKR: no secrets. Store only non-secret connection config as metadata —
@@ -145,7 +161,7 @@ def add_account(
 
 
 def remove_account(account_id: str) -> None:
-    for field in ("api_key", "secret_key"):
+    for field in ("api_key", "secret_key", "extra"):
         try:
             keyring.delete_password(KEYRING_SERVICE, _keyring_key(account_id, field))
         except keyring.errors.PasswordDeleteError:
@@ -178,6 +194,10 @@ def build_broker_accounts(account_ids: list[str] | None = None) -> list[BrokerAc
                 client_id=cp.get("client_id", 1),
                 ibkr_account=cp.get("ibkr_account", ""),
                 is_paper=a["is_paper"],
+                # Not surfaced in the dashboard link form yet (Phase 2, forex
+                # scan-validation only so far) — defaults to "equity" so every
+                # existing linked IBKR account behaves exactly as before.
+                asset_class=cp.get("asset_class", "equity"),
             )
             obj.account_id = a["id"]
             built.append(obj)
@@ -191,7 +211,18 @@ def build_broker_accounts(account_ids: list[str] | None = None) -> list[BrokerAc
                 "(deleted outside this app, or a different OS user account). Remove and re-link it."
             )
 
-        if broker == "alpaca":
+        if broker == "ig":
+            username = keyring.get_password(KEYRING_SERVICE, _keyring_key(a["id"], "extra"))
+            if not username:
+                raise ValueError(
+                    f"IG username for account '{a['nickname']}' is missing from the OS keyring "
+                    "(deleted outside this app, or a different OS user account). Remove and re-link it."
+                )
+            obj = IGBroker(
+                nickname=a["nickname"], username=username, password=secret_key,
+                api_key=api_key, is_paper=a["is_paper"],
+            )
+        elif broker == "alpaca":
             obj = AlpacaBroker(nickname=a["nickname"], api_key=api_key, secret_key=secret_key, is_paper=a["is_paper"])
         elif broker == "coinbase":
             obj = CoinbaseBroker(nickname=a["nickname"], api_key=api_key, api_secret=secret_key)

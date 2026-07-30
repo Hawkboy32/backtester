@@ -20,7 +20,12 @@ clientId so a not-yet-released previous connection doesn't cause "client id
 already in use".
 
 Scope (task #30): US-equity execution, same instruments as Alpaca, reusing the
-existing Polygon equities data path. Forex/CFD instruments are out of scope here.
+existing Polygon equities data path. Forex/CFD instruments were out of scope
+at first — spot forex (real, unleveraged) added 2026-07-27 (Phase 2) via the
+asset_class="forex" constructor param below, gated explicitly per-account
+rather than inferred from a ticker string (a bare 6-letter pair like "EURUSD"
+could in principle collide with an unusual equity ticker; the broker instance
+itself knows which asset class it represents, so nothing has to guess).
 """
 
 from __future__ import annotations
@@ -31,14 +36,18 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from ib_async import IB, LimitOrder, MarketOrder, StopOrder, Stock
+from ib_async import IB, Forex, LimitOrder, MarketOrder, StopOrder, Stock
 
 from backtester.brokers.base import AccountSnapshot, BrokerAccount, EquityPoint, OrderResult, OrderSide, Position
 
 # Reference symbol used only to read the US-equity trading calendar from IBKR
 # (its contract details carry liquidHours/timeZoneId). Any liquid US listing works.
 _CLOCK_SYMBOL = "SPY"
+# Reference forex pair for the same purpose when asset_class="forex" — IBKR
+# reports the same liquidHours/timeZoneId mechanism for a CASH contract.
+_FOREX_CLOCK_PAIR = "EURUSD"
 _DEFAULT_TIMEOUT = 8.0
+ASSET_CLASSES = ("equity", "forex")
 
 
 def _ensure_event_loop() -> None:
@@ -60,13 +69,24 @@ class IBKRBroker(BrokerAccount):
         client_id: int = 1,
         ibkr_account: str = "",
         is_paper: bool = True,
+        asset_class: str = "equity",
     ):
+        if asset_class not in ASSET_CLASSES:
+            raise ValueError(f"Unknown asset_class {asset_class!r}. Available: {ASSET_CLASSES}")
         self.nickname = nickname
         self.is_paper = is_paper
         self._host = host
         self._port = int(port)
         self._client_id_base = int(client_id)
         self._ibkr_account = ibkr_account or ""
+        self._asset_class = asset_class
+
+    def _contract(self, ticker: str):
+        """A Stock or Forex contract depending on this account's asset_class —
+        NOT inferred from `ticker`'s shape, set once at construction."""
+        if self._asset_class == "forex":
+            return Forex(ticker)
+        return Stock(ticker, "SMART", "USD")
 
     @contextmanager
     def _connect(self, timeout: float = _DEFAULT_TIMEOUT, readonly: bool = False):
@@ -130,9 +150,17 @@ class IBKRBroker(BrokerAccount):
             for it in items:
                 if not it.position:
                     continue  # skip flat/closed rows
+                # A CASH (forex) contract's .symbol is only the base currency
+                # (e.g. "EUR") — reconstruct the full pair like the rest of
+                # this app names it ("EURUSD"), same reasoning as below.
+                ticker = (
+                    it.contract.symbol + it.contract.currency
+                    if it.contract.secType == "CASH"
+                    else it.contract.symbol
+                )
                 positions.append(
                     Position(
-                        ticker=it.contract.symbol,
+                        ticker=ticker,
                         qty=float(it.position),
                         side="long" if it.position > 0 else "short",
                         avg_entry_price=float(it.averageCost),
@@ -144,15 +172,21 @@ class IBKRBroker(BrokerAccount):
             return positions
 
     def get_market_clock(self) -> dict | None:
-        """Real US-equity trading calendar, sourced from IBKR's own contract
-        details (handles holidays/half-days). This MUST be accurate: the
-        auto_trader's market-hours guard (the overnight-overtrade fix) relies on
-        it — returning None would make IBKR look 24/7-open like a crypto venue.
-        Falls back to a plain NYSE 9:30-16:00 ET weekday heuristic only if the
-        IBKR hours string can't be parsed."""
+        """Real trading calendar for this account's asset class, sourced from
+        IBKR's own contract details (handles holidays/half-days). This MUST be
+        accurate: the auto_trader's market-hours guard (the overnight-overtrade
+        fix) relies on it — returning None would make IBKR look 24/7-open like
+        a crypto venue, which is wrong for BOTH equities (real close) and forex
+        (closed weekends despite its ~24h weekday session). Falls back to a
+        plain weekday-hours heuristic only if the IBKR hours string can't be
+        parsed."""
         try:
             with self._connect(readonly=True) as ib:
-                details = ib.reqContractDetails(Stock(_CLOCK_SYMBOL, "SMART", "USD"))
+                probe = (
+                    Forex(_FOREX_CLOCK_PAIR) if self._asset_class == "forex"
+                    else Stock(_CLOCK_SYMBOL, "SMART", "USD")
+                )
+                details = ib.reqContractDetails(probe)
                 if details:
                     cd = details[0]
                     parsed = _parse_ib_hours(cd.liquidHours, cd.timeZoneId)
@@ -160,17 +194,22 @@ class IBKRBroker(BrokerAccount):
                         return parsed
         except Exception:  # noqa: BLE001 — fall through to the heuristic below
             pass
-        return _us_equity_clock_heuristic()
+        return _forex_clock_heuristic() if self._asset_class == "forex" else _us_equity_clock_heuristic()
 
     def get_open_order_tickers(self) -> set[str]:
         with self._connect(readonly=True) as ib:
             trades = ib.reqAllOpenOrders()
             active = {"PendingSubmit", "PreSubmitted", "Submitted", "ApiPending", "PendingCancel"}
-            return {
-                t.contract.symbol
-                for t in trades
-                if t.orderStatus and t.orderStatus.status in active and t.contract and t.contract.symbol
-            }
+            out = set()
+            for t in trades:
+                if not (t.orderStatus and t.orderStatus.status in active and t.contract and t.contract.symbol):
+                    continue
+                out.add(
+                    t.contract.symbol + t.contract.currency
+                    if t.contract.secType == "CASH"
+                    else t.contract.symbol
+                )
+            return out
 
     def get_equity_history(self, period: str = "1M", timeframe: str = "1D") -> list[EquityPoint]:
         # The TWS API has no simple portfolio-equity time series like Alpaca's
@@ -188,7 +227,7 @@ class IBKRBroker(BrokerAccount):
     ) -> OrderResult:
         try:
             with self._connect() as ib:
-                contract = Stock(ticker, "SMART", "USD")
+                contract = self._contract(ticker)
                 ib.qualifyContracts(contract)
                 action = "BUY" if side is OrderSide.BUY else "SELL"
 
@@ -383,4 +422,43 @@ def _us_equity_clock_heuristic() -> dict:
         while candidate.weekday() >= 5:
             candidate += timedelta(days=1)
         next_open = candidate
+    return {"is_open": is_open, "next_open": next_open}
+
+
+def _forex_clock_heuristic() -> dict:
+    """Fallback forex clock: one continuous ~24h/weekday session from Sunday
+    17:00 to Friday 17:00 America/New_York (the standard forex week — NOT the
+    equity pattern of daily closes) with no daily close in between. Does NOT
+    know forex-specific holidays (thin Christmas/New Year liquidity etc.) —
+    used only when IBKR's own hours string can't be read. Approximate, flagged
+    as such, same spirit as _us_equity_clock_heuristic."""
+    et = ZoneInfo("America/New_York")
+    now = datetime.now(et)
+    week_close = now.replace(hour=17, minute=0, second=0, microsecond=0)  # Friday 17:00 ends the week
+
+    # weekday(): Mon=0 ... Sun=6. Closed strictly between Friday 17:00 and
+    # Sunday 17:00; open every other moment.
+    if now.weekday() == 4 and now >= week_close:  # Friday, after the close
+        is_open = False
+    elif now.weekday() == 5:  # Saturday — always closed
+        is_open = False
+    elif now.weekday() == 6 and now < week_close:  # Sunday, before the reopen
+        is_open = False
+    else:
+        is_open = True
+
+    if is_open:
+        # Mirrors _us_equity_clock_heuristic's convention of reporting the
+        # most recent open when already open (callers check is_open first).
+        days_since_sunday_open = (now.weekday() + 1) % 7
+        next_open = (now - timedelta(days=days_since_sunday_open)).replace(
+            hour=17, minute=0, second=0, microsecond=0
+        )
+    else:
+        days_until_sunday = (6 - now.weekday()) % 7
+        next_open = (now + timedelta(days=days_until_sunday)).replace(
+            hour=17, minute=0, second=0, microsecond=0
+        )
+        if next_open <= now:
+            next_open += timedelta(days=7)
     return {"is_open": is_open, "next_open": next_open}

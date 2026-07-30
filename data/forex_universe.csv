@@ -1,0 +1,8 @@
+ticker,name,sector,sub_industry
+C:EURUSD,Euro / US Dollar,Europe,Major
+C:GBPUSD,British Pound / US Dollar,Europe,Major
+C:USDCHF,US Dollar / Swiss Franc,Europe,Major
+C:USDJPY,US Dollar / Japanese Yen,Asia-Pacific,Major
+C:AUDUSD,Australian Dollar / US Dollar,Asia-Pacific,Major
+C:NZDUSD,New Zealand Dollar / US Dollar,Asia-Pacific,Major
+C:USDCAD,US Dollar / Canadian Dollar,North America,Major

@@ -1,0 +1,16 @@
+ticker,name,sector,sub_industry
+X:BTCUSD,Bitcoin,Store of Value,Store of Value
+X:ETHUSD,Ethereum,Smart Contract Platform,Smart Contract Platform
+X:SOLUSD,Solana,Smart Contract Platform,Smart Contract Platform
+X:XRPUSD,XRP,Payments,Payments
+X:ADAUSD,Cardano,Smart Contract Platform,Smart Contract Platform
+X:DOGEUSD,Dogecoin,Payments,Payments
+X:AVAXUSD,Avalanche,Smart Contract Platform,Smart Contract Platform
+X:LINKUSD,Chainlink,Infrastructure,Oracle
+X:DOTUSD,Polkadot,Smart Contract Platform,Smart Contract Platform
+X:LTCUSD,Litecoin,Payments,Payments
+X:BCHUSD,Bitcoin Cash,Payments,Payments
+X:UNIUSD,Uniswap,DeFi,DeFi
+X:ATOMUSD,Cosmos,Infrastructure,Interoperability
+X:XLMUSD,Stellar,Payments,Payments
+X:ETCUSD,Ethereum Classic,Smart Contract Platform,Smart Contract Platform

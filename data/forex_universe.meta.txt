@@ -1,0 +1,25 @@
+fetched_at_utc=2026-07-27T00:00:00.000000+00:00
+source=hand-curated (no automated index/membership source exists for forex, same
+  situation as crypto_universe.csv) - the 7 standard "major" USD currency pairs (the
+  G7-currency majors: EUR, GBP, CHF, JPY, AUD, NZD, CAD all vs USD), chosen for highest
+  liquidity/tightest spreads and because IBKR (the broker this project already has live-
+  tested) supports all of them as spot forex via ib_async's Forex() contract. Every
+  ticker in this file was individually verified against a live Polygon API call before
+  being added (2026-07-27) - see CLAUDE_NOTES.txt "PHASE 2" for the verification method
+  and for why forex needed its OWN annualization calendar (metrics.MARKET_CALENDARS
+  "forex") distinct from crypto's - forex trades a 24h session like crypto but CLOSES on
+  weekends, unlike crypto's genuine 24/7.
+count=7
+note=sector column groups by counter-currency economic bloc (Europe/Asia-Pacific/North
+  America) purely so the roster's max_per_sector diversification cap has something
+  meaningful to bite on later - NOT a claim these blocs are economically independent
+  (all 7 pairs share USD as one leg, so they're correlated with each other and with
+  broad USD strength/weakness in a way equities from different GICS sectors are not).
+note2=EXECUTION GAP (same shape as crypto's symbol-mapping gap): brokers/ibkr.py's
+  IBKRBroker is currently hardcoded to Stock(ticker, "SMART", "USD") contracts in both
+  submit_market_order and the market-clock probe - it has NO forex contract path yet.
+  ib_async.Forex('EURUSD') is the verified correct construction (confirmed via SDK
+  introspection 2026-07-27) but has not been wired in. This universe is for SCANNING/
+  BACKTESTING validation only right now, same as crypto.
+note3=this is a periodic snapshot of a hand-picked list, not a live feed. No refresh
+  script exists (nothing to scrape) - editing the CSV directly is the "refresh".

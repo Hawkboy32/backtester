@@ -14,3 +14,4 @@ coinbase-advanced-py>=1.8
 krakenex>=2.2
 tastytrade>=9.0
 ib_async>=2.0
+trading-ig>=0.0.24

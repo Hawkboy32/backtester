@@ -1,0 +1,23 @@
+fetched_at_utc=2026-07-26T16:00:00.000000+00:00
+source=hand-curated (no automated index/membership source exists for crypto the way
+  Wikipedia's S&P 500 / Nasdaq-100 pages do) — top 15 USD pairs by market
+  prominence/liquidity that are BOTH tradable on the two crypto brokers already
+  linked in this project (Coinbase, Kraken) AND verified to return real minute-bar
+  aggregates from Polygon under the X:<SYMBOL>USD ticker format. Every ticker in
+  this file was individually verified against a live Polygon API call before being
+  added (2026-07-26) - see CLAUDE_NOTES.txt "Phase 1 (crypto)" for the verification
+  method. DOGE is included for trading volume/liquidity, not fundamentals - same
+  reasoning a liquid, actively-traded name earns a slot in the equities universes.
+  Stablecoins (USDC, USDT, etc.) are deliberately excluded - a strategy engineered
+  to trade price MOVEMENT has nothing to work with on an asset pegged to $1.
+count=15
+note=this is a periodic snapshot of a hand-picked list, not a live feed - re-review
+  the list occasionally (market-cap rankings shift) rather than treating it as
+  permanent. No refresh script exists for this one (nothing to scrape); editing the
+  CSV directly is the "refresh" for this universe.
+note2=SYMBOL MAPPING GAP: these tickers are in POLYGON's data format (X:BTCUSD).
+  Coinbase's execution API uses product-id format (BTC-USD) and Kraken uses its own
+  asset codes (XBT/ZUSD-derived pairs, see brokers/kraken.py's own caveat about this).
+  This universe is for SCANNING/BACKTESTING only right now - a symbol-mapping layer
+  between Polygon tickers and each broker's own trading-pair format is still needed
+  before any of this can be wired into actual crypto order execution.
