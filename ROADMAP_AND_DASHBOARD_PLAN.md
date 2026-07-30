@@ -1,3 +1,9 @@
+> **STATUS (2026-07-26): this plan is done.** Reorg, IBKR, conviction logging, and the
+> news panel all shipped 2026-07-25. Kept here as historical record only — for the
+> CURRENT roadmap (crypto validation -> unleveraged forex via IBKR -> a dedicated IG/
+> leverage discussion), see the "crypto + forex/CFD action plan" entry near the end of
+> CLAUDE_NOTES.txt.
+
 # Roadmap + dashboard simplification plan (draft, 2026-07-21)
 
 _A plan for the ORDER we tackle the pending additions, what each does to the dashboard,

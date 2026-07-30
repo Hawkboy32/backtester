@@ -42,6 +42,19 @@ against the live docs again before building — broker APIs change._
   limited shares. API is primarily the CFD/spread-bet dealing API.
 - **Python:** community lib `trading-ig` (mature) exists.
 - **Verdict:** Cleanest CFD API of the three; UK-established. Leveraged-product caveat applies.
+- **Refresh (2026-07-27, research-only — nothing built):** re-checked before the Phase 3
+  discussion. Direct WebFetch of IG's docs is now 403-blocked (labs.ig.com and
+  ig.com/en/trading-platforms/trading-apis/how-to-use-ig-api both refused — this is NEW
+  since 2026-07-21, when the docs were fetchable; IG appears to have tightened bot-
+  blocking). Confirmed via search-result snippets instead (lower confidence than a direct
+  fetch, flagged as such): the REST API guide still exists at the same URL; demo accounts
+  start with $20,000 virtual funds; **leverage up to 1:30 on some products** (a concrete
+  number the original research didn't have — 30x notional exposure per $1 of margin, for
+  context against this project's unleveraged-everywhere posture elsewhere); API is rate-
+  limited to **~40 trade requests/minute**. Nothing found that contradicts the original
+  assessment — the two blockers (leverage decision, no backtest data source) still stand.
+  Full doc content should be re-verified directly (not via search snippets) before any
+  actual IG integration work begins, given the new fetch-blocking.
 
 ### Capital.com — CFDs only
 - **API:** Documented REST. Docs: https://open-api.capital.com/

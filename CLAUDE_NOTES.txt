@@ -1,5 +1,5 @@
 CLAUDE_NOTES.txt — Trading Bot Backtester: reference for picking up a new session
-(Last updated: 2026-07-18. Update this file as the project evolves — don't let it go stale.)
+(Last updated: 2026-07-27. Update this file as the project evolves — don't let it go stale.)
 
 === WHAT THIS IS ===
 A local, password-gated Streamlit dashboard for backtesting, scanning, and (optionally)
@@ -920,6 +920,742 @@ machine. Entry point: app.py.
   explicitly GATED on paper validation proving the bot "is generating rather than losing" —
   don't propose hardware/hosting work until the checklist is done AND live paper results
   are net-positive.
+
+=== Update 2026-07-26 (full-app QA pass, no code changes) ===
+Ran a full verification pass across the whole app (engine/strategies/metrics, scanner/
+ranking/walk-forward, the safety-critical state layer, execution/brokers/auto-trader gates,
+the real production DBs read-only, and all 10 dashboard pages headlessly via Streamlit's
+AppTest) — 493 checks, 490 passed, all against scratchpad copies/mocks, nothing in this repo
+touched. Confirmed real: the 6f04d12 atomic-write race fix holds (0 torn reads across 2M+
+concurrent reads), every auto-trader safety gate (kill switch, daily cap, drawdown breaker,
+event step-out, market-hours guard, dedup) fires correctly end-to-end against mock brokers,
+and the real scan_history.db/live_trades.db pass integrity checks with no orphaned rows or
+impossible metrics. Three minor latent bugs found (none currently reachable through the UI):
+rank_combos([])/aggregate_by_strategy([]) raise KeyError on a literally empty list instead of
+returning empty (every UI call site already guards against empty selections, so dead code
+today); saved_configs.py doesn't fail closed on a corrupt file (every other store in the
+project does) and uses write_text instead of atomic_write_text. Not fixed yet — flagged only.
+The test harness itself was NOT committed (lives in the session's scratchpad, which does not
+persist) — worth asking to commit it into the repo if a next session wants a real regression
+suite, since currently there isn't one at all.
+
+=== Update 2026-07-26 (scan data analysis: what's working, what isn't) ===
+Analyzed all 19 recorded scan runs (~11,400 results, 5 distinct date windows, both S&P 500
+and Nasdaq-100) rather than just the latest run, specifically checking consistency ACROSS
+time windows, not just the newest scan's numbers.
+
+**Working, with real statistical weight:** Bollinger Mean Reversion (93/100 tickers
+profitable on the latest scan, mean Sharpe 5.44, profitable in 5/5 distinct time windows,
+std only 0.63, ~19,500 total trades — this is the strategy already carrying the live
+roster) and VWAP Mean Reversion (86/100 profitable, Sharpe 3.48, 5/5 windows, std 0.27).
+Weaker-but-real: Pivot Point Scalping and SMA Crossover (positive, consistent, but thin
+trade counts). **Not working, consistently:** 10 of 18 strategies were unprofitable in
+EVERY one of the 5 windows tested (Momentum ROC, MACD Crossover, VWAP Trend Following,
+Multi-Timeframe Pullback, Bollinger Breakout, Liquidity Sweep, Fibonacci Pullback, Volume
+Spike Reversal, Break-and-Retest, Opening Range Breakout, EMA Crossover Momentum) — every
+trend/breakout/momentum strategy in the registry, essentially. RSI Mean-Reversion is the
+one anomaly worth a direct look: it's tagged "range" like Bollinger Mean Reversion but is
+negative in 5/5 windows despite similar oversold-bounce logic — the two strategies' entry/
+exit conditions should be diffed directly.
+
+**A real methodological bias found, not yet fixed:** every scan so far used
+max_tickers=50, and universe.py's loader takes the first N tickers of the CSV, which is
+alphabetically sorted (from the Wikipedia scrape). Checked directly: EVERY S&P 500 scan run
+to date only ever covered tickers starting with "A" (AAPL through AVY, 50 of 503
+constituents); every Nasdaq-100 scan covered A-I only. The mean-reversion edge is broad and
+consistent WITHIN that slice, but it has never been tested against roughly 80% of either
+index. This is the single highest-value fix before trusting the roster further — needs
+either random/stratified sampling or sequential full-alphabet batch scanning, not head(N).
+
+**Roster staleness found:** auto_trader_state/roster.json was last written 2026-07-24, one
+day BEFORE the diversification-cap feature (commit 70829f9, #35) shipped 2026-07-25 — which
+is exactly why the live roster is still 3/3 Bollinger Mean Reversion despite the cap
+defaulting to max_per_strategy=2. Clicking "Re-evaluate roster now" (Overview or Auto
+Trading tab) will apply the cap immediately; no code change needed, just hasn't been
+clicked since the cap landed.
+
+Also flagged to the user but not yet investigated: runs #13-16 (identical universe/date-
+range/ticker-count) show identical trade counts but different total_return ~93% of the
+time — points at the Settings execution-cost defaults (commission/slippage) having changed
+between scans that day, not the strategies behaving differently. Worth confirming stability
+before comparing across that day's repeated runs.
+
+=== Update 2026-07-26 (crypto + forex/CFD action plan agreed — PHASE 1 STARTING) ===
+User asked for an action plan to start testing crypto and CFDs, given the above findings.
+Agreed 3-phase sequence, explicitly NOT to be rushed past validation even though the user
+also gave a soft target of "aim for market open" (Monday 2026-07-27, 13:30 UTC / 9:30 ET) —
+noting here explicitly: that is a PACING AIM, not a reason to skip a validation step the
+equities work didn't skip. If Phase 1 isn't cleanly validated by then, it continues past
+market open rather than being rushed — this matches [[project_trading_bot_goals]] (family
+wealth, paper-first, safety over speed) and the user has been consistent about this
+elsewhere in the project (e.g. the walk-forward / GLD-disproof pattern above).
+
+**PHASE 1 (crypto) — IN PROGRESS as of this note, independent of Phase 2/3:**
+1. Confirm whether the current Polygon plan includes crypto aggregates (X:BTCUSD-style
+   tickers via the existing PolygonClient) before reaching for a second data source
+   (Binance's public klines API was researched earlier as a free fallback — see the
+   2026-07-25 evening update above).
+2. Add a small crypto ticker universe (top 10-15 USD pairs) to UNIVERSE_REGISTRY, run the
+   existing unmodified 18-strategy scan against it — scanner/ranking/roster are already
+   instrument-agnostic.
+3. BEFORE trusting any results: audit strategies/indicators.py's session-based logic
+   (VWAP's daily reset, opening-range breakout, prior-session pivot points all assume one
+   daily market open) against a market that never closes. This must happen before results
+   are interpreted, not after.
+4. Validate across multiple time windows the same way the equities work was validated
+   here — do NOT assume Bollinger Mean Reversion transfers. The GLD precedent above already
+   showed an equity-tuned strategy does NOT reliably transfer to a different asset class
+   (only 2/18 strategies profitable on gold, and the stock-roster star LOST money there).
+5. Coinbase and Kraken have no verified sandbot — see accounts.py's supports_paper=False
+   force-override — so the first real crypto order is real money by construction. A single
+   manual trade before any automation, same bar as every other broker in this project.
+
+**PHASE 2 (unleveraged forex via IBKR) — starts once Phase 1 is validated (or judged a
+dead end):**
+1. Confirm Polygon/Massive's Currencies endpoint has minute-granularity aggregates on the
+   current plan — this is the one unverified fact blocking this path (flagged in
+   BROKER_EXPANSION_RESEARCH.md 2026-07-21: the pricing page's plan-comparison table
+   renders client-side and could not be read then).
+2. Add a forex ticker universe (majors: EUR/USD, GBP/USD, etc.) — IBKRBroker is already
+   built and LIVE-verified (see the 2026-07-25 afternoon paper-connection-test update
+   above); no new broker integration needed for this phase.
+3. Same session-boundary audit as crypto (forex trades ~24/5, not a single-daily-open
+   pattern) before trusting scan results.
+4. Same validation bar again: multi-window scan -> paper trade -> only then discuss going
+   further.
+
+**PHASE 3 (IG / leveraged CFDs) — explicitly DEFERRED for a dedicated, in-depth discussion
+once Phase 2 is done. Do not start building this without that discussion.** Known blockers
+already researched (BROKER_EXPANSION_RESEARCH.md): IG's own historical data has a finite
+weekly datapoint allowance and is not usable for backtesting — any CFD strategy validation
+would need to run on the underlying instrument's Polygon data and only trade the CFD live,
+which is its own can of worms (basis risk between the data used to validate and the
+instrument actually traded). Leverage is a genuine risk-category change from everything
+else in this project (unleveraged throughout) and needs its own explicit sizing/risk-limit
+model — separate from account_risk.py's existing drawdown breaker, which was designed
+around unleveraged equity. User has chosen to sequence IG AFTER Phase 2, not instead of it.
+
+=== Update 2026-07-27 (PHASE 1 crypto: DONE + validated; two real code fixes shipped) ===
+Ran the full Phase 1 checklist from the entry above. Two real, tested code changes landed
+along the way (both zero-regression on the existing 493-check suite, now ~536 checks):
+
+1. **Sharpe annualization was hardcoded to the equities calendar** (metrics.py's
+   compute_report default assumed a 390-min/252-day session regardless of what timespan
+   was actually scanned) — would have silently mis-annualized every crypto Sharpe by
+   ~5.4x if left alone. Fixed: metrics.periods_per_year_for(timespan, multiplier,
+   session_minutes_per_day, trading_days_per_year) is the new generic helper;
+   scanner.run_scan gained a continuous_market: bool = False param (threaded into both
+   compute_report and the GARCH regime table) that the Scanner tab now derives
+   AUTOMATICALLY from the universe name (never a manual checkbox to forget), and the
+   Backtest tab derives automatically from Polygon's own "X:" crypto ticker prefix.
+   Equities behavior is byte-identical to before (verified: periods_per_year_for("minute",
+   1) == the old hardcoded 98280 exactly).
+2. **Universe sampling bias, confirmed and fixed.** Every scan ever run (all 20 prior
+   runs) used max_tickers=head(N) on an alphabetically-sorted CSV — verified directly:
+   EVERY S&P 500 scan only ever covered tickers starting with "A" (AAPL-AVY), every
+   Nasdaq-100 scan covered A-I only. The Bollinger Mean Reversion edge found in those
+   scans is real WITHIN that slice but was never tested against ~80-90% of either index.
+   Fixed: universe.sample_universe(df, n) takes an evenly-spaced sample across the WHOLE
+   sorted list instead (still deterministic — same n gives the same rows every time, so
+   scan-to-scan comparisons stay reproducible). Fixed BOTH call sites that bypassed
+   load_universe's own max_tickers param by loading full + doing their own .head() —
+   app.py's Scanner tab (line ~996) AND scan_runner.py's playlist runner (line ~87) — both
+   were silently reproducing the same bug independently. Verified: a 50-ticker S&P sample
+   now spans 22 letters instead of 1. Slider label in app.py updated from "(alphabetical
+   subset)" to "(evenly sampled across the whole list)". NOTE FOR NEXT SESSION: any new
+   equities scan run after this fix will cover a DIFFERENT set of tickers than every prior
+   scan (by design) — don't be surprised if numbers shift; that's the fix working, not a
+   regression. Re-running the equities validation with the fixed sampler is worth doing
+   at some point but was NOT done this session (scope was crypto, not re-litigating
+   equities) — flagged as a good future task, not urgent since the existing finding
+   (mean-reversion >> trend) is directionally very likely to hold, just unconfirmed on the
+   full universe yet.
+
+**Crypto universe added:** data/crypto_universe.csv, 15 hand-curated liquid USD pairs
+(BTC/ETH/SOL/XRP/ADA/DOGE/AVAX/LINK/DOT/LTC/BCH/UNI/ATOM/XLM/ETC — no stablecoins),
+registered in universe.UNIVERSE_REGISTRY as "Crypto (top 15 USD pairs)". Every ticker was
+individually verified live against Polygon before being added (data.py's existing client
+needed ZERO code changes — Polygon's X:BTCUSD-style crypto tickers just work through the
+same get_aggregates() equities call). See data/crypto_universe.meta.txt for the full
+methodology note and the STILL-OPEN symbol-mapping gap (Polygon's X:BTCUSD data-ticker
+format vs Coinbase's BTC-USD product-id format vs Kraken's own asset codes — matters for
+EXECUTION later, irrelevant for the scanning/backtesting done so far).
+
+**Session-logic audit (done, no code bug found):** indicators.py's session_dates() groups
+by calendar date of the (UTC) timestamp index — for crypto with no real market open, this
+means "session" = UTC midnight-to-midnight, a legitimate if arbitrary convention (VWAP
+reset, opening-range, and pivot-point levels all still compute correctly, they just lose
+the behavioral story equities has — a real 9:30 auction gap — since crypto has no open
+auction at UTC midnight). No hardcoded 390/252 assumption found anywhere in
+strategies/*.py or engine.py. Conclusion: mechanically fine to scan, but if Opening Range
+Breakout or the pivot-point strategy ever show an edge on crypto specifically, treat it
+with MORE skepticism than the same edge on equities, since the mechanism it's supposed to
+be capturing doesn't really exist for a 24/7 market.
+
+**VALIDATION RESULT — 3 non-overlapping ~33-day windows (2026-04-16 to 2026-07-26, 810
+clean rows, 0 fetch errors across all 3 scans, all 15 pairs, all 18 strategies, real
+Polygon data, recorded as scan runs #21/#22/#23 in the real scan_history.db):**
+Bollinger Mean Reversion: profitable in 3/3 windows (100%), mean Sharpe 10.49 (std 3.26),
+14-15 of 15 tickers profitable every single window, mean per-window return +28% to +57%.
+VWAP Mean Reversion: also 3/3 windows profitable, mean Sharpe 2.44 (std 1.84), smaller but
+real. Every trend/momentum strategy failed in 0/3 windows (Momentum ROC worst at mean
+Sharpe -20.93) — this REPLICATES the equities finding on a completely different asset
+class, which is reassuring (looks like a genuine range-vs-trend regime effect over this
+period, not equities-specific noise) rather than just re-confirming crypto works.
+**Explicitly NOT trusted at face value despite clearing the 3-window bar:** ~800
+trades/ticker/month on an all-in-compounding engine at a flat 2bps slippage assumption
+BORROWED FROM EQUITIES is the kind of shape that tends to be optimistic — real crypto
+spreads on the less liquid pairs here (UNI, ATOM, ETC, XLM) are plausibly wider than 2bps,
+and this hasn't been checked. **NEXT STEP BEFORE ANY LIVE/PAPER CRYPTO POSITION: stress-
+test Bollinger Mean Reversion on crypto at a materially higher slippage assumption (e.g.
+10-15bps) and confirm the edge survives** — not done yet, flagged as the natural next
+task whenever crypto work resumes. Coinbase/Kraken have no verified sandbox (see
+accounts.py's supports_paper=False force-override), so the first real crypto order is
+real money by construction — user said (2026-07-27) they'll do that manual connectivity/
+order test themselves, separate from and in addition to the slippage stress-test above.
+
+=== Update 2026-07-27 (PHASE 2 unleveraged forex via IBKR — STARTED) ===
+User gave the explicit go-ahead to start Phase 2 once Phase 1's 3-window validation
+landed (2026-07-27), same session. Sequence per the agreed plan (see the "crypto + forex/
+CFD action plan" entry above): confirm Polygon forex data -> add a forex universe -> audit
+session logic for a 24/5 (not 24/7) market -> multi-window validation, same bar as
+crypto/equities.
+
+**Groundwork done before touching the API (to avoid burning the Phase-1 crypto scans'
+shared Polygon rate-limit budget mid-run):** confirmed brokers/ibkr.py's IBKRBroker is
+CURRENTLY HARDCODED to Stock(ticker, "SMART", "USD") contracts in both
+submit_market_order and the market-clock probe (get_market_clock's reqContractDetails
+call) — there is no forex contract path yet. Introspected the installed ib_async SDK
+directly (same discipline as every other broker in this project — verify against the real
+SDK, never guess): ib_async.Forex(pair='EURUSD') constructs
+Contract(secType='CASH', symbol='EUR', exchange='IDEALPRO', currency='USD') — this is the
+exact, verified shape IBKRBroker will need to branch to once execution work starts. NOT
+built yet — this is execution-layer work, correctly sequenced AFTER data validation per
+this project's "measure first" discipline, not before.
+
+**Real correctness fix that came out of doing this properly:** the crypto Phase-1 fix
+above added a binary continuous_market: bool to run_scan — insufficient the moment forex
+entered the picture, because forex is NOT the same calendar as crypto (confirmed live:
+C:EURUSD/C:USDJPY/etc. minute aggregates ARE on the current Polygon plan, zero code
+changes needed to data.py, same as crypto — but forex trades a 24h session that CLOSES on
+weekends, unlike crypto's genuine 24/7). Refactored before writing a second special case:
+metrics.py now has MARKET_CALENDARS = {"equity": (390min,252days), "crypto":
+(1440min,365days), "forex": (1440min,252days)} and periods_per_year_for_calendar(name).
+run_scan's param is now market_calendar: str = "equity" (not a bool). app.py derives it
+automatically — from the universe name in the Scanner tab, from Polygon's own ticker
+prefix ("X:" crypto / "C:" forex) in the Backtest tab — same "never a manual checkbox to
+forget" principle as the crypto fix. All existing crypto scans (#21-23) remain valid: the
+crypto calendar's actual (minutes, days) values are byte-identical before and after this
+refactor, only the plumbing to reach them changed.
+
+**Forex universe added:** data/forex_universe.csv, the 7 standard USD "majors" (EUR, GBP,
+CHF, JPY, AUD, NZD, CAD vs USD) — chosen because IBKR (already live-tested in this
+project) supports all 7 as spot forex. Every ticker individually verified live against
+Polygon first (same discipline as crypto). Registered as "Forex (7 major USD pairs)" in
+universe.UNIVERSE_REGISTRY. Sector column groups by counter-currency economic bloc
+(Europe/Asia-Pacific/North America) purely to give the roster's diversification cap
+something to bite on later — flagged in the meta file that this is NOT a claim of real
+independence (all 7 share USD as one leg, so they're correlated with broad USD moves in a
+way equity GICS sectors aren't).
+
+**Session-logic audit for forex (done, same conclusion as crypto — no code bug):**
+session_dates()'s UTC-calendar-date grouping handles forex's weekend gaps correctly with
+no special-casing needed — a day with zero bars (Saturday) simply doesn't produce a
+groupby key, and prior_session_pivot_points()'s shift(1) naturally references the last
+day that actually had data (Friday), not a blank Saturday. Worth noting the OPPOSITE
+caveat from crypto here: forex's weekly reopen after a real 2-day closure is arguably MORE
+economically meaningful than crypto's arbitrary UTC-midnight boundary, so Opening Range
+Breakout has a more genuine behavioral story on forex than it does on crypto (still
+weaker than equities' real 9:30 auction, but not as arbitrary as "midnight UTC").
+
+**STATUS:** universe + data path + session audit done. Multi-window validation scan
+(matching crypto's 3-window bar) — see next update for the result, or check
+scan_history.db for universe='Forex (7 major USD pairs)' runs if this note wasn't updated
+after the scans finished.
+
+=== Update 2026-07-27 (IBKR Forex() contract support — built, mocked-tested, NOT
+live-verified) ===
+While the forex validation scans ran in the background, built the execution-layer gap
+flagged earlier: brokers/ibkr.py's IBKRBroker was hardcoded to Stock() contracts only.
+
+Added `asset_class: str = "equity"` to IBKRBroker.__init__ (values "equity"/"forex",
+validated, raises on anything else). Deliberately NOT inferred from the ticker string —
+a bare 6-letter pair like "EURUSD" could in principle collide with an unusual equity
+ticker, so the broker INSTANCE knows what it represents, set once at construction, same
+spirit as this project's other "never guess, verify explicitly" choices. New
+`_contract(ticker)` helper branches to `ib_async.Forex(ticker)` (verified via SDK
+introspection: constructs `Contract(secType='CASH', symbol=<base>, currency=<quote>,
+exchange='IDEALPRO')`) vs the existing `Stock(ticker, "SMART", "USD")`. Wired into
+submit_market_order.
+
+Two real, non-obvious things fixed along the way:
+- **get_positions() / get_open_order_tickers()**: a CASH contract's `.symbol` is only the
+  BASE currency ("EUR", not "EURUSD") — would have silently reported forex positions
+  under the wrong ticker (just "EUR") if left alone. Both methods now reconstruct
+  `symbol + currency` when `contract.secType == "CASH"`, leaving equity contracts
+  (`.symbol` already the full ticker) untouched.
+- **get_market_clock()**: forex needs its OWN weekly-hours heuristic fallback, not the
+  equity one — added `_forex_clock_heuristic()` (Sunday 17:00 ET open, Friday 17:00 ET
+  close, no daily close in between, unlike equities' daily 9:30-16:00 window). The
+  primary path (IBKR's own reqContractDetails().liquidHours, same mechanism as equities)
+  needed a different reference contract too — added `_FOREX_CLOCK_PAIR = "EURUSD"`
+  alongside the existing `_CLOCK_SYMBOL = "SPY"`, both probed via `_parse_ib_hours()`
+  unchanged (that function was already generic).
+
+accounts.py's build_broker_accounts() now threads `asset_class` from `conn_params` into
+IBKRBroker, defaulting to "equity" — zero behavior change for the real linked "IBKR
+Paper" account ([redacted-demo-account-id]) since its conn_params never set this key. **NOT wired into the
+dashboard's Accounts link form** — linking a forex-specific IBKR sub-account isn't
+possible from the UI yet, deliberately left out since no forex account-linking flow was
+requested; only the broker-layer capability was built. Someone (Claude or the user) would
+add an asset_class radio to the IBKR link form in accounts_tab before this is usable
+end-to-end.
+
+**Verified: 32 new mocked-logic checks, all pass, zero regressions on the existing
+suite** (asset_class validation, _contract() branching for both classes including the
+"equity ticker that happens to look like a forex pair" edge case, CASH-contract symbol
+reconstruction via a fake IB() portfolio/open-orders list, and every boundary of the
+weekly clock heuristic — Friday-before/at/after-close, Saturday, Sunday-before/at-reopen,
+an ordinary weekday). **NOT verified against a real IB Gateway** — same status as the
+rest of this project's forex work: correct by construction and unit-tested, awaiting a
+live connectivity check whenever forex execution is actually exercised (the user's
+existing plan to do IBKR's manual paper-order test applies here too, once this becomes
+relevant — no forex account is linked yet, so there's nothing to test live against right
+now).
+
+=== Update 2026-07-27 (PHASE 3 in-depth discussion — DESIGN AGREED, NOTHING BUILT) ===
+User asked to "lay groundwork" for Phase 3 while the forex scans ran. Flagged the tension
+directly: they'd explicitly gated Phase 3 behind an in-depth discussion FIRST, and that
+discussion hadn't happened yet — asked (via AskUserQuestion) whether they meant to skip
+straight to building. They chose to have the discussion now, as originally planned.
+Correct call to flag rather than assume, given this is a genuine risk-category change
+(leverage) for a project that's been unleveraged everywhere else.
+
+Worked through the 4 open points from the Phase 3 entry above; **all now resolved at the
+design level, ZERO code written for IG/leverage**:
+
+1. **Leverage — the load-bearing decision.** Backtesting/scanning: FULLY VARIABLE, no cap
+   — user wants to explore the whole range IG offers (confirmed up to 1:30 per the
+   2026-07-27 research refresh above) as pure historical simulation, same risk category as
+   the slippage-stress-test already run for crypto (zero real money at any leverage level
+   in a backtest). Design: a `leverage` parameter threaded through the scan/backtest engine
+   the same way `market_calendar` was added for crypto/forex, scaling SIMULATED position
+   size only. LIVE arming is explicitly a SEPARATE, harder gate — user confirmed (asked
+   directly since "variable" is ambiguous between "unlimited in backtesting" and "no live
+   cap either," which would have been a real safety gap): live leverage needs its own
+   explicit confirmation at arm-time, mirroring the existing "I ARM LIVE AUTO-TRADING"
+   typed-phrase pattern (auto_trader tab) — NEVER silently inherited from whatever
+   leverage a prior backtest happened to use.
+2. **Backtest data / basis risk:** validate on the underlying instrument's Polygon data
+   (only workable path, IG's own data can't support a real backtest — finite weekly
+   allowance, see BROKER_EXPANSION_RESEARCH.md), THEN trade the CFD live. Agreed guardrail:
+   log the CFD's actual fill price vs. the Polygon reference price on every trade from day
+   one, so basis drift shows up in data rather than being discovered the hard way.
+3. **Risk limits:** a margin-usage-based circuit breaker is a PREREQUISITE for Phase 3
+   going live, not optional. account_risk.py's current breaker measures drawdown against
+   equity — under leverage, a 10% underlying move can be a 100%+ move against capital at
+   1:10, which the existing breaker would badly under-react to. Needs its own margin-aware
+   breaker, independent of (in addition to, not instead of) the existing equity-drawdown one.
+4. **Scope:** plain forex via IG only. Spread-betting (UK tax-specific) and general CFDs
+   (indices, commodities, shares-as-CFDs) explicitly deferred — not needed for what the
+   user actually wants (leveraged exposure to the same forex pairs IBKR already gives
+   unleveraged), and building a second product type isn't worth the added surface area yet.
+
+**NEXT STEP when Phase 3 building actually starts:** IGBroker adapter (auth flow, account
+snapshot, order submission) built against the documented REST API with the same
+introspect-before-writing discipline as every other broker in this project (session-token
+auth expires — need to check re-auth handling per the original research); the leverage
+parameter added to scanner.run_scan/engine.py; the margin-aware risk breaker as a new
+module (or an extension to account_risk.py) BEFORE any live capability is wired; the live
+arm-phrase gate extended or duplicated for a leverage-specific confirmation. None of this
+is started — this entry is the design brief for whenever that build begins.
+
+=== Update 2026-07-27 (CRITICAL BUG FOUND+FIXED: slippage was directionally wrong,
+silently near-zero-cost on every round trip, EVER SINCE THIS ENGINE WAS WRITTEN) ===
+Found while investigating why the crypto slippage stress-test (2/10/20/30bps) showed
+almost no return decay for Bollinger Mean Reversion — that result should have been a red
+flag on its own for an ~800-trade/month strategy, and it was.
+
+**The bug (engine.py, BacktestEngine.run):** `fill_price = current.close * (1 +
+slippage_bps/10_000)` was computed ONCE per bar and used for BOTH a BUY fill and a SELL
+fill — always inflating price upward regardless of direction. Real slippage must be
+DIRECTIONAL: a BUY should fill WORSE (higher), a SELL should fill WORSE (lower) — always
+against the trader on both sides of a round trip. With the old code, a BUY paying more and
+a SELL ALSO receiving more (instead of less) meant the two effects nearly canceled over a
+round trip. Proven with a minimal repro: a completely FLAT price series (close=100 every
+bar) with 1% slippage on a BUY-then-SELL round trip cost exactly $0.00 — mathematically,
+shares bought scales down by ~1/(1+s) while both fills scale up by (1+s), so round-trip
+P&L came out ~identical to the frictionless case regardless of s. A SECOND, smaller
+instance of the same gap: the forced-close-at-final-bar exit (open position at the end of
+a backtest window) used the raw `close` price directly with ZERO slippage applied at all.
+
+**Fix:** buy_fill_price = close*(1+slip), sell_fill_price = close*(1-slip), used for BUY
+and SELL fills respectively; the forced-final-bar exit now applies the same SELL-direction
+slippage instead of a frictionless raw close. Verified with the same repro: the flat-price
+1% round trip now correctly costs ~2% (buy at 101, sell at 99), not $0.00.
+
+**BLAST RADIUS — this is significant, be direct about it with the user, don't downplay:**
+this bug has existed since engine.py was FIRST WRITTEN (per git blame it predates every
+commit in this session's history) — every single backtest this project has EVER run,
+across all 26 scan_history.db runs (the 20 historical equities runs #1-20, AND today's
+crypto runs #21-23, AND today's forex runs #24-26) used the broken cost model. The project
+has always assumed "2bps slippage per side" was modeling a real cost; it was actually
+modeling something close to zero cost for any round-trip strategy. **This means every
+"strategy X is profitable after costs" claim made in this project's entire history — not
+just today's crypto/forex work — was never actually tested against a real transaction-cost
+assumption.** The DIRECTION of the finding (Bollinger Mean Reversion >> everything else,
+trend/momentum strategies uniformly fail) is very unlikely to flip, since it replicated
+across 3 asset classes and many windows independently of this bug — but the MAGNITUDE of
+every reported return/Sharpe number in this project's history is now suspect and
+overstated, especially for high-frequency strategies (Bollinger Mean Reversion's ~700-900
+trades/month on crypto/forex is exactly the shape most exposed to this).
+
+**Testing:** t1_core.py's cost test only ever asserted the BUY fill price — never checked
+the SELL fill's direction — so it passed under the broken code for months without catching
+this. Fixed and strengthened: now asserts sell_fill < close, sell_fill < buy_fill, that a
+flat-price round trip is a NET LOSS under slippage (not flat), and that the forced-final-
+bar exit slips too. 110/110 core checks pass (was 106; 4 new assertions for this fix),
+zero regressions across the rest of the ~530-check suite built this session.
+
+**NOT YET DONE (flagged, not completed this session):** the 20 historical EQUITIES scan
+runs (#1-20) were computed under the broken model AND the alphabetical-universe-sampling
+bug (fixed earlier today) — BOTH issues stack on those specific runs. Re-running the full
+equities validation (multi-window, full-universe-sampled, correct slippage) is real,
+sizeable work not done here — flagged as the natural next task, same priority level as the
+crypto/forex re-runs below. The DIRECTIONAL finding (mean-reversion >> trend) is high-
+confidence to survive a re-run (it's a pattern, not a magnitude claim), but exact
+Sharpe/return numbers from any equities scan before this fix should not be quoted as
+current fact.
+**DONE this session:** today's crypto (3 windows) and forex (3 windows) validation scans
+were RE-RUN with the fixed engine immediately after this fix — see the corrected results
+in the next update, replacing the numbers reported earlier today (those are now stale/
+superseded, not deleted from scan_history.db but should not be treated as current).
+
+=== Update 2026-07-27 (crypto/forex re-validated with the FIXED engine — edges
+mostly/entirely evaporated) ===
+Re-ran all 6 crypto+forex 3-window validation scans (the same windows as before) with the
+corrected slippage engine. Results are dramatically different from the pre-fix numbers
+reported earlier the same day — this is the real, trustworthy picture:
+
+**Forex (runs #27/#28/#30):** NOTHING is convincingly profitable. Bollinger Mean Reversion
+went from +20.35 mean Sharpe (100% of windows profitable) to **-36.83 (0% of windows
+profitable)** — the apparent edge was almost entirely the slippage bug. VWAP Mean
+Reversion is the only strategy anywhere near breakeven (+0.45 mean, 66.67% of windows
+positive) and even that's marginal, not a real edge.
+
+**Crypto (runs #29/#31/#32):** Bollinger Mean Reversion collapsed from +10.49 mean Sharpe
+(100% of windows) to **+0.37 (66.67% of windows — one window is now a clear LOSER at
+-3.70 Sharpe/-7.4% return)**. Std (3.98) exceeds the mean — no longer distinguishable
+from noise. VWAP Mean Reversion held up best of anything tested (100% of windows
+positive, mean Sharpe 1.46) but shrank hard from 2.44 and is thin/inconsistent (one
+window at Sharpe 0.04, essentially flat).
+
+**Conclusion: as of the corrected engine, neither crypto nor forex has a strategy that
+clears a real bar.** The earlier "Phase 1/2 complete, strategies validated" framing from
+before the bug fix does NOT hold. This is the correct, sobering outcome of catching a real
+bug before committing real money to it — exactly the scenario paper-testing/backtesting
+exists to catch. Flagged directly to the user; they were mid-way through planning a manual
+crypto connectivity test — worth treating that as a pure mechanical/connectivity check now,
+not a "the edge is real, let's use it" step, until this picture changes.
+
+=== Update 2026-07-27 (roster "learning from mistakes" investigation — it hasn't, because
+it's never had the chance) ===
+User asked whether the adaptive roster is learning from live outcomes now that there's
+more scan data. Investigated directly (read-only, on scratchpad copies of live_trades.db
+and roster.json/roster_events.jsonl):
+
+- **live_trades.db has exactly 2 rows, ever, both clearly synthetic test data** —
+  account_id "mock-1" (not a real linked account; real accounts have proper UUIDs, e.g.
+  MyAlpaca's), same ticker/strategy/pnl/conviction, 23 minutes apart in one session on
+  2026-07-25. The bot has never actually recorded a real paper trade through the live
+  auto-trader loop.
+- **roster_events.jsonl has exactly 3 entries, ALL "promoted", ALL from a single moment
+  on 2026-07-20.** Zero "paused"/"demoted" events exist anywhere in this project's
+  history. `apply_demotion_checks`'s `_demotion_reason()` requires `min_live_trades=5`
+  before it evaluates anything — with 2 (fake) trades on record, it has never had enough
+  data to fire, by construction, not by coincidence.
+- **roster.json unchanged since 2026-07-24 20:58** — still the pre-diversification-cap-fix
+  evaluation flagged earlier in this file, still 3/3 Bollinger Mean Reversion.
+
+**Honest answer: no, the bot is not learning from mistakes yet, because it has never
+actually made any real (live/paper) trades to learn from.** The mechanism is built and
+tested (see the auto_trader test suite) but has zero real inputs.
+
+**Connects to the slippage-bug finding above:** the roster's promotion scores were computed
+from equities scan data generated under the SAME broken engine just fixed for crypto/
+forex. Those scores are likely inflated the same way. NOT re-run this session (re-running
+20 historical equities scans with the corrected engine + the earlier universe-sampling fix
+is real, sizeable work) — user explicitly sequenced this under "get the strategy right for
+each thing," which comes AFTER the Phase 3 mechanical build per their own stated plan
+2026-07-27. Flagged as the clear next priority once that build lands: re-validate equities
+with the corrected engine, THEN re-evaluate the roster against honest numbers for the
+first time ever.
+
+=== Update 2026-07-27/28 (PHASE 3 mechanical scaffolding: IGBroker built + tested, NOT
+live-verified — no IG account exists yet) ===
+User confirmed: get every phase MECHANICALLY working first (across all instrument types),
+THEN come back and tune the actual strategy/edge for each one — explicitly deferred
+strategy-tuning (including re-validating equities under the fixed slippage engine, and
+fixing the still-stale roster) until after the mechanical build lands. Also simplified the
+earlier-agreed margin-aware risk breaker: REUSE account_risk.py's existing equity-drawdown
+breaker unchanged for now (same as every other broker), adjust the threshold later once
+there's real margin data — no new risk module built.
+
+Built src/backtester/brokers/ig.py (IGBroker) against the community `trading-ig` SDK
+(installed this session — added to requirements.txt/pyproject.toml, matching how every
+other broker SDK was added). Every method signature and response field name was
+INTROSPECTED directly from the installed package (inspect.signature/inspect.getsource),
+same discipline as every other broker in this project — not guessed. Key findings baked
+into the code:
+- IG's REST wrapper (IGService) needs username+password+api_key to authenticate
+  (create_session()) — THREE credentials, not the usual two. Extended accounts.py's
+  keyring scheme with a new "extra" slot (BROKER_META["ig"]["extra_cred_field"] = a
+  generic flag, so a future broker needing this doesn't need special-casing) rather than
+  cramming IG's username into a field labeled "secret key". add_account() gained an
+  extra_cred param; build_broker_accounts() reads all 3 slots for IG; remove_account()
+  cleans up all 3.
+- create_open_position() / close_open_position() are SEPARATE endpoints (unlike Alpaca-
+  style "one order call, broker nets automatically") — submit_market_order() decides
+  open-vs-close the same way this app's own position-aware auto-trading logic already
+  does (BUY-to-open when flat, SELL-to-close when held; long-only everywhere, no
+  shorting). Closing needs the position's real IG dealId, which the generic cross-broker
+  Position dataclass has no field for — fetches the RAW positions DataFrame (not through
+  get_positions()'s translation) specifically for this.
+- create_open_position() blocks until it internally confirms the deal (fetch_deal_by_
+  deal_reference), so — unlike IBKR's asynchronous error-channel rejection pattern —
+  the real ACCEPTED/REJECTED status and rejection reason are available synchronously in
+  the same call. Simpler than IBKR's flow, verified via source inspection.
+- get_open_order_tickers() correctly returns an empty set by design, not a gap: IG's OTC
+  MARKET orders fill synchronously (no "submitted but not yet filled" state to dedupe
+  against) — fetch_working_orders() exists for LIMIT/STOP orders, which this broker
+  doesn't submit (market orders only, matching every other broker's interface here).
+- get_market_clock() reuses ibkr.py's ALREADY-TESTED _forex_clock_heuristic() (Sunday
+  17:00 ET - Friday 17:00 ET) directly, cross-imported — single source of truth for "what
+  are real forex trading hours" rather than a second, subtly-different copy. IG's own
+  per-epic market-status endpoint (fetch_market_by_epic's marketStatus field) is the
+  eventual real path but needs a resolved epic + live account to verify first.
+
+**TWO REAL GAPS, explicitly not guessed at (both documented prominently in ig.py's module
+docstring):**
+1. **Symbol/epic mapping unresolved.** IG identifies instruments by "epic" strings (e.g.
+   "CS.D.EURUSD.CFD.IP" is the commonly-documented format, but UNVERIFIED against a real
+   account). Every method takes `ticker` and passes it straight through AS the epic —
+   callers must resolve a plain pair name to the correct epic themselves before calling
+   this broker. Same shape as the Polygon-ticker-vs-broker-symbol gap already flagged for
+   crypto (Coinbase/Kraken) and forex (this whole broker, really).
+2. **NOT LIVE-VERIFIED AT ALL — no IG account exists.** Claude cannot create one (account
+   creation is explicitly outside what Claude does for this project, same reason
+   credentials are never handled directly) — this is the user's action when ready: sign
+   up for IG's real demo account, generate an API key, enter it via the dashboard's own
+   masked Accounts-tab fields (not yet wired into the dashboard UI — accounts.py's
+   BROKER_META entry exists, but no IG-specific link form was built, since no one has
+   asked to actually link one yet). Same "correct by construction, unverified until
+   exercised for real" status IBKR had before its first live paper test.
+
+**Verified: 30 new mocked-SDK checks (t9), plus IG folded into the existing broker-
+conformance and account-store tests (t4, now 93 checks) — all pass, zero regressions.**
+Covers: interface conformance, account snapshot field mapping, position translation
+(including the long/short direction and flat-position exclusion), the 3-credential
+keyring round-trip, open-a-new-position vs close-an-existing-position branching (with the
+right IG dealId used, right opposite-direction close), a rejected-deal surfacing the real
+IG reason, and session-failure propagation. **Session total this session: ~520 checks
+across the whole suite, 3 pre-existing latent findings (all flagged earlier, none from
+today's work), zero real regressions.**
+
+**STATUS / NEXT:** IG is now mechanically scaffolded to the same standard as every other
+broker in this project, pending only (a) the user creating a real IG demo account, (b) a
+dashboard link-form addition (small — mirrors the existing per-broker cred_fields
+rendering, just needs the extra_cred_field case handled in the Accounts tab), and (c) real
+epic resolution. NOT wired into the dashboard yet. NOT part of the roster/auto_trader
+target-account flow yet (IG accounts would need to flow through the same allow_live/
+account_risk gates every other broker already goes through — that plumbing is generic and
+should already work once an IG account is actually linked, but this hasn't been exercised).
+
+=== Update 2026-07-28 (IG dashboard link form built — the last mechanical piece) ===
+User obtained real IG credentials (live account -> linked demo -> generated API key,
+confirming IG's actual onboarding flow: API access needs a real live account first, a
+demo cannot get API access standalone — corrected in chat, worth remembering if this
+comes up again) and asked to build the missing Accounts-tab link form.
+
+app.py's "Link a new account" form (render_accounts_tab) gained a third branch alongside
+the existing uses_gateway (IBKR) and plain key+secret (Alpaca/Coinbase/Kraken/Tastytrade)
+paths: BROKER_META[broker].get("extra_cred_field") now drives a 3-field form (Username +
+API key + Password, masked, matching IG's real 3-credential auth already built into
+accounts.py/ig.py) instead of the usual 2. Submit validates all 3 fields are present and
+calls add_account(..., extra_cred=...) — the plumbing for this (accounts.py's extra
+keyring slot) was already built during the earlier IGBroker scaffolding session, this was
+purely the missing UI piece.
+
+Verified headlessly via AppTest (12 new checks, t10): IG appears in the broker dropdown,
+selecting it swaps in exactly the 3-field form (no leftover IBKR-only fields), the new
+explanatory caption renders with the correct text (verified it matched the actual new
+caption, not a false-positive match against unrelated boilerplate), Paper defaults on
+(IG has a real demo sandbox), and submitting empty shows a clear validation error naming
+all 3 missing fields rather than crashing. Zero regressions across the full suite —
+**session total 565 checks, only the same 3 pre-existing latent findings (unrelated to
+this session's work) remain.**
+
+**STATUS: IG is now fully mechanically wired end-to-end** — broker adapter (ig.py),
+account storage (accounts.py's 3-credential keyring extension), and dashboard link form
+(app.py) all built and tested. The two REAL gaps from the earlier entry are unchanged and
+still the honest state: epic/symbol mapping is unresolved (ticker passed straight through
+as the IG epic string, unverified format), and nothing has been exercised against IG's
+real API yet — the user has real credentials now, so the next natural step (whenever
+wanted) is actually linking the account through this new form and running a live paper
+connectivity test, mirroring IBKR's own first-live-test pattern from 2026-07-25.
+
+=== Update 2026-07-28 (equities re-validation + roster fix + strategy improvement — PLAN
+AGREED, IN PROGRESS) ===
+User asked for a proper plan covering: re-validating equities under the corrected engine,
+fixing the roster, and actually improving the strategy set now that the honest numbers
+are known. Used EnterPlanMode given the real scope (5 phases, multiple files, genuinely
+open-ended R&D at the end) — full plan at
+C:\Users\chris\.claude\plans\calm-jumping-narwhal.md, approved as-is. Tracked as tasks #1-5
+in this session's task list (TaskCreate), Phase A/B/C/D/E matching the plan doc.
+
+**Phase A DONE — engine version tagging.** engine.py gained `ENGINE_VERSION =
+"2026-07-27-directional-slippage-fix"` (bump this string whenever a future change affects
+backtest correctness). scan_db.py's scan_runs table gained an `engine_version` column via
+the existing idempotent `_migrate()` pattern (legacy rows get NULL, never backfilled with
+a guess). `query_latest_run_id(engine_version=...)` now optionally filters by it — bare
+`query_latest_run_id()` is unchanged (still raw insertion order) for backward
+compatibility, but anything that must not risk scoring off a stale/buggy run (the roster,
+Phase D) should pass the filter explicitly. Both scan meta-dict call sites (app.py's
+Scanner tab, scan_runner.py) now stamp it. 6 new tests, all passing, zero regressions.
+
+**Phase B IN PROGRESS — corrected equities validation.** Reused existing infrastructure
+end to end, no new scripts: queued 6 PlaylistItems via playlist.add_item() (3 non-
+overlapping ~33-day windows x S&P 500/Nasdaq-100 x 100 tickers x all 18 strategies,
+default cost/no-filter settings matching the crypto/forex methodology), launched
+scan_runner.py to drain the queue. **This is genuinely slow** — confirmed via
+playlist_status.json (more reliable than scan_runner.py's own stdout, which isn't
+flushed): the 100-ticker even-sample pulls a much broader ticker set than any prior scan
+ever touched (the old 50-ticker runs #13-20 in this same playlist, still visible as done
+items, were all alphabetically-biased to "A" names under the old bug), so almost nothing
+is cache-accelerated this time, unlike the crypto/forex re-runs. Expect multi-hour total
+runtime across all 6 items. **STATUS AS OF THIS NOTE: still running, item 1 of 6, low
+single-digit % progress.** Check playlist_status.json directly for current state — do NOT
+trust scan_runner.py's own printed output, which buffers and often shows nothing until
+an item completes.
+
+**Side finding while queuing Phase B:** the OLD equities runs #13-20's alternating return
+values (noted as unexplained back in the 2026-07-26 QA-pass entry above) are now
+explained — playlist.json shows those 8 items deliberately varied vol_target_enabled and
+event_filter_enabled across a 2x2x2 grid (2 universes x 2 GARCH-filter states x 2 event-
+filter states), not a Settings default change as originally guessed. Correcting that
+guess here for the record.
+
+Also fixed the 3 latent findings flagged repeatedly since the 2026-07-26 full-app QA pass
+(the user asked for these explicitly while Phase B ran in the background):
+- **ranking.py**: `rank_combos([])` and `aggregate_by_strategy([])` raised KeyError on a
+  literally empty list — `_results_to_frame([])` produced a columnless DataFrame, so
+  `df["error"]`/`groupby("strategy_name")` had nothing to find. Fixed by passing an
+  explicit `columns=_RESULT_COLUMNS` list to `pd.DataFrame()` so an empty `rows` list
+  still produces the right SHAPE (zero rows, correct columns), not zero columns. Every UI
+  call site already guarded against this, so it was latent, not live — still worth
+  closing since Phase E's new code (and any future direct caller) shouldn't inherit a
+  landmine.
+- **saved_configs.py**: was the one local state store in this whole project that didn't
+  fail closed on a corrupt file (every other one — app_settings/roster/heartbeat/
+  account_risk/two_factor — catches and defaults). Fixed to match; also switched
+  `_save_all` from `write_text` to `atomic_write_text` for consistency with the rest of
+  the project's post-6f04d12 convention, even though this specific file isn't read by a
+  separate process the way control.json etc. are.
+
+**Full suite after both the Phase A work and the latent-finding fixes: 674 checks, 0
+failures** — the first time this session's entire test suite has been fully green with
+zero exceptions, including the previously-flagged pre-existing ones.
+
+=== Update 2026-07-29 (Phases B/C/D DONE — equities has REAL edges, unlike crypto/forex;
+roster fixed on honest numbers for the first time ever) ===
+Phase B finished overnight (all 6 corrected-engine equities scans, runs #33-38, 0 real
+errors — the 108 "no bars returned" rows were just 2 tickers, BNY and HONA, too recently
+listed to have data in the older windows; correctly excluded, not a bug). Ran per-plan
+with the user away and "just continue" authorization.
+
+**PHASE C RESULT — genuinely different outcome from crypto/forex.** Unlike crypto/forex
+(where the slippage fix wiped out nearly every apparent edge), equities has TWO real,
+tight, cross-universe-consistent winners across all 3 windows:
+- **VWAP Mean Reversion**: mean Sharpe 3.11, 100% of windows profitable, std only 0.49,
+  consistent in both universes (2.99 Nasdaq / 3.22 S&P), profit factor 1.9-2.2, ~53
+  trades/ticker over each ~33-day window (moderate frequency, not the crypto-style
+  hundreds/month that turned out to be cost-fragile), 82-87% of tickers profitable.
+- **Bollinger Mean Reversion**: mean Sharpe 2.22, also 100%/3 windows, std 0.37, consistent
+  both universes (2.08/2.37), profit factor 1.2-1.35, ~200 trades/ticker (higher frequency,
+  more cost-exposed, and correspondingly the WEAKER of the two now — a real change from
+  before the fix, when it was the standout).
+- Everything else negative, including — notably — the low-frequency crossover/breakout
+  family (SMA Crossover, EMA Crossover, MACD, Momentum ROC, Bollinger Breakout) that a
+  pre-Phase-B hypothesis (this session's Explore-agent research) expected to be the
+  LEAST slippage-exposed and thus likeliest survivors. Hypothesis was wrong on direction:
+  they're not down because of slippage sensitivity, they're down because trend-following
+  itself doesn't work in this ~3.5-month window (April-July 2026) — same conclusion
+  independently reached on crypto AND forex. Mean-reversion winning / trend-following
+  failing now holds across all three asset classes tested this session — reads as a
+  genuine market-regime effect (broadly choppy/range-bound period), not an artifact of
+  any one asset class's data or the bug.
+
+**PHASE D RESULT — first-ever honest roster evaluation.** Backed up the live roster.json/
+roster_events.jsonl first (scratchpad copies). Fed roster.evaluate_roster() the most
+recent window's combined S&P 500 + Nasdaq-100 rows (runs #33+#36 — deliberately ONE
+window, not all 3 pooled, since evaluate_roster scores one scan's rows at a time and
+pooling multiple windows would double-count tickers across them; most-recent window
+chosen to reflect current conditions). Existing RosterConfig unchanged (roster_size=3,
+max_per_strategy=2, max_per_sector=2 — already had the diversification cap from #35,
+just never got a chance to apply it against honest data before now).
+
+**New roster: MPWR (VWAP Mean Reversion), CSX (VWAP Mean Reversion), STX (Bollinger Mean
+Reversion)** — genuine diversification this time (2+1, respecting the cap), completely
+different tickers from the stale ABNB/ADBE/AEP-on-Bollinger-only roster (expected: BOTH
+the universe-sampling fix and the slippage fix changed which combos look good, and the
+old roster was scored on an alphabetically-"A"-biased 10-ticker sample to begin with).
+Verified the old entries were properly RE-EVALUATED, not silently carried over stale:
+ABNB/ADBE/AEP-on-Bollinger-MR still score respectably (0.77-0.82) but explicitly demoted
+with reason "no longer in top 3 by backtest score" — real events, real reasoning, logged
+to roster_events.jsonl alongside the 3 new promotion events.
+
+**NEXT:** Phase E (parameter-sweep utility — confirmed via Explore agent earlier this
+session that none exists yet, walkforward.py is consistency-checking only). Prioritize
+tuning VWAP Mean Reversion and Bollinger Mean Reversion specifically, since those are the
+only two with a real signal worth refining. User is separately researching additional
+forex/CFD-specific strategy candidates to add to STRATEGY_REGISTRY later, on their own —
+those would go through this same scan/validate pipeline once added, not built by Claude
+without the user's input on which ones to add.
+
+=== Update 2026-07-29 (Phase E: parameter-sweep tool built + first real sweep results, NOT
+YET VALIDATED — walk-forward check in progress) ===
+Built src/backtester/paramsweep.py: run_param_sweep(tickers, strategy_name, param_grid,
+from_date, to_date, client, **scan_kwargs) runs one strategy across a cartesian-product
+parameter grid on a FIXED window (mirror image of walkforward.py, which holds params fixed
+and varies the window). Needed one small, additive, backward-compatible extension to
+scanner.run_scan first: a new strategy_params: dict[str,dict]|None=None kwarg (defaults to
+None -> byte-identical behavior for every existing caller), since run_scan previously had
+NO way to override a strategy's parameters at all — every combo always used
+STRATEGY_REGISTRY's hardcoded default_params. 26 new tests (6 in t2_scan.py for the
+strategy_params seam, 20 in t11_paramsweep.py for the sweep tool itself), zero
+regressions — full suite now 600 checks, 0 failures.
+
+**First real sweep** (100-ticker S&P sample, run #33's exact window — fully cache-hit, 0
+new API calls) on the two strategies with a real signal from Phase C:
+- VWAP Mean Reversion (entry_deviation_pct grid 0.3/0.5/0.75/1.0/1.5): CLEAN monotonic
+  relationship, smaller deviation = better — 0.3% scored Sharpe 3.19 (vs the current
+  default 0.5%'s 2.71), more trades (7553 vs 4752), higher win rate (87% vs 83%).
+  Counter-intuitive vs the "reduce frequency" hypothesis from the Phase E plan — turns out
+  MORE frequent entries help this specific strategy, not hurt it.
+- Bollinger Mean Reversion (period x num_std grid): num_std=3.0 beats 2.0 at EVERY period
+  tested (15/20/30) — period=15,num_std=3.0 scored Sharpe 3.87 (vs default period=20,
+  num_std=2.0's 1.96 from the Phase C baseline), trade count down ~85% (2711 vs 17698 at
+  the wide-vs-narrow comparison), win rate up 74%->90%. This DOES match the plan's cost-
+  aware-filter hypothesis: wider bands = only genuinely extreme dips trigger, exactly the
+  lever expected to matter for a high-frequency mean-reversion strategy.
+
+**NEITHER IS ADOPTED YET.** Both are a single in-sample window's optimum — exactly the
+shape of result this project has now been burned by twice this session (pre-fix crypto/
+forex numbers looked spectacular under one computation too). Currently running both
+candidates (tuned vs current default) through the same 3-window x 2-universe walk-forward
+consistency check used for the Phase C baseline, before touching STRATEGY_REGISTRY's
+actual default_params. Report the validated (or invalidated) result next — do not treat
+the sweep numbers above as a decided change.
 
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
