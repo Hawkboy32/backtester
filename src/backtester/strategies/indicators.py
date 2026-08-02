@@ -139,6 +139,24 @@ def is_bullish_engulfing(prev_open: float, prev_close: float, curr_open: float, 
     return prev_red and curr_green and engulfs
 
 
+def bearish_fvg_gap(low_two_bars_ago: float, high_current: float) -> float | None:
+    """Bearish Fair Value Gap (the standard 3-candle imbalance concept):
+    the gap between the LOW of the candle 2 bars back and the HIGH of the
+    current candle, when price has moved down fast enough that the two
+    don't overlap at all. The middle candle (1 bar back) doesn't factor
+    into the definition itself — only whether these outer two touch.
+    Returns the gap size (positive = a real, unfilled imbalance exists) or
+    None when there's no gap (the ranges touch or overlap). Source: "Scalping
+    Trading For Beginners" video review, 2026-07-30 — see CLAUDE_NOTES.txt
+    PENDING IDEAS. The mirror-image bullish version (gap between the HIGH
+    two bars back and the LOW of the current candle) isn't implemented —
+    not needed by any strategy in this project yet (long-only, downward-
+    move confirmation only), add it the same way if that changes.
+    """
+    gap = low_two_bars_ago - high_current
+    return gap if gap > 0 else None
+
+
 def rsi(closes: pd.Series, period: int) -> pd.Series:
     delta = closes.diff()
     gain = delta.clip(lower=0)

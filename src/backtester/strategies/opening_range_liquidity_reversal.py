@@ -33,13 +33,24 @@ where those conditions no longer hold (e.g. the reversal window has closed
 for the day) can still close an already-open position. Exit fires on either
 price reaching back to the opening-range high (target) or a fresh post-
 opening-range low (the reversal thesis failed).
+
+Optional `require_fvg_confirmation` (default False, off — an EXPERIMENT, not
+validated yet): requires at least one bearish Fair Value Gap (the standard
+3-candle imbalance concept — see indicators.bearish_fvg_gap) to have formed
+somewhere between the opening range and the reversal candle, as extra
+evidence the decline was a genuine imbalance and not just an ordinary move.
+Source: "Scalping Trading For Beginners" video review, 2026-07-30 — see
+CLAUDE_NOTES.txt PENDING IDEAS. Don't change the STRATEGY_REGISTRY default
+unless a walk-forward pass validates it beats the default off, same
+discipline as VWAP MR's acceptance_bars experiment (which was tried and
+rejected).
 """
 
 from __future__ import annotations
 
 import pandas as pd
 
-from backtester.strategies.indicators import is_bullish_engulfing, is_hammer, session_dates
+from backtester.strategies.indicators import bearish_fvg_gap, is_bullish_engulfing, is_hammer, session_dates
 from backtester.strategy import Bar, Lookback, Signal, Strategy
 
 
@@ -50,11 +61,13 @@ class OpeningRangeLiquidityReversalStrategy(Strategy):
         reversal_window_minutes: int = 90,
         liquidity_multiplier: float = 1.5,
         lookback_sessions: int = 5,
+        require_fvg_confirmation: bool = False,
     ):
         self.opening_minutes = opening_minutes
         self.reversal_window_minutes = reversal_window_minutes
         self.liquidity_multiplier = liquidity_multiplier
         self.lookback_sessions = lookback_sessions
+        self.require_fvg_confirmation = require_fvg_confirmation
 
     def required_lookback(self) -> Lookback:
         return Lookback(sessions=self.lookback_sessions + 1)
@@ -137,6 +150,24 @@ class OpeningRangeLiquidityReversalStrategy(Strategy):
         if not reversal_confirmed:
             return Signal.HOLD
 
+        if self.require_fvg_confirmation:
+            decline_bars = today_bars[(today_bars.index >= or_end) & (today_bars.index <= candidate.name)]
+            if not self._has_bearish_fvg(decline_bars):
+                return Signal.HOLD
+
         if current.close > candidate["high"]:
             return Signal.BUY
         return Signal.HOLD
+
+    @staticmethod
+    def _has_bearish_fvg(bars: pd.DataFrame) -> bool:
+        """True if any 3-consecutive-bar window in `bars` contains a bearish
+        Fair Value Gap — the low 2 bars back sitting entirely above the high
+        of the 3rd bar, with no overlap."""
+        if len(bars) < 3:
+            return False
+        lows, highs = bars["low"], bars["high"]
+        for i in range(2, len(bars)):
+            if bearish_fvg_gap(lows.iloc[i - 2], highs.iloc[i]) is not None:
+                return True
+        return False
