@@ -13,6 +13,7 @@ from backtester.strategies.macd_crossover import MacdCrossoverStrategy
 from backtester.strategies.momentum_roc import MomentumRocStrategy
 from backtester.strategies.multi_timeframe_pullback import MultiTimeframePullbackStrategy
 from backtester.strategies.opening_range_breakout import OpeningRangeBreakoutStrategy
+from backtester.strategies.opening_range_liquidity_reversal import OpeningRangeLiquidityReversalStrategy
 from backtester.strategies.pivot_point_scalping import PivotPointScalpingStrategy
 from backtester.strategies.rsi_divergence import RsiDivergenceStrategy
 from backtester.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
@@ -99,6 +100,16 @@ STRATEGY_REGISTRY: dict[str, dict] = {
         "class": OpeningRangeBreakoutStrategy,
         "default_params": {"opening_minutes": 15},
         "regime": "trend",
+    },
+    "Opening Range Liquidity Reversal": {
+        "class": OpeningRangeLiquidityReversalStrategy,
+        "default_params": {
+            "opening_minutes": 15,
+            "reversal_window_minutes": 90,
+            "liquidity_multiplier": 1.5,
+            "lookback_sessions": 5,
+        },
+        "regime": "range",
     },
     "Break-and-Retest": {
         "class": BreakAndRetestStrategy,

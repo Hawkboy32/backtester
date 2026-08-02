@@ -112,6 +112,33 @@ def fibonacci_levels(high: float, low: float) -> dict[str, float]:
     }
 
 
+def is_hammer(open_: float, high: float, low: float, close: float, body_to_wick_ratio: float = 2.0) -> bool:
+    """Classic bullish-reversal candlestick shape: a small body near the top
+    of the bar's range with a lower wick at least `body_to_wick_ratio` times
+    the body size and a negligible upper wick. Purely a shape check — that
+    it actually follows a decline (the context that makes a hammer mean
+    anything) is the caller's responsibility.
+    """
+    total_range = high - low
+    if total_range <= 0:
+        return False
+    body = abs(close - open_)
+    if body == 0:
+        body = total_range * 0.001  # doji: still needs a real lower wick below, not a div-by-zero
+    lower_wick = min(open_, close) - low
+    upper_wick = high - max(open_, close)
+    return lower_wick >= body_to_wick_ratio * body and upper_wick <= body
+
+
+def is_bullish_engulfing(prev_open: float, prev_close: float, curr_open: float, curr_close: float) -> bool:
+    """Current candle is green, the previous one is red, and the current
+    candle's body fully engulfs the previous candle's body."""
+    prev_red = prev_close < prev_open
+    curr_green = curr_close > curr_open
+    engulfs = curr_open <= prev_close and curr_close >= prev_open
+    return prev_red and curr_green and engulfs
+
+
 def rsi(closes: pd.Series, period: int) -> pd.Series:
     delta = closes.diff()
     gain = delta.clip(lower=0)
