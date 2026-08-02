@@ -1657,6 +1657,153 @@ consistency check used for the Phase C baseline, before touching STRATEGY_REGIST
 actual default_params. Report the validated (or invalidated) result next — do not treat
 the sweep numbers above as a decided change.
 
+=== PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
+- **DONE 2026-08-01 — Daily P&L giveback rule for auto_trader.py** (source: reaction video
+  reviewing Ross Cameron/Warrior Trading, 2026-07-31). `src/backtester/daily_pnl_guard.py`
+  — once an account's profit for TODAY has given back more than `giveback_pct` (default 25,
+  off by default) off today's own intraday peak, new entries block for the rest of the day
+  (existing positions can still close); self-clears at the start of the next day, no manual
+  re-arm like account_risk.py's breaker needs. Wired into auto_trader.py's run_cycle by
+  feeding into the SAME `blocked_account_ids` set the account-risk breaker already uses (no
+  changes needed in `_trade_target` at all — it already blocks new entries but allows sells
+  for any account_id in that set). Skipped for an account the breaker already blocked
+  (redundant). UI: new "Daily P&L giveback guard" section on the Settings page, same
+  load-mutate-save pattern as the account-risk section right above it. Also fixed the SAME
+  clobber risk the account-risk limit already had once: the Auto Trading tab's "Save
+  configuration" now carries `giveback_enabled`/`giveback_pct` forward from the loaded
+  control too, verified via the same kind of round-trip test used for the original
+  max_drawdown clobber fix (6f04d12). Unit-tested in isolation (blocks correctly once
+  giveback exceeds the threshold, stays blocked for the rest of that day even if equity
+  recovers, resets cleanly on a new date).
+- **DONE 2026-08-01 — Opening Range Liquidity Reversal strategy** (source: 3 independent
+  videos — Carl's "Quick Flip Scalper", "I Found a Scalping Secret Nobody Talks About", and
+  corroborated again in "Scalping Trading For Beginners"). New
+  `strategies/opening_range_liquidity_reversal.py` — boxes the opening-range candle, fades
+  it once confirmed oversized/"unhealthy" and downward, on a hammer/bullish-engulfing
+  reversal candle (new `is_hammer`/`is_bullish_engulfing` shape checks in indicators.py),
+  entering on the break of that candle's high within `reversal_window_minutes` (default 90)
+  of the open. Long-only (matches every strategy in this engine) — only fades DOWNWARD
+  liquidity candles; the mirror-image short setup from the source videos isn't built, this
+  app has no shorting anywhere. Exit is checked FIRST and unconditionally (target = back to
+  the opening-range high, stop = a fresh post-opening-range low) so it can never get stuck
+  once the entry-side gating stops applying later in the day. DEVIATION FROM THE SOURCE,
+  FLAGGED AS SUCH IN THE MODULE DOCSTRING: the videos gate on a 14-day ATR from a separate
+  DAILY-bar fetch (same shape as GARCH's plumbing) — not built, to avoid new engine-level
+  plumbing for one strategy. Substituted a self-contained proxy instead: today's
+  opening-range size vs. the trailing average opening-range size over `lookback_sessions`
+  (default 5, not 14 — this project's scan windows are only ~33 days, so a 14-session
+  baseline would burn nearly half of one before the strategy could ever fire, same reasoning
+  GARCH's own MIN_TRAIN/REGIME_MIN_PERIODS were shrunk). Registered in STRATEGY_REGISTRY,
+  regime="range". VERIFIED: 4 hand-crafted synthetic scenarios (clean entry+target-exit,
+  entry+stop-out, non-oversized day correctly produces no entry, upward liquidity candle
+  correctly produces no entry) — caught and fixed one real bug this way (a `< float("inf")`
+  comparison meant to signal "nothing to compare against yet" was backwards, vacuously always
+  True, firing a stray SELL on literally the first post-opening-range bar every time; fixed
+  by explicitly defaulting `made_fresh_low = False` instead). Also ran against real cached
+  data (AAPL/MSFT/NVDA/AMD/TSLA, 2026-06-23 to 2026-07-26): 0 trades at default params on
+  all 5 — confirmed this is genuine selectivity, not a bug, by re-running with a deliberately
+  loose threshold (liquidity_multiplier 0.5, lookback_sessions 3), which produced 2-4 trades
+  per ticker cleanly. Large-cap mega-caps rarely produce the kind of outsized opening move
+  this pattern targets (more of a small-cap/volatile-stock phenomenon) — worth re-testing
+  against a broader/smaller-cap sample or a looser multiplier before drawing conclusions
+  about whether it has a real edge; NOT walk-forward validated yet, same discipline as
+  Phase E before trusting any params.
+- **Fair Value Gap (3-candle imbalance) confirmation filter** (source: "Scalping Trading
+  For Beginners" full course). An objective, calculable "unhealthy move" detector (price
+  gaps beyond the wick range of the candle 2 bars prior) that tends to get retraced/filled
+  — a candidate CONFIRMATION FILTER for the Opening Range Liquidity Reversal strategy
+  above, not a standalone strategy. Low priority, bundle in when that strategy gets built.
+- **TESTED + REJECTED 2026-08-02 — VWAP Mean Reversion "acceptance confirmation" filter**
+  (source: Chris Drysdale/VWAP Wave System video, 2026-07-30 review). Added an optional
+  `acceptance_bars` param to VwapMeanReversionStrategy (default 1 = original, unchanged
+  behavior — verified byte-identical Sharpe on regression check first) requiring N
+  consecutive bars beyond the deviation band before entry, instead of firing on the first
+  touch. Walk-forward tested across the same 3-window x 2-universe methodology as Phase E:
+  makes things WORSE, not better — mean Sharpe drops from 3.45 (acceptance_bars=1, current
+  default) to 1.85 (=2) to 1.49 (=3), consistently across all 6 combos. Makes sense in
+  hindsight: this strategy's edge comes from catching a sharp, fast deviation quickly;
+  waiting for confirming bars just means missing the best part of the reversion before it's
+  already underway. Left in the code as an optional param (harmless, defaults to original
+  behavior) but do NOT change the STRATEGY_REGISTRY default from 1, and don't re-test this
+  specific idea again without a genuinely new angle on it.
+- **CFD/forex auto-trading follow-up** (deferred from the 2026-07-31 equities-only
+  restart — see the note above and [[project_trading_bot]] memory for full detail).
+  PARTIALLY DONE 2026-08-01: `auto_trader.py`'s own session-building behavior across many
+  real poll cycles WAS checked and WAS a real problem — `run_cycle()` called
+  `build_broker_accounts()` fresh every single cycle, which for IG means a fresh login
+  every poll (default every 60s), the exact failure mode the ig.py session-reuse fix was
+  meant to prevent, just recurring continuously instead of via manual testing. Fixed with
+  a process-level broker-instance cache (`_broker_cache`/`_get_broker_accounts`) reusing
+  the same broker objects across cycles, only rebuilding when the target account_ids set
+  actually changes, and closing (cleanly logging out) any dropped account_id's broker
+  instance. Verified with a mock: same instance reused across repeated calls with the same
+  ids, correctly evicted+closed+rebuilt only when the id set changes.
+  (1) DONE 2026-08-01: IG added to `control.account_ids` (bot stayed disarmed throughout —
+  a config change, not an arming). (2) PARTIALLY ANSWERED 2026-08-02: screened VWAP Mean
+  Reversion and Bollinger Mean Reversion (equities' two winners, tuned defaults, unchanged)
+  against all 7 forex majors, one window (2026-06-23 to 2026-07-26). Real, useful split:
+  **VWAP MR mean Sharpe +1.12, profitable on 6/7 pairs** — looks genuinely promising,
+  echoes the equities mean-reversion pattern. **Bollinger MR mean Sharpe -0.70, profitable
+  on only 3/7** — does NOT translate to forex (high trade frequency, 48-205 trades/pair vs
+  VWAP's 3-16, likely cost/whipsaw-eaten on the majors that aren't trending the way AUD/NZD
+  were). CAVEAT: single-window screening result with thin trade counts (3-16 trades/pair) —
+  nowhere near the walk-forward bar Phase C/E cleared for equities before being trusted.
+  Then WALK-FORWARD TESTED PROPERLY across the same 3 windows: mean Sharpe drops to 0.33,
+  only 2/3 windows positive (one of those barely, +0.04) — the single-window +1.12 result
+  was mostly a NZDUSD-specific artifact of that one window, not a repeatable edge. Confirms
+  the 2026-07-27 finding: no forex strategy has cleared a real bar under the corrected
+  engine yet AT THEIR EQUITIES-TUNED DEFAULT PARAMS.
+
+  **THEN — user's idea, tested properly: is it a PARAMETER problem rather than a strategy
+  problem?** A few entry_deviation_pct/num_std variations for both strategies, walk-forward
+  across the SAME 3 windows (not cherry-picking a single-window "winner" — the trap that
+  caught the default). Real result: **yes, largely a parameter problem for both.**
+  - VWAP MR: entry_deviation_pct 0.3%->0.2% takes it from mean Sharpe 0.33 (67% windows
+    positive, sometimes negative) to **mean 0.62, 100% of windows positive** ([1.14, 0.62,
+    0.10]), with healthier trade counts too (116-131/window vs 47-58).
+  - Bollinger MR: num_std 3.0/period 15 -> **num_std 4.0/period 20** takes it from mean
+    -1.50 (0% positive, badly losing) to **mean +1.17, 100% of windows positive** ([1.51,
+    1.38, 0.62]) — completely reverses the earlier "ruled out for forex" verdict. Tighter
+    bands (num_std 2.0/2.5) are catastrophically worse (mean -23/-11, thousands of trades —
+    band far too tight for forex's noise, cost/whipsaw-shredded), confirming direction
+    matters, not just "any different number helps."
+  Neither Sharpe (0.6-1.2) is as strong as equities (2-3+), but 100%-of-windows consistency
+  is the bar that actually matters, and both NOW clear it — at these forex-specific tunings,
+  NOT the equities-tuned STRATEGY_REGISTRY defaults (deliberately not touching those — this
+  is a separate, market-specific parameter set, applied via strategy_params override same as
+  every other per-market tuning in this project, not a global default change). Only a small
+  4-variant grid tested so far per strategy — a finer sweep around these promising points
+  (e.g. deviation 0.15-0.25%, num_std 3.5-4.5) could do better but isn't necessary to have a
+  legitimate walk-forward-validated forex candidate now. **Bollinger MR (num_std=4.0,
+  period=20) is now the stronger forex candidate — a genuine reversal from the initial
+  single-window screening that favored VWAP MR.**
+
+  **CROSSTALK FIX DONE 2026-08-02** (the architectural constraint below is now SOLVED, not
+  just worked around): added `asset_classes` to each broker's `BROKER_META` entry
+  (alpaca/tastytrade/ibkr → equity, coinbase/kraken → crypto, ig → forex) and a new
+  `accounts.infer_asset_class(ticker)` helper (Polygon "X:"/"C:" prefixes, or a resolved IG
+  epic's "CS.D."/".CFD."/".MINI." shape → forex; anything else defaults to equity).
+  `auto_trader.py`'s `_trade_target` now skips any target account whose asset class doesn't
+  match the ticker's — BEFORE any API call (get_positions, get_open_order_tickers, etc.),
+  not just before submitting an order. Verified with a mocked end-to-end test: an equity
+  ticker against an equity account and a forex-only (IG) account in the same target list —
+  the equity account traded normally (positions checked, order submitted), the IG account
+  had ZERO calls made against it at all, no error noise. **This means IG (or any broker) can
+  now stay in `control.account_ids` permanently** — it'll just be automatically, silently
+  skipped for tickers outside its asset class, no more manual add/remove before each restart,
+  no more wasted API calls or log noise during an equities-only run.
+
+  The remaining part of the architectural constraint still stands and is NOT solved by the
+  above: `control.json`'s `use_roster`/`tickers`/`strategy_name` are still global, single-
+  mode fields — there is still no way to run "roster mode for equities" and "manual mode
+  with a specific forex strategy for IG" AT THE SAME TIME, since the roster only ever
+  contains equity combos and manual mode only has one ticker list/strategy for everything.
+  The crosstalk FIX above means this is no longer urgent (equities and forex accounts can
+  safely coexist in account_ids without noise), but genuinely running BOTH auto-trading
+  flavors concurrently would still need the control schema to grow per-account-group
+  configuration — a bigger, separate change, not needed until there's a validated forex
+  strategy actually worth running alongside equities.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,
