@@ -1804,6 +1804,87 @@ the sweep numbers above as a decided change.
   configuration — a bigger, separate change, not needed until there's a validated forex
   strategy actually worth running alongside equities.
 
+=== PLAN — full-registry tuning sweep, all strategies x all asset classes (2026-08-02) ===
+User's idea after seeing the forex parameter-problem-not-strategy-problem result above:
+extend that same treatment to EVERY strategy across equities/forex/crypto, to find out how
+much of the "everything except VWAP MR/Bollinger MR is unprofitable" Phase C finding is
+itself a parameter-tuning gap rather than a real regime mismatch. Full scope is up to 19
+strategies (18 + Opening Range Liquidity Reversal) x 3 asset classes — too much for one
+session, phased instead:
+
+- **Phase 1 DONE 2026-08-02**: extended `paramsweep.py` with `run_walkforward_sweep()` —
+  candidates x windows x universes in one call, aggregating into fold-level mean/std/%
+  positive (same discipline as every walk-forward check this project trusts). Includes
+  `make_logging_fold_callback()` (the per-scan, elapsed-time-prefixed, flushed print
+  pattern learned the hard way — see the SCALE LESSON above) and `format_sweep_result()`
+  for the summary line. Verified with a mocked run_scan (no real Polygon calls): correct
+  aggregation, correct best-to-worst sorting, correct per-fold callback firing. Built after
+  hand-writing this same loop shape in four separate scratchpad scripts in one day — use
+  this for Phase 3/4 and any future re-tests instead of another one-off script.
+- **Phase 2 (IN PROGRESS 2026-08-02)**: the remaining 6 "range" (mean-reversion) strategies
+  on EQUITIES first (cheapest, most reliable data, most live-testing history): RSI
+  Mean-Reversion, Liquidity Sweep, Volume Spike Reversal, Opening Range Liquidity Reversal
+  (brand new — needs walk-forward validation from scratch, unlike the other 5 which already
+  ran in Phase C's original 18-strategy pass, just not individually highlighted), RSI
+  Divergence, Pivot Point Scalping (ZERO tunable params — can only be walk-forward
+  *validated* as-is, not tuned).
+- **Phase 3 (not started)**: whatever validates on equities in Phase 2 gets the SAME
+  forex/crypto parameter-variation treatment already proven on VWAP MR/Bollinger MR — not
+  starting every asset class from scratch blind.
+- **Phase 4 (not started, lower priority by design)**: a LIGHT pass (1-2 quick parameter
+  variations each, not the full 3-window treatment) on the 11 "trend" strategies (SMA/EMA/
+  MACD Crossover, Momentum ROC, Bollinger Breakout, Flag/Pennant, Multi-Timeframe Pullback,
+  VWAP Trend, Opening Range Breakout, Break-and-Retest, Fibonacci Pullback). Deliberately
+  deprioritized: trend-following has lost money consistently across ALL THREE asset classes
+  every single time it's been tested this whole project — not a fluke, a repeated finding —
+  so the expected value of heavy re-tuning effort here is much lower than for the range
+  family. If even a quick variation check shows nothing, that's a fast, cheap confirmation
+  the problem is genuinely regime-mismatch, not tuning, and further effort here can stop.
+  Fibonacci Pullback's "level" param is categorical (a Fibonacci ratio string, not a
+  continuous value) — sweep across the standard set (0.382/0.5/0.618/0.786), not a numeric
+  grid.
+
+Before re-running scans for the 5 non-new Phase 2 strategies, CHECK scan_history.db first
+(engine_version-stamped runs #33-38 from Phase C already ran all 18 original strategies
+across the same 3 windows x 2 universes) — their default-param numbers may already exist
+there and not need re-computing from scratch, only Opening Range Liquidity Reversal is
+guaranteed to need a fresh run since it didn't exist during Phase C.
+
+**PHASE 2 REAL FINDING 2026-08-02 (pulled straight from scan_history.db runs #33-38, no
+re-scan needed): Pivot Point Scalping is ALREADY a validated, consistently profitable
+strategy that was never promoted or even highlighted.** Mean Sharpe +0.74, **100% of the
+6 window x universe combos positive** ([0.73, 1.12, 0.80, 0.54, 0.35, 0.91]), modest but
+real trade counts (~700-800 over 33 days, nowhere near the overtrading seen elsewhere). It
+has ZERO tunable parameters (`default_params: {}`) — nothing to tune, it's just been sitting
+there working the whole time. Phase C's own narrative only ever surfaced the top-2 performers
+(VWAP MR, Bollinger MR); this one was buried in the same data the whole time. Worth serious
+consideration as a THIRD roster candidate strategy alongside the two already promoted — not
+yet added, this is a finding to act on, not a decision made unilaterally.
+
+The other 4 checked strategies are all solidly negative in the existing Phase C data:
+RSI Mean-Reversion (mean -1.75, 0% positive), RSI Divergence (mean -0.61, 17% positive —
+closest to breakeven), and two with catastrophic trade counts suggesting straightforward
+overtrading: **Liquidity Sweep** (mean -5.31, 21,000-30,000 trades over 33 days!) and
+**Volume Spike Reversal** (mean -5.41, ~10,000-12,000 trades) — same shape of problem that
+wrecked Bollinger MR on forex before widening its bands fixed it.
+
+**SCALE LESSON LEARNED 2026-08-02: the full 9-candidate x 3-window x 2-universe x
+100-ticker treatment (mirroring Phase C exactly) is NOT cheap on equities the way it was
+on forex (only 7 forex tickers vs 100 equity tickers).** First attempt ran for 5h46m
+producing ZERO output (script only printed after each candidate's full 6-scan group, no
+per-scan visibility — a real gap, fixed going forward: always print+flush after every
+individual scan in a long sweep, not just after each candidate, so a slow run is
+distinguishable from a stuck one). Killed and re-run with per-scan logging: one single
+100-ticker RSI Mean-Reversion scan took 953s (~16 min) — consistent with this project's
+own documented ~3min/ticker-for-all-18-strategies benchmark, i.e. NOT a bug, just the real
+cost of this compute at this scale. At that rate the full 9x6 grid would be 10+ hours,
+worse for higher-trade-count variants (Liquidity Sweep's default alone had 21k-30k trades).
+**Killed again, switched to the same screen-cheap-first-then-validate-expensive discipline
+already used for forex**: a single-window, 30-ticker screen of all 9 candidates first
+(~30% of Phase C's ticker count, proportionally faster), only escalating to the full
+100-ticker x 3-window x 2-universe walk-forward for whichever candidates actually look
+promising in the screen. Screen running as of this note — see the next update for results.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,
