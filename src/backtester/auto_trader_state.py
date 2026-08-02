@@ -83,6 +83,8 @@ class AutoTraderControl:
     block_event_days: bool = True  # skip NEW entries on known risk-event days (FOMC — see backtester.events).
     # Defaults ON, unlike the other opt-in filters: it's a pure step-out safety net ("don't sell
     # insurance during a flood warning") and only takes effect on a deliberate (re)start.
+    giveback_enabled: bool = False  # daily P&L giveback guard (see backtester.daily_pnl_guard)
+    giveback_pct: float = 25.0  # % of TODAY's peak profit that can be given back before new entries block
 
 
 @dataclass

@@ -40,24 +40,28 @@ BROKER_META: dict[str, dict] = {
         "cred_fields": ("API key", "Secret key"),
         "supports_paper": True,
         "has_market_hours": True,  # US equities — regular session; has an open/closed clock
+        "asset_classes": frozenset({"equity"}),
     },
     "coinbase": {
         "label": "Coinbase (Advanced Trade)",
         "cred_fields": ("API key", "API secret"),
         "supports_paper": False,  # no verified sandbox — always routes to the real live API
         "has_market_hours": False,  # crypto trades 24/7 — always "open"
+        "asset_classes": frozenset({"crypto"}),
     },
     "kraken": {
         "label": "Kraken",
         "cred_fields": ("API key", "Private key (API secret)"),
         "supports_paper": False,  # no verified sandbox — always routes to the real live API
         "has_market_hours": False,  # crypto trades 24/7 — always "open"
+        "asset_classes": frozenset({"crypto"}),
     },
     "tastytrade": {
         "label": "Tastytrade",
         "cred_fields": ("Refresh token", "Client secret (provider secret)"),
         "supports_paper": True,
         "has_market_hours": True,  # US equities/options — regular session
+        "asset_classes": frozenset({"equity"}),
     },
     "ibkr": {
         "label": "Interactive Brokers",
@@ -69,9 +73,10 @@ BROKER_META: dict[str, dict] = {
         # port, clientId, account code) as plain metadata. The dashboard renders a
         # different link form for these, and build_broker_accounts skips the keyring.
         "uses_gateway": True,
+        "asset_classes": frozenset({"equity"}),  # scope is US equities only — see ibkr.py's own docstring
     },
     "ig": {
-        "label": "IG (Phase 3 — forex CFDs, mechanical scaffolding only, NOT live-verified)",
+        "label": "IG (Phase 3 — forex CFDs, live-verified 2026-07-31/08-01)",
         "cred_fields": ("API key", "Password"),
         # IG's session auth needs THREE credentials (username, password, api_key),
         # not the usual two — this is a deliberate extension of the keyring
@@ -80,9 +85,34 @@ BROKER_META: dict[str, dict] = {
         "extra_cred_field": "Username",
         "supports_paper": True,  # IG has a real, documented demo account (verified 2026-07-21/27)
         "has_market_hours": True,  # forex CFDs — closed weekends, unlike crypto's real 24/7
+        "asset_classes": frozenset({"forex"}),
     },
 }
 SUPPORTED_BROKERS = list(BROKER_META.keys())
+
+
+def infer_asset_class(ticker: str) -> str:
+    """Infer a ticker/symbol's asset class from its format, so the auto-trader
+    can automatically skip target accounts that don't support it (see
+    auto_trader.py's _trade_target) instead of attempting — and erroring on —
+    every target against every configured account regardless of fit. This is
+    what lets an IG (forex-only) account sit in control.account_ids alongside
+    equity accounts permanently without generating wasted API calls or error
+    noise on equity-only cycles ("crosstalk"), rather than requiring it to be
+    manually added/removed before each restart.
+
+    Polygon convention (see universe.py's crypto/forex CSVs, already used
+    directly as scan/backtest tickers): crypto is "X:BTCUSD"-style, forex is
+    "C:EURUSD"-style. A resolved IG epic (e.g. "CS.D.EURUSD.MINI.IP" — what an
+    actual forex auto-trader target uses, once one exists, not a backtest
+    ticker) is also forex. Anything else defaults to equity, the overwhelming
+    common case (plain tickers like "AAPL").
+    """
+    if ticker.startswith("X:"):
+        return "crypto"
+    if ticker.startswith("C:") or ticker.startswith("CS.D.") or ".CFD." in ticker or ".MINI." in ticker:
+        return "forex"
+    return "equity"
 
 
 def _load_raw() -> list[dict]:

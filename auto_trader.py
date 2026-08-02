@@ -38,6 +38,25 @@ Once an account's drawdown from its peak exceeds max_drawdown_pct, that
 account is hard-blocked from new entries (existing positions can still be
 closed) and STAYS blocked, even if equity recovers, until a human manually
 re-arms it from the dashboard. This is deliberately not self-healing.
+
+Daily P&L giveback guard (control.giveback_enabled): a lighter, DAILY
+counterpart to the breaker above — see daily_pnl_guard.py. Once an
+account's profit for today has retraced more than giveback_pct off today's
+own intraday peak, new entries block for the rest of the day (existing
+positions can still close); unlike the breaker above, this resets itself
+automatically at the start of the next day, no manual re-arm needed. Both
+share the same blocked_account_ids set and the same new-entries-block /
+sells-still-allowed behavior in _trade_target — the giveback check is
+skipped for an account the breaker already blocked, since it'd be
+redundant.
+
+Broker instances are now cached across poll cycles (_get_broker_accounts,
+_broker_cache), not rebuilt fresh every cycle like before. Harmless for
+brokers with no per-object session (Alpaca/Coinbase/Kraken/Tastytrade's
+simple key auth, IBKR's own deliberate connect-per-operation design), but
+IGBroker holds ONE authenticated session per instance (ig.py — IG tolerates
+only one fresh login per short window) — without this, a fresh instance
+every poll cycle would mean a fresh IG login every poll cycle.
 """
 
 from __future__ import annotations
@@ -49,7 +68,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from backtester import account_risk, accounts as accounts_module
+from backtester import account_risk, accounts as accounts_module, daily_pnl_guard
 from backtester import events, heartbeat, live_trades, notifications, position_attribution, roster, volatility
 from backtester.auto_trader_state import (
     AutoTraderStatus, load_control, load_control_checked, load_status, save_status,
@@ -69,6 +88,41 @@ VOL_REGIME_LOOKBACK_DAYS = 1100  # daily-bar history fetched for the GARCH regim
 # daily-granularity concept, so it's only worth recomputing once per calendar day
 # per ticker, not on every poll cycle (which can be as frequent as every 5s).
 _regime_cache: dict[str, tuple[str, "volatility.RegimeInfo | None"]] = {}
+
+# In-process cache: {account_id: BrokerAccount}. run_cycle() used to call
+# accounts_module.build_broker_accounts() fresh every single cycle — harmless
+# for brokers that don't hold a session on the object (Alpaca/Coinbase/Kraken/
+# Tastytrade's simple key auth, and IBKR's own deliberate connect-per-operation
+# design), but IGBroker now caches ONE authenticated session per INSTANCE (see
+# ig.py — IG tolerates only one fresh login per short window), so a fresh
+# instance every poll cycle would mean a fresh login every poll cycle, exactly
+# the failure mode that session-reuse fix exists to prevent. Reusing broker
+# objects across cycles here is what actually makes that fix effective for
+# continuous unattended running, not just for a single script/instance.
+_broker_cache: dict[str, BrokerAccount] = {}
+
+
+def _get_broker_accounts(account_ids: list[str]) -> list[BrokerAccount]:
+    """Cached across poll cycles — see _broker_cache above. Only (re)builds an
+    instance for an account_id not already cached; drops (and cleanly closes,
+    for brokers like IG that hold a session) any cached instance for an
+    account_id no longer requested, e.g. after a control.json edit."""
+    stale_ids = set(_broker_cache) - set(account_ids)
+    for aid in stale_ids:
+        broker = _broker_cache.pop(aid)
+        close = getattr(broker, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                pass  # best-effort cleanup only, never let this block a cycle
+
+    missing_ids = [aid for aid in account_ids if aid not in _broker_cache]
+    if missing_ids:
+        for broker in accounts_module.build_broker_accounts(missing_ids):
+            _broker_cache[broker.account_id] = broker
+
+    return [_broker_cache[aid] for aid in account_ids if aid in _broker_cache]
 
 
 def _today_str() -> str:
@@ -129,6 +183,7 @@ def _trade_target(
     status: AutoTraderStatus,
     blocked_account_ids: set[str],
     market_closed_account_ids: set[str],
+    account_asset_classes: dict[str, frozenset[str]],
 ) -> None:
     """Trade one (ticker, strategy) pair for this cycle: fetch bars, get a
     signal, apply the GARCH vol-target filter/sizing, and submit orders
@@ -208,9 +263,14 @@ def _trade_target(
     # attribution (BUY) and realized-P&L computation (SELL) after the fill.
     order_contexts: list[dict] = []
 
+    ticker_asset_class = accounts_module.infer_asset_class(ticker)
+
     for broker_account in broker_accounts:
         if broker_account.account_id in market_closed_account_ids:
             continue  # market shut for this account — never trade on stale bars
+
+        if ticker_asset_class not in account_asset_classes.get(broker_account.account_id, frozenset()):
+            continue  # e.g. an equity ticker against a forex-only IG account — see infer_asset_class
 
         try:
             positions = broker_account.get_positions()
@@ -352,7 +412,21 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
             status.last_error = "no eligible target accounts (check allow_live / linked accounts)"
             save_status(status)
             return status
-        broker_accounts = accounts_module.build_broker_accounts([a["id"] for a in target_meta])
+        broker_accounts = _get_broker_accounts([a["id"] for a in target_meta])
+        # Per-account supported asset class(es) (equity/crypto/forex), so a target
+        # ticker only gets attempted against accounts that can actually trade its
+        # asset class — see accounts.infer_asset_class's docstring for why: this is
+        # what lets e.g. an IG (forex-only) account sit in control.account_ids
+        # permanently alongside equity accounts without generating wasted API
+        # calls or error noise every cycle an equity-only roster/manual config
+        # runs ("crosstalk"). Missing/unrecognized broker defaults to equity —
+        # the overwhelming common case — rather than silently trading everything.
+        account_asset_classes = {
+            a["id"]: accounts_module.BROKER_META.get(a["broker"], {}).get(
+                "asset_classes", frozenset({"equity"})
+            )
+            for a in target_meta
+        }
     except Exception as e:  # noqa: BLE001
         status.last_error = f"failed to build broker accounts: {e}"
         save_status(status)
@@ -409,6 +483,22 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
                 blocked_account_ids.add(broker_account.account_id)
                 status.last_error = f"{broker_account.nickname}: account risk limit breached — {reason}"
 
+    if control.giveback_enabled:
+        for broker_account in broker_accounts:
+            if broker_account.account_id in blocked_account_ids:
+                continue  # already blocked by the account-risk breaker above, no need to also check this
+            try:
+                equity = broker_account.get_account_snapshot().equity
+                blocked, reason = daily_pnl_guard.check_and_update(
+                    broker_account.account_id, equity, control.giveback_pct
+                )
+            except Exception as e:  # noqa: BLE001
+                status.last_error = f"{broker_account.nickname}: daily P&L guard check failed: {e}"
+                continue
+            if blocked:
+                blocked_account_ids.add(broker_account.account_id)
+                status.last_error = f"{broker_account.nickname}: daily P&L giveback limit reached — {reason}"
+
     targets = _resolve_targets(control)
     if not targets:
         status.last_signal = "roster empty — nothing to trade" if control.use_roster else status.last_signal
@@ -427,7 +517,7 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
         _trade_target(
             ticker, strategy_name, params, no_new_entries,
             broker_accounts, client, daily_client, control, status,
-            blocked_account_ids, market_closed_account_ids,
+            blocked_account_ids, market_closed_account_ids, account_asset_classes,
         )
 
     save_status(status)

@@ -62,7 +62,7 @@ from backtester.strategies import STRATEGY_REGISTRY, build_strategy, strategy_re
 from backtester.strategies.sma_crossover import SmaCrossoverStrategy
 from backtester.universe import UNIVERSE_REGISTRY, load_universe, sample_universe, sector_for_ticker
 from backtester.walkforward import aggregate_walkforward, run_walkforward_scan
-from backtester import account_risk, app_settings, heartbeat, live_trades, notifications, playlist, position_attribution, roster, volatility
+from backtester import account_risk, app_settings, daily_pnl_guard, heartbeat, live_trades, notifications, playlist, position_attribution, roster, volatility
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 AUTO_TRADER_SCRIPT = PROJECT_ROOT / "auto_trader.py"
@@ -468,6 +468,41 @@ no way to say "I'm off on purpose".
                         st.error(f"Could not re-arm: {e}")
     if control.account_ids and not blocked_any:
         st.caption("No target accounts are currently risk-blocked.")
+
+    st.divider()
+    st.markdown("### Daily P&L giveback guard")
+    st.caption(
+        "A lighter, DAILY counterpart to the breaker above. Once an account's profit for today "
+        "has given back this much of today's own peak profit, new entries block for the rest of "
+        "the day (existing positions can still be closed) — protects gains on a hot day without "
+        "capping its upside, and without needing an outright loss to trigger. Unlike the breaker "
+        "above, it resets itself automatically at the start of the next trading day — no re-arm "
+        "needed."
+    )
+    giveback_enabled = st.checkbox(
+        "Enable daily P&L giveback guard. Off by default.",
+        value=control.giveback_enabled, key="settings_giveback_enabled",
+    )
+    giveback_pct = st.number_input(
+        "Giveback of today's peak profit that blocks new entries (%)", min_value=1.0, max_value=100.0,
+        value=control.giveback_pct, step=5.0, key="settings_giveback_pct", disabled=not giveback_enabled,
+    )
+    if st.button("Save daily P&L giveback guard", key="settings_save_giveback"):
+        fresh = load_control()
+        fresh.giveback_enabled = giveback_enabled
+        fresh.giveback_pct = giveback_pct
+        save_control(fresh)
+        st.success("Daily P&L giveback guard saved.")
+        st.rerun()
+
+    giveback_blocked_any = False
+    for account in watched:
+        gb_status = daily_pnl_guard.get_status(account["id"])
+        if gb_status and gb_status.get("blocked"):
+            giveback_blocked_any = True
+            st.warning(f"{account['nickname']}: giveback-blocked today — {gb_status['reason']}")
+    if control.account_ids and not giveback_blocked_any:
+        st.caption("No target accounts are currently giveback-blocked today.")
 
 
 BACKTEST_CONFIG_KEYS = [
@@ -2163,13 +2198,22 @@ def render_auto_trading_tab() -> None:
             value=control.block_event_days, key="auto_block_events",
         )
 
-    account_options = {f"{a['nickname']} ({'Paper' if a['is_paper'] else 'LIVE'})": a["id"] for a in linked}
-    selected_labels = st.multiselect(
-        "Target accounts", options=list(account_options.keys()),
-        default=[lbl for lbl, aid in account_options.items() if aid in control.account_ids],
-        key="auto_accounts",
+    st.markdown("**Target accounts**")
+    st.caption(
+        "Toggle each linked account independently — test one broker at a time, or several "
+        "together, without having to remember to remove others first."
     )
-    selected_ids = [account_options[label] for label in selected_labels]
+    selected_ids = []
+    for a in linked:
+        broker_label = BROKER_META.get(a["broker"], {}).get("label", a["broker"])
+        mode_label = "Paper" if a["is_paper"] else "LIVE"
+        checked = st.checkbox(
+            f"{a['nickname']} — {broker_label} ({mode_label})",
+            value=a["id"] in control.account_ids,
+            key=f"auto_account_{a['id']}",
+        )
+        if checked:
+            selected_ids.append(a["id"])
     live_selected = [a for a in linked if a["id"] in selected_ids and not a["is_paper"]]
 
     allow_live = control.allow_live
@@ -2215,6 +2259,9 @@ def render_auto_trading_tab() -> None:
             # saving here never clobbers the account-risk limit set in Settings.
             max_drawdown_enabled=control.max_drawdown_enabled,
             max_drawdown_pct=control.max_drawdown_pct,
+            # Same reasoning: the daily P&L giveback guard is also Settings-owned.
+            giveback_enabled=control.giveback_enabled,
+            giveback_pct=control.giveback_pct,
         )
         save_control(new_control)
         st.success("Configuration saved.")
