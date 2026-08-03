@@ -1,5 +1,5 @@
 CLAUDE_NOTES.txt — Trading Bot Backtester: reference for picking up a new session
-(Last updated: 2026-07-27. Update this file as the project evolves — don't let it go stale.)
+(Last updated: 2026-08-03. Update this file as the project evolves — don't let it go stale.)
 
 === WHAT THIS IS ===
 A local, password-gated Streamlit dashboard for backtesting, scanning, and (optionally)
@@ -1992,9 +1992,114 @@ update above in full.
 - The equities auto-trader test (goal: reach `min_live_trades=5` in live_trades.db so the
   roster's demotion logic finally has real data) never resumed after Friday 2026-07-31's
   0-trade day — still open, whenever next convenient.
-- Phase 3 (extend validated equities winners' forex/crypto tuning further) and Phase 4 (a
-  light pass on the 11 "trend" strategies, deliberately deprioritized given trend-following
-  has lost money in every asset class tested this whole project) — not started.
+- Phase 3 (extend validated equities winners' forex/crypto tuning further) — DONE 2026-08-03,
+  see below. Phase 4 (a light pass on the 11 "trend" strategies) — also DONE 2026-08-03, see
+  below: confirmed regime-mismatch, not a tuning gap, closing out the whole tuning-sweep plan.
+  Next per the user's own stated sequencing: a possible live paper-trading test across the paper
+  accounts (manual trade first per account, then arm the bot, check in after a few hours to a
+  day, run through Friday 2026-08-07 if healthy) — see [[project_trading_bot_goals]] and the
+  memory system's 2026-08-03 update for the full plan. Not started yet; needs the user's go-ahead.
+
+=== PHASE 3 DONE 2026-08-03 (crypto tuning + Pivot Point Scalping cross-asset check) ===
+Tuning-sweep plan's Phase 3 (per the 2026-08-02 plan above): extend the forex-specific
+parameter tuning already proven on VWAP MR/Bollinger MR to crypto, and walk-forward validate
+Pivot Point Scalping (Phase 2's one new zero-param equities winner) on both crypto and forex.
+All runs used `paramsweep.py`'s tools (screen via `run_param_sweep`, then
+`run_walkforward_sweep` across the same 3 standard windows used throughout this project:
+2026-06-23/07-26, 2026-05-20/06-22, 2026-04-16/05-19). Everything below is a FINDING, not an
+adopted change — nothing in STRATEGY_REGISTRY, roster.json, or any live/paper account was
+touched. Read-only against real Polygon data throughout; no scan_history.db writes (paramsweep
+functions never record to it).
+
+**Crypto VWAP Mean Reversion — no real parameter effect found.** Single-window screen
+(entry_deviation_pct 0.15/0.2/0.3/0.5/0.75) showed a mild "tighter is better" trend (Sharpe
+3.29-3.63, all 100% profitable in that one window) — but walk-forward across all 3 windows
+flattened it: 0.15, 0.2, and the current equities default 0.3 all land at mean Sharpe ~1.33-1.34,
+std ~1.5-1.6 (std exceeds the differences between candidates, i.e. statistically indistinguishable
+from each other). **No crypto-specific VWAP MR tuning is worth adopting — the equities default
+does exactly as well as anything else tested.** One footnote: 0.2 was the only variant with 100%
+of windows positive (barely, 0.06 on the weakest window), the actual bar this project trusts,
+even though its mean ties with the others.
+
+**Crypto Bollinger Mean Reversion — the current equities-tuned default is a real loser here,
+confirmed by walk-forward, but no tighter variant clears the trust bar either.**
+- Screen (period 15/20 x num_std 2.5/3.0/3.5/4.0): sharp, dramatic spread, opposite DIRECTION
+  from forex — crypto wants TIGHTER bands (num_std 2.5 best, Sharpe 4.48 at period=20), while
+  forex needed WIDER bands (num_std 4.0) to work. Confirms again that per-asset-class tuning
+  doesn't transfer, and that the *direction* of the fix isn't universal either — don't assume
+  "widen the bands" is a general fix just because it worked for forex.
+- Walk-forward (period=20/num_std=2.5, period=15/num_std=2.5, and the current default
+  period=15/num_std=3.0 as baseline): confirms the **current default is genuinely bad on
+  crypto** — mean Sharpe -0.54, only 1 of 3 windows positive. Tightening to period=20/num_std=2.5
+  fixes the SIGN (mean +1.38) but still doesn't reach 100%-of-windows-positive (window 3 goes to
+  -0.94) — real improvement, not yet a trustworthy tuning.
+- **Follow-up test (period=20/num_std=2.0, user-requested):** going even tighter makes it WORSE,
+  not better — mean drops to 0.37, std blows up to 3.25, window 3 collapses to -3.7, and trade
+  count nearly doubles (36,180 vs 17,656 at num_std=2.5) — the same overtrading signature seen
+  elsewhere in this project (Liquidity Sweep, Volume Spike Reversal) when a band is tightened too
+  far. **num_std=2.5 is near the local optimum on this axis, not a stepping stone to something
+  better — don't re-test tighter than 2.5 without a genuinely different lever (e.g. period).**
+- **Net: no crypto-specific Bollinger MR tuning clears the adoption bar today**, but if this gets
+  revisited, period=20/num_std=2.5 is the best-known starting point, and the equities default
+  (15/3.0) is confirmed actively bad on crypto, not just untested.
+
+**Pivot Point Scalping (equities' zero-param Phase 2 winner) — does NOT transfer to crypto or
+forex.** Walk-forward across the same 3 windows, full universes (15 crypto pairs, 7 forex
+majors), default params (nothing to tune):
+- Crypto: mean Sharpe 0.57, std 1.65, 67% positive — noisy, std swamps the mean, not a real edge.
+- Forex: mean Sharpe **-1.18**, std only 0.65, **0% of windows positive** — a clean, CONFIDENT
+  negative (low std means this isn't noise, it's consistently losing).
+- Same "equities tuning doesn't automatically transfer" pattern as everything else tested this
+  stretch (VWAP MR/Bollinger MR forex retuning, the GLD precedent, etc.) — Pivot Point Scalping
+  stays a real, validated EQUITIES-only strategy; don't consider it for the crypto/forex roster.
+
+**What this means for the roster/live decisions still open above:** none of this changes the
+"Whether to add Pivot Point Scalping to the live roster" question (that's an EQUITIES roster
+decision, and Pivot Point Scalping's equities validation is untouched by this work) or the CFD
+auto-trading arming decision (forex VWAP MR/Bollinger MR retuning from before this session is
+unaffected, still not armed). It DOES mean: don't build a "diversify the roster into crypto/forex"
+plan around these three strategies at their current tunings — none of the six crypto/forex
+combinations tested this session (VWAP MR x1, Bollinger MR x1, Pivot Point Scalping x2 asset
+classes, plus this being a repeat/extension of the forex work already done) clears the
+100%-of-windows bar the way equities' VWAP MR/Bollinger MR or forex's own retuned versions do.
+
+=== PHASE 4 DONE 2026-08-03 (light trend-strategy pass — confirms regime-mismatch, not tuning) ===
+Tuning-sweep plan's Phase 4 (per the 2026-08-02 plan above): a LIGHT single-window screen —
+1-2 quick parameter variations per strategy, NOT the full 3-window walk-forward treatment — on
+the 11 deprioritized "trend" strategies, to cheaply confirm whether their consistent losses are
+a tuning gap or a genuine regime mismatch. 29 explicit (strategy, params) candidates run via
+direct `run_scan` calls (not paramsweep.py's grid tool, since different strategies have
+unrelated parameter shapes), single window (2026-06-23/07-26, the standard first window), 30
+S&P 500 tickers (mirrors Phase 2's own screen-cheap-first discipline). Took ~48 minutes total.
+
+**Result: decisive and clean. Every one of the 29 combos is negative or trade-count noise —
+no parameter variation rescued anything.** The only two "positive" Sharpe results (Flag/Pennant
+Continuation default at 0.30, and its tighter move_pct=5.0 variant at 0.18) fired on just 17 and
+3 trades respectively over 30 tickers — far too thin to be a real signal, not a finding. Every
+other combo is meaningfully negative, several severely so: MACD Crossover's faster variant hit
+Sharpe -18.14 (-38% return, 22,048 trades — a clear overtrading blowup), Momentum ROC's default
+hit -33.70% return. Widening or tightening lookback windows, band widths, thresholds, and the
+Fibonacci level all moved the needle by degrees but never crossed into genuine profitability.
+
+**Per the plan's own design, this IS the intended stopping point** — "if even a quick variation
+check shows nothing, that's a fast, cheap confirmation the problem is genuinely regime-mismatch,
+not tuning, and further effort here can stop." Nothing here warranted escalating to the full
+3-window walk-forward treatment (unlike Phase 3's crypto Bollinger MR retune, which DID show
+enough promise on a screen to justify walk-forward). **Trend-following's failure across this
+entire project (equities, crypto, AND forex, every time it's been tested) is now confirmed, not
+just suspected, to be a genuine market-regime effect over this period (broadly choppy/range-bound
+2026-04 through 2026-07) rather than a parameter-tuning gap.** Don't re-open trend-strategy tuning
+without a genuinely new angle (a different instrument class, a much longer/different time period,
+or a structurally different entry idea) — repeating this exact exercise again would just
+re-confirm the same result.
+
+**Tuning-sweep plan (Phases 1-4) is now fully closed out.** Range-family strategies (Phase
+1/2/3): VWAP MR + Bollinger MR remain the two validated equities winners (tuned), Pivot Point
+Scalping is a third validated-as-is equities winner (still not added to the live roster — open
+decision), and neither crypto nor forex tuning of these three cleared the adoption bar this
+session (Bollinger MR's forex retune from before this session is the one exception, already
+live in strategy_params usage). Trend family (Phase 4): confirmed dead across every asset class
+tested, closed.
 
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
