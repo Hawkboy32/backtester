@@ -81,6 +81,16 @@ class IBKRBroker(BrokerAccount):
         self._ibkr_account = ibkr_account or ""
         self._asset_class = asset_class
 
+    @property
+    def supports_fractional_shares(self) -> bool:
+        """IBKR's STK order path rejects fractional-sized equity orders
+        outright — confirmed live 2026-08-03: "Fractional-sized order cannot
+        be placed via API. Please use desktop version to place this order."
+        (Alpaca supports fractional shares; IBKR doesn't via this API.) Forex
+        (CASH) orders aren't measured in discrete shares, so this only
+        applies to an equity-flavored account."""
+        return self._asset_class != "equity"
+
     def _contract(self, ticker: str):
         """A Stock or Forex contract depending on this account's asset_class —
         NOT inferred from `ticker`'s shape, set once at construction."""

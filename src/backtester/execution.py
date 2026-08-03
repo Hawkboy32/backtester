@@ -9,6 +9,7 @@ Execution tab, gated behind an explicit confirm step).
 
 from __future__ import annotations
 
+import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
@@ -42,22 +43,38 @@ def compute_qty_for_account(
     used only to convert a %-of-equity or fixed-dollar target into a share
     count — it is not used for execution, which remains a market order at
     whatever price actually fills.
+
+    Floors to a whole share for any account whose broker doesn't accept
+    fractional-sized orders (account.supports_fractional_shares == False,
+    e.g. IBKR equities) — otherwise %-of-equity/fixed-dollar sizing routinely
+    produces a fractional quantity that broker's API rejects outright.
     """
     if sizing_mode is SizingMode.FIXED_SHARES:
-        return sizing_value
-
-    if reference_price <= 0:
-        raise ValueError("reference_price must be positive to size by equity % or dollar amount")
-
-    if sizing_mode is SizingMode.PCT_EQUITY:
-        snapshot = account.get_account_snapshot()
-        dollars = snapshot.equity * (sizing_value / 100)
-    elif sizing_mode is SizingMode.FIXED_DOLLARS:
-        dollars = sizing_value
+        qty = sizing_value
     else:
-        raise ValueError(f"Unknown sizing mode: {sizing_mode}")
+        if reference_price <= 0:
+            raise ValueError("reference_price must be positive to size by equity % or dollar amount")
 
-    return round(dollars / reference_price, 4)
+        if sizing_mode is SizingMode.PCT_EQUITY:
+            snapshot = account.get_account_snapshot()
+            dollars = snapshot.equity * (sizing_value / 100)
+        elif sizing_mode is SizingMode.FIXED_DOLLARS:
+            dollars = sizing_value
+        else:
+            raise ValueError(f"Unknown sizing mode: {sizing_mode}")
+
+        qty = round(dollars / reference_price, 4)
+
+    if not account.supports_fractional_shares and qty != math.floor(qty):
+        qty = float(math.floor(qty))
+        if qty <= 0:
+            raise ValueError(
+                f"{sizing_value} ({sizing_mode.value}) at reference price {reference_price} floors to 0 "
+                f"whole shares on {account.nickname} — this broker doesn't accept fractional orders "
+                "and the sizing target doesn't cover even 1 share. Raise the sizing value or pick a "
+                "cheaper ticker."
+            )
+    return qty
 
 
 def execute_order_across_accounts(

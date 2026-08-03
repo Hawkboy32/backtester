@@ -58,6 +58,13 @@ class BrokerAccount(ABC):
     nickname: str
     is_paper: bool
     account_id: str = ""  # the linked-account UUID from accounts.py; set by build_broker_accounts()
+    # Whether this broker's API accepts a non-integer share quantity. True for
+    # every broker in this project except IBKR (its API rejects fractional-
+    # sized equity orders outright — "use the desktop version" — confirmed
+    # live 2026-08-03). execution.compute_qty_for_account floors to a whole
+    # share for any account where this is False, so %-of-equity/fixed-dollar
+    # sizing never produces a quantity the broker will reject.
+    supports_fractional_shares: bool = True
 
     @abstractmethod
     def get_account_snapshot(self) -> AccountSnapshot:
