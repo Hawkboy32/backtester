@@ -20,22 +20,27 @@ reruns where it would go stale.
 
 TWO REAL GAPS, deliberately not guessed at (same discipline as every other
 broker in this project — verify against a live account before assuming):
-1. SYMBOL MAPPING: IG identifies instruments by "epic" strings (e.g.
-   "CS.D.EURUSD.CFD.IP" is the commonly-documented EUR/USD CFD epic, but this
-   has NOT been verified against a real IG account). `ticker` in every method
-   below is passed straight through AS the epic — callers must resolve a
-   plain pair name to the correct epic themselves (via IGService's
-   search_markets()/fetch_market_by_epic(), once a demo account exists to
-   verify epic strings against) before calling this broker. Same shape as
-   the Polygon-ticker-vs-broker-symbol gap already flagged for crypto/forex.
-2. NOT LIVE-VERIFIED AT ALL: no IG account has been created yet (Claude
-   cannot create one — that is the user's action). Every method here is
-   built from the trading-ig SDK's real method signatures (introspected
-   directly, not guessed — see git history for the introspection session)
-   and IG's documented REST response field names, but has never been run
-   against a real demo account. Treat this the same way IBKR was treated
-   before its first live paper test: correct by construction, unverified
-   until exercised for real.
+1. SYMBOL MAPPING — PARTIALLY CLOSED 2026-08-03. IG identifies instruments by
+   "epic" strings (e.g. "CS.D.EURUSD.CFD.IP" is the commonly-documented
+   EUR/USD CFD epic, but that specific string has never been confirmed
+   against a real IG account — don't treat it as fact just because it's
+   commonly cited). `submit_market_order` now calls `_resolve_epic()`, which
+   resolves a plain pair name (or this app's usual Polygon-style "C:EURUSD"
+   ticker) via IGService's own `search_markets()` — the real SDK method for
+   this, previously unused here — rather than assuming any hardcoded epic
+   pattern. Built correct-by-construction against the SDK's actual source,
+   but NOT live-verified (see gap 2) — the exact response column names it
+   filters on (`epic`, `instrumentType`) are confident, not confirmed, until
+   exercised against a real account. An already-epic-shaped ticker (matches
+   the same heuristic accounts.infer_asset_class uses) skips resolution
+   entirely, so a hand-typed real epic still works regardless.
+2. EPIC RESOLUTION SPECIFICALLY NOT LIVE-VERIFIED: a real IG demo account
+   is linked (session/auth, market data, and position open/close were all
+   live-verified in an earlier session) — but `_resolve_epic()` above is
+   new and hasn't been exercised against a real account yet. Treat it the
+   same way every other broker's first live test in this project was
+   treated: correct by construction against the SDK's real source, but the
+   user's own next live attempt is the actual verification step.
 """
 
 from __future__ import annotations
@@ -135,6 +140,10 @@ class IGBroker(BrokerAccount):
         self._use_encryption = use_encryption
         self._svc: IGService | None = None
         self._svc_created_at: float = 0.0
+        # Resolved-epic cache, keyed by whatever ticker was passed in. Epics
+        # are stable for a given instrument, so this persists for this
+        # instance's lifetime — same reasoning as caching the session itself.
+        self._epic_cache: dict[str, str] = {}
 
     def _new_session(self) -> IGService:
         """Always creates a brand-new, freshly-authenticated IGService — does
@@ -175,6 +184,39 @@ class IGBroker(BrokerAccount):
                 pass
             finally:
                 self._svc = None
+
+    def _resolve_epic(self, ticker: str) -> str:
+        """Resolve a plain pair name (or this app's usual Polygon-style
+        "C:EURUSD" ticker) to a real IG epic via IGService.search_markets()
+        — the SDK's own instrument-search endpoint — rather than assuming
+        any hardcoded epic pattern (see the module docstring's gap 1: the
+        commonly-cited "CS.D.<PAIR>.CFD.IP" shape has never been confirmed
+        against a real account, so it isn't hardcoded here as if it were).
+
+        Already epic-shaped input (same heuristic accounts.infer_asset_class
+        uses to detect a resolved epic) passes through unchanged — a hand-
+        typed real epic still works, and no API call is wasted on it. Results
+        are cached per-instance since an epic doesn't change.
+        """
+        if ticker.startswith("CS.D.") or ".CFD." in ticker or ".MINI." in ticker:
+            return ticker
+        if ticker in self._epic_cache:
+            return self._epic_cache[ticker]
+
+        pair = ticker[2:] if ticker.startswith("C:") else ticker
+        svc = self._session()
+        results = svc.search_markets(pair)
+        if results is None or results.empty:
+            raise IGException(f"IG search_markets found no instrument matching {pair!r} (from ticker {ticker!r}).")
+
+        # Prefer a plain currency CFD match (IG's instrumentType for forex
+        # pairs) — fall back to the first result if that filter finds
+        # nothing, rather than failing outright on an unexpected type value.
+        currency_rows = results[results["instrumentType"] == "CURRENCIES"] if "instrumentType" in results else results
+        row = (currency_rows if not currency_rows.empty else results).iloc[0]
+        epic = str(row["epic"])
+        self._epic_cache[ticker] = epic
+        return epic
 
     def get_account_snapshot(self) -> AccountSnapshot:
         svc = self._session()
@@ -258,16 +300,19 @@ class IGBroker(BrokerAccount):
         take_profit_price: float | None = None,
         stop_loss_price: float | None = None,
     ) -> OrderResult:
-        """`ticker` must already be an IG epic (see module docstring — symbol
-        resolution isn't built yet). Opens a new position if none exists on
-        this epic; closes the existing one otherwise — mirrors how the rest
-        of this app's auto-trading logic already decides BUY-to-open vs
-        SELL-to-close (long-only everywhere, no shorting), just made
-        explicit here since IG's API has separate open/close endpoints
-        instead of one order call the broker nets automatically.
+        """`ticker` accepts either this app's usual Polygon-style ticker
+        ("C:EURUSD"), a plain pair name, or a real IG epic directly —
+        _resolve_epic() translates as needed. Opens a new position if none
+        exists on the resolved epic; closes the existing one otherwise —
+        mirrors how the rest of this app's auto-trading logic already
+        decides BUY-to-open vs SELL-to-close (long-only everywhere, no
+        shorting), just made explicit here since IG's API has separate
+        open/close endpoints instead of one order call the broker nets
+        automatically.
         """
         svc = self._session()
         try:
+            ticker = self._resolve_epic(ticker)
             # Fetch the RAW positions frame here, not get_positions()'s
             # translated Position list — closing needs IG's own dealId,
             # which the generic Position dataclass (shared across every

@@ -3,8 +3,9 @@ coinbase-advanced-py SDK.
 
 No verified sandbox/paper mode — every linked Coinbase account always
 connects to the real live API (accounts.py forces is_paper=False for this
-broker). Spot trading only; `ticker` must be a Coinbase product_id like
-"BTC-USD", not a bare asset code.
+broker). Spot trading only. `submit_market_order`'s `ticker` accepts either
+this app's usual Polygon-style ticker ("X:BTCUSD") or a real Coinbase
+product_id ("BTC-USD") directly — see `_product_id()` for the translation.
 
 Bracket orders (take_profit_price/stop_loss_price) aren't implemented —
 Coinbase's trigger-bracket order shape doesn't map cleanly onto a simple
@@ -55,6 +56,19 @@ class CoinbaseBroker(BrokerAccount):
         self.nickname = nickname
         self.is_paper = False  # no verified sandbox for this broker
         self._client = RESTClient(api_key=api_key, api_secret=api_secret)
+
+    def _product_id(self, ticker: str) -> str:
+        """Coinbase's product_id format ("BTC-USD") differs from the Polygon-
+        style ticker ("X:BTCUSD") used everywhere else in this app (universe
+        CSVs, the Trade Execution ticker picker). Every pair in
+        data/crypto_universe.csv is USD-quoted, so a strip+rejoin is a
+        reliable deterministic transform, not a guess. Already product-id-
+        shaped input (contains a "-") passes through unchanged, so a hand-
+        typed real product_id still works untouched."""
+        if "-" in ticker:
+            return ticker
+        t = ticker[2:] if ticker.startswith("X:") else ticker
+        return f"{t[:-3]}-USD" if t.endswith("USD") else ticker
 
     def _default_portfolio_uuid(self) -> str:
         portfolios = self._client.get_portfolios().portfolios or []
@@ -117,15 +131,16 @@ class CoinbaseBroker(BrokerAccount):
                 success=False,
                 error="Bracket orders (take-profit/stop-loss) aren't implemented for Coinbase yet.",
             )
+        product_id = self._product_id(ticker)
         try:
             client_order_id = str(uuid.uuid4())
             if side is OrderSide.BUY:
                 response = self._client.market_order_buy(
-                    client_order_id=client_order_id, product_id=ticker, base_size=str(qty)
+                    client_order_id=client_order_id, product_id=product_id, base_size=str(qty)
                 )
             else:
                 response = self._client.market_order_sell(
-                    client_order_id=client_order_id, product_id=ticker, base_size=str(qty)
+                    client_order_id=client_order_id, product_id=product_id, base_size=str(qty)
                 )
             if not response.success:
                 error_msg = response.error_response.error if response.error_response else "unknown error"
