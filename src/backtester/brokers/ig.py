@@ -41,7 +41,6 @@ broker in this project — verify against a live account before assuming):
 
 from __future__ import annotations
 
-import math
 import re
 import threading
 import time
@@ -114,6 +113,37 @@ def _ticker_from_epic(epic: str) -> str:
     epic looks unfamiliar."""
     match = _EPIC_PAIR_RE.match(epic)
     return f"C:{match.group(1)}" if match else epic
+
+
+def _round_to_ig_size_step(qty: float, min_size: float) -> float:
+    """Round DOWN to the nearest size IG will actually accept.
+
+    Originally assumed "any multiple of dealingRules.minDealSize" — WRONG,
+    confirmed live 2026-08-04: on an account/instrument reporting
+    minDealSize=1.0, a request for size=4 was rejected with SIZE_INCREMENT,
+    while size=1 and size=10 both passed the size check (size=10 got only
+    as far as a separate INSUFFICIENT_FUNDS rejection, proving 10 itself
+    was accepted as a valid size). That pattern — 1 and 10 valid, 4 not —
+    matches a "1-2-5" preferred-number lot-size sequence (1, 2, 5, 10, 20,
+    50, 100, ...), a common convention on CFD platforms that ISN'T exposed
+    anywhere in the dealingRules API response — it was inferred from
+    limited live testing, not documented, so treat it as a working
+    hypothesis to revisit if a future order still comes back SIZE_INCREMENT,
+    not settled fact. Never rounds up (never over-commits beyond what was
+    requested/sized) — returns 0.0 if qty is below the smallest step.
+    """
+    if min_size <= 0 or qty < min_size:
+        return 0.0
+    best = 0.0
+    step = min_size
+    while step <= qty:
+        for multiple in (1, 2, 5):
+            candidate = step * multiple
+            if candidate > qty:
+                return best
+            best = candidate
+        step *= 10
+    return best
 
 
 # REVISED 2026-07-31: the throttle above wasn't enough — a clean login
@@ -241,18 +271,14 @@ class IGBroker(BrokerAccount):
         return epic
 
     def _resolve_min_deal_size(self, epic: str) -> float:
-        """IG rejects an order whose size isn't a clean multiple of the
-        instrument's own minimum deal size — error code SIZE_INCREMENT,
-        confirmed live 2026-08-04 (a generic %-of-equity/fixed-dollar-sized
-        order landed on a size IG wouldn't accept, the same class of gap as
-        IBKR's fractional-share rejection, but per-instrument and IG-
-        specific rather than a fixed broker-wide flag). Fetched via
+        """The smallest size IG will accept for this instrument, fetched via
         IGService.fetch_market_by_epic()'s real dealingRules.minDealSize.value
         field (confirmed against the trading-ig SDK's own response shape,
         not guessed) and cached per-instance alongside _epic_cache — stable
         per instrument, not worth re-fetching every order. Falls back to 1.0
-        (whole units) if the field is missing/unparseable — the conservative
-        default IG itself effectively uses for most CFD instruments.
+        if the field is missing/unparseable. NOTE: this is the FLOOR, not
+        the step — see _round_to_ig_size_step's docstring for why a clean
+        multiple of this value can still be rejected.
         """
         if epic in self._min_deal_size_cache:
             return self._min_deal_size_cache[epic]
@@ -363,12 +389,12 @@ class IGBroker(BrokerAccount):
             ticker = self._resolve_epic(ticker)
 
             min_size = self._resolve_min_deal_size(ticker)
-            rounded_qty = round(math.floor(qty / min_size) * min_size, 8)  # round off float repr noise
+            rounded_qty = _round_to_ig_size_step(qty, min_size)
             if rounded_qty <= 0:
                 return OrderResult(
                     account_nickname=self.nickname, success=False,
                     error=(
-                        f"Requested size {qty} is below {ticker}'s minimum deal size/increment "
+                        f"Requested size {qty} is below {ticker}'s minimum tradeable size "
                         f"({min_size}) — raise the sizing value."
                     ),
                 )
