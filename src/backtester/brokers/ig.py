@@ -20,27 +20,23 @@ reruns where it would go stale.
 
 TWO REAL GAPS, deliberately not guessed at (same discipline as every other
 broker in this project — verify against a live account before assuming):
-1. SYMBOL MAPPING — PARTIALLY CLOSED 2026-08-03. IG identifies instruments by
-   "epic" strings (e.g. "CS.D.EURUSD.CFD.IP" is the commonly-documented
-   EUR/USD CFD epic, but that specific string has never been confirmed
-   against a real IG account — don't treat it as fact just because it's
-   commonly cited). `submit_market_order` now calls `_resolve_epic()`, which
-   resolves a plain pair name (or this app's usual Polygon-style "C:EURUSD"
-   ticker) via IGService's own `search_markets()` — the real SDK method for
-   this, previously unused here — rather than assuming any hardcoded epic
-   pattern. Built correct-by-construction against the SDK's actual source,
-   but NOT live-verified (see gap 2) — the exact response column names it
-   filters on (`epic`, `instrumentType`) are confident, not confirmed, until
-   exercised against a real account. An already-epic-shaped ticker (matches
-   the same heuristic accounts.infer_asset_class uses) skips resolution
-   entirely, so a hand-typed real epic still works regardless.
-2. EPIC RESOLUTION SPECIFICALLY NOT LIVE-VERIFIED: a real IG demo account
-   is linked (session/auth, market data, and position open/close were all
-   live-verified in an earlier session) — but `_resolve_epic()` above is
-   new and hasn't been exercised against a real account yet. Treat it the
-   same way every other broker's first live test in this project was
-   treated: correct by construction against the SDK's real source, but the
-   user's own next live attempt is the actual verification step.
+1. SYMBOL MAPPING — CLOSED 2026-08-03. IG identifies instruments by "epic"
+   strings (e.g. "CS.D.EURUSD.CFD.IP" is the commonly-documented EUR/USD CFD
+   epic — never independently confirmed here; _resolve_epic() below resolves
+   the real epic via search rather than assuming it). `submit_market_order` now calls
+   `_resolve_epic()`, which resolves a plain pair name (or this app's usual
+   Polygon-style "C:EURUSD" ticker) via IGService's own `search_markets()`
+   — the real SDK method for this, previously unused here — rather than
+   assuming any hardcoded epic pattern. LIVE-VERIFIED (see gap 2): a real
+   "C:EURUSD" order was accepted by the linked IG demo account. An already-
+   epic-shaped ticker (matches the same heuristic accounts.infer_asset_class
+   uses) skips resolution entirely, so a hand-typed real epic still works.
+2. LIVE-VERIFIED 2026-08-03: `_resolve_epic()`'s search_markets()-based
+   resolution was exercised for real against the linked IG demo account —
+   a manual "C:EURUSD" order (the exact ticker that originally failed with
+   validation.pattern.invalid.request.epic before this method existed) was
+   accepted. The `instrumentType`/`epic` column names it filters on are
+   confirmed correct for at least this pair, not just plausible.
 """
 
 from __future__ import annotations

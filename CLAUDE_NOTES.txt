@@ -2101,6 +2101,56 @@ session (Bollinger MR's forex retune from before this session is the one excepti
 live in strategy_params usage). Trend family (Phase 4): confirmed dead across every asset class
 tested, closed.
 
+=== ASSET-CLASS DASHBOARD FIX + BROKER SYMBOL TRANSLATION (2026-08-03) ===
+Starting the live paper test (manual smoke trade first on each paper account, per the user's own
+plan), a real bug surfaced: the Trade Execution tab let any ticker be picked against any linked
+account with zero compatibility check — a forex ticker submitted against the equity-only "IBKR
+Paper" account got a cryptic broker-level rejection instead of being caught upfront.
+
+**Fix 1 (commit 629a3c8): asset-class sectioned dashboard.** New `accounts.account_asset_class()`
+helper is now the one authoritative "what does THIS linked account trade" answer, distinct from
+`BROKER_META[broker]["asset_classes"]` (what the broker TYPE can support) — IBKR is the only
+broker where two linked accounts can differ (equity vs forex sub-account), so it alone reads a
+per-account `conn_params.asset_class` override (default "equity", so every account linked before
+this field existed, including the real IBKR Paper, is unaffected). IBKR forex sub-accounts are
+now linkable via a new radio on the Accounts tab's link form. Accounts / Trade Execution / Auto
+Trading tabs all now group into **Equities / Forex & CFDs / Crypto** sections. Trade Execution
+gained a top-level Asset class selector that scopes BOTH the ticker dropdown and the target-
+account list to only compatible combinations — the original mismatch is now structurally
+unselectable, not just warned about, plus a defense-in-depth re-check right before submission.
+**Real regression caught before shipping:** `auto_trader.py`'s existing crosstalk guard derived
+per-account eligibility from the broker-level `BROKER_META[...]["asset_classes"]` set — widening
+IBKR's set to include forex (needed for the above) would have silently made every IBKR account,
+including the real equity-only one, eligible for forex tickers in the AUTOMATED bot. Fixed in the
+same commit by rebuilding that guard on the new per-account helper instead.
+**Real UI bug caught live during verification:** the ticker field kept showing a stale label after
+switching asset class (a Streamlit combobox quirk — popping session_state didn't reset the
+displayed text). Fixed by keying the ticker widget per asset class, forcing a true remount.
+
+**Fix 2 (commit 7e14520): broker-native symbol translation, LIVE-VERIFIED 2026-08-03.** Fix 1
+exposed a SEPARATE pre-existing gap, already flagged unresolved across this project's history but
+never built: submitting a correctly-scoped "C:EURUSD" order against IG failed with
+`validation.pattern.invalid.request.epic` — IG needs its own "epic" string, not a Polygon ticker.
+`ig.py` gained `_resolve_epic()`, using `IGService.search_markets()` (the SDK's real instrument-
+search method, previously unused here) instead of hardcoding the commonly-cited but never-
+verified `CS.D.<PAIR>.CFD.IP` pattern — cached per-instance, already-epic-shaped input skips
+resolution. **CONFIRMED LIVE the same day: the exact "C:EURUSD" order that originally failed was
+resubmitted and accepted by the real linked IG demo account — AND the follow-up close order also
+succeeded**, proving the resolved epic stays consistent between the open and close calls (the
+close path matches against `raw_positions["epic"] == ticker` post-resolution), not just a one-off
+open. `coinbase.py` also gained a
+deterministic `_product_id()` transform (Polygon "X:BTCUSD" -> Coinbase "BTC-USD", verified
+against all 15 real crypto_universe.csv pairs) for the same class of gap — not yet live-tested
+(no live/paper Coinbase order attempted). **Kraken intentionally excluded** from this pass (user's
+choice — its own asset-code mapping is murkier, its docstring already flags it as unreliable to
+map "in a small reliable way," left for a future session).
+
+**Correction to the record:** an earlier note in this file's history implied a real IG epic had
+been confirmed live back in the 2026-07-30/31 IG verification session. Re-checked directly against
+this file during this fix — that never happened; the epic format was flagged unresolved right up
+until this fix. Worth remembering: don't trust a recalled "this was already verified" claim without
+re-checking the actual record, same discipline this project already applies to backtest results.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,
