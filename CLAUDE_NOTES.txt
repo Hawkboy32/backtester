@@ -1883,7 +1883,36 @@ worse for higher-trade-count variants (Liquidity Sweep's default alone had 21k-3
 already used for forex**: a single-window, 30-ticker screen of all 9 candidates first
 (~30% of Phase C's ticker count, proportionally faster), only escalating to the full
 100-ticker x 3-window x 2-universe walk-forward for whichever candidates actually look
-promising in the screen. Screen running as of this note — see the next update for results.
+promising in the screen.
+
+**PHASE 2 FINAL RESULT 2026-08-02/03: the screen was MISLEADING for both escalated
+candidates — a clean demonstration of exactly why the walk-forward discipline exists.**
+- RSI Divergence (default 14/10/70): screen showed +0.17 Sharpe/60% profitable (30
+  tickers, 1 window) → full walk-forward: **mean -0.61, 17% positive (1/6)** — matches the
+  original Phase C number exactly, the screen's positive read didn't generalize at all.
+- RSI Divergence (longer lookback 14/20/70): screen showed +0.89 Sharpe/67% profitable →
+  full walk-forward: **mean -0.44, 17% positive (1/6)** — a real improvement over the
+  default variant, but still net negative and still mostly losing windows. If we'd trusted
+  the screen alone we'd have wrongly promoted this variant.
+- Opening Range Liquidity Reversal (default params): screen showed 0.25 Sharpe but only 14
+  trades (too few to judge) → full walk-forward, much better sample (32-90 trades/combo):
+  **mean -0.33, 0% positive (0 of 6 windows)** — consistently (std only 0.15) but mildly
+  losing. Not viable as-is on equities, though this is the newest strategy and the ONLY one
+  of the four with a not-yet-tried lever: the new FVG confirmation filter (see below).
+- RSI Mean-Reversion, Liquidity Sweep, Volume Spike Reversal: all confirmed the overtrading
+  theory (tightening/widening meaningfully improved each one) but none reached positive
+  territory even after it — deprioritized, not worth further expensive scanning right now.
+
+**NET PHASE 2 OUTCOME: only ONE genuine new find — Pivot Point Scalping — and it needed no
+testing at all, just noticing it in data that already existed.** Validated equities roster
+candidates now stand at 3: VWAP MR, Bollinger MR, Pivot Point Scalping. Not yet added to
+the actual roster — a finding to act on, not a decision made unilaterally.
+
+**FOLLOW-UP 2026-08-03: testing the new FVG confirmation filter on Opening Range Liquidity
+Reversal** (built same day, see the strategy's own commit) using `run_walkforward_sweep`'s
+first real (non-mocked) use — require_fvg_confirmation=True across the same 3 windows x 2
+universes, compared against the already-measured False baseline above. Running as of this
+note — see the next update for results.
 
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
