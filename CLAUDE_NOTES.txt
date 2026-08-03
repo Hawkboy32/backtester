@@ -2169,23 +2169,32 @@ bug; a real dashboard process restart, not just a browser refresh, resolved it. 
 gotcha as the ticker-widget stale-label bug earlier this session — worth remembering that a code fix
 here needs the dashboard PROCESS restarted, not just the page reloaded, before trusting a retest.)
 
-**PRE-ARMING CHECKLIST — not yet done, needed before starting the equities auto-trader run:**
-- `control.json`'s `account_ids` currently targets MyAlpaca + **MyIGPaper** — needs swapping to
-  MyAlpaca + **IBKR Paper** (id `8fd207cf-ef9f-4ad8-a507-b643b0edc26a`) to match the actual plan.
-- `sizing_mode: "fixed_dollars"` / `sizing_value: 500.0` is too small to buy even 1 share of MPWR on
-  IBKR (floors to 0, now a clear error instead of a silent no-op — but still means no trade). Needs
-  raising (the user tested $1000 manually and it worked) before arming, or IBKR will keep failing to
-  size into higher-priced roster tickers.
-- Roster staleness: `roster.json`'s active entries (MPWR, CSX) still carry `entry_deviation_pct=0.5`
-  from their 2026-07-29 promotion — the PRE-retune VWAP MR default. The Phase E tune to 0.3 never
-  made it into a fresh scan (the latest scan in scan_history.db, run #38, also predates the 07-31
-  retune), so clicking "Re-evaluate roster now" won't actually fix this — it would just re-read the
-  same stale 0.5 from the same old scan rows. 0.5 is NOT broken (still Sharpe-positive, just
-  suboptimal vs. the tuned 0.3 — see the 2026-08-01→03 consolidation above), so this doesn't block
-  arming, but trading on it silently would mean the live bot isn't actually running the
-  best-known-validated parameters. Real fix needs either a fresh 100-ticker scan under the current
-  STRATEGY_REGISTRY defaults (multi-hour, per the SCALE LESSON above) or a smaller manual correction
-  — not yet decided with the user.
+**PRE-ARMING CHECKLIST — DONE, and the bot is now ARMED (2026-08-03 evening).**
+- `control.json`'s `account_ids` swapped from MyAlpaca+MyIGPaper to **MyAlpaca + IBKR Paper**
+  (`8fd207cf-ef9f-4ad8-a507-b643b0edc26a`), via `load_control()`/`save_control()` (not a raw file
+  edit, to avoid the documented torn-read race with the live process).
+- `sizing_value` raised from $500 to **$1000** (fixed_dollars) — matches what the user tested
+  manually and confirmed works on IBKR. Explicitly called out by the user as a "for now" value, not
+  a permanent one — may want a more principled/variable sizing approach later.
+- Roster staleness FIXED, not just accepted: ran two fresh scans (recorded as runs #39 S&P 500 and
+  #40 Nasdaq-100, 100 tickers each, window 2026-06-23/07-26, VWAP MR + Bollinger MR ONLY — not the
+  full 18-strategy grid, since this was specifically about refreshing known-good combos' stale
+  params, not re-opening the separate "add Pivot Point Scalping?" decision) under the CURRENT
+  STRATEGY_REGISTRY defaults, then `roster.evaluate_roster()`'d against the combined result
+  (mirroring Phase D's exact "one most-recent window, S&P500+Nasdaq100 combined" methodology).
+  **Real, honest promotion/demotion events resulted** (logged to roster_events.jsonl, backup of the
+  pre-re-eval roster.json kept in scratchpad): DDOG promoted (VWAP MR, score 0.900) and SWK promoted
+  (Bollinger MR, score 0.758) — both new. MPWR stays active but now on tuned entry_deviation_pct=0.3
+  (was 0.5). CSX demoted — NOT a quality problem, it scored 0.82 and lost out purely to the
+  2-per-strategy diversification cap once DDOG outscored it. STX demoted (no longer top-3). **New
+  roster: DDOG + MPWR (VWAP MR @ 0.3), SWK (Bollinger MR @ period=15/num_std=3.0)** — all on today's
+  validated tuning, not stale params.
+- **User armed it themselves** (`control.enabled: true`) after the 4pm ET close — confirmed process
+  healthy (fresh heartbeat, pid 4692, zero errors) and correctly reporting "market closed — not
+  trading (next open Tuesday 09:30 ET)". Left running overnight deliberately, per the user's own
+  call — same "paper phase does its job" posture this project has held throughout. Check back after
+  Tuesday 2026-08-04's open to see whether it actually trades and whether the account-risk
+  breaker / roster demotion logic finally gets real live data for the first time.
 
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
