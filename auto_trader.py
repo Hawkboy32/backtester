@@ -413,19 +413,21 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
             save_status(status)
             return status
         broker_accounts = _get_broker_accounts([a["id"] for a in target_meta])
-        # Per-account supported asset class(es) (equity/crypto/forex), so a target
-        # ticker only gets attempted against accounts that can actually trade its
-        # asset class — see accounts.infer_asset_class's docstring for why: this is
-        # what lets e.g. an IG (forex-only) account sit in control.account_ids
-        # permanently alongside equity accounts without generating wasted API
-        # calls or error noise every cycle an equity-only roster/manual config
-        # runs ("crosstalk"). Missing/unrecognized broker defaults to equity —
-        # the overwhelming common case — rather than silently trading everything.
+        # Per-account asset class (equity/crypto/forex), so a target ticker only
+        # gets attempted against accounts that can actually trade its asset class
+        # — see accounts.infer_asset_class's docstring for why: this is what lets
+        # e.g. an IG (forex-only) account sit in control.account_ids permanently
+        # alongside equity accounts without generating wasted API calls or error
+        # noise every cycle an equity-only roster/manual config runs ("crosstalk").
+        # Built from accounts.account_asset_class(), NOT the broker-level
+        # BROKER_META[...]["asset_classes"] set directly — IBKR is the one broker
+        # where that set has more than one member (a broker TYPE capability), but
+        # any single LINKED IBKR account is still only ever equity OR forex, fixed
+        # at link time. Using the broker-level set here would make every IBKR
+        # account eligible for both, even one whose real IBKRBroker instance is
+        # equity-only, silently defeating this exact guard.
         account_asset_classes = {
-            a["id"]: accounts_module.BROKER_META.get(a["broker"], {}).get(
-                "asset_classes", frozenset({"equity"})
-            )
-            for a in target_meta
+            a["id"]: frozenset({accounts_module.account_asset_class(a)}) for a in target_meta
         }
     except Exception as e:  # noqa: BLE001
         status.last_error = f"failed to build broker accounts: {e}"

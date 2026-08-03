@@ -22,6 +22,7 @@ import keyring.errors
 from backtester.brokers.alpaca import AlpacaBroker
 from backtester.brokers.base import BrokerAccount
 from backtester.brokers.coinbase import CoinbaseBroker
+from backtester.brokers.ibkr import ASSET_CLASSES as IBKR_ASSET_CLASSES
 from backtester.brokers.ibkr import IBKRBroker
 from backtester.brokers.ig import IGBroker
 from backtester.brokers.kraken import KrakenBroker
@@ -73,7 +74,11 @@ BROKER_META: dict[str, dict] = {
         # port, clientId, account code) as plain metadata. The dashboard renders a
         # different link form for these, and build_broker_accounts skips the keyring.
         "uses_gateway": True,
-        "asset_classes": frozenset({"equity"}),  # scope is US equities only — see ibkr.py's own docstring
+        # What the BROKER TYPE can support (both equity and forex sub-accounts).
+        # A given LINKED account is still only ever one or the other — see
+        # account_asset_class() below, which is the per-account authority this
+        # broker-level set does NOT answer on its own.
+        "asset_classes": frozenset({"equity", "forex"}),
     },
     "ig": {
         "label": "IG (Phase 3 — forex CFDs, live-verified 2026-07-31/08-01)",
@@ -113,6 +118,28 @@ def infer_asset_class(ticker: str) -> str:
     if ticker.startswith("C:") or ticker.startswith("CS.D.") or ".CFD." in ticker or ".MINI." in ticker:
         return "forex"
     return "equity"
+
+
+def account_asset_class(account: dict) -> str:
+    """The single asset class THIS linked account actually trades — the
+    authoritative answer for UI sectioning/compatibility checks, as opposed
+    to BROKER_META[broker]["asset_classes"] which is what the broker TYPE is
+    capable of. Every broker except IBKR has exactly one asset class per
+    account (BROKER_META already models that as a 1-element set); IBKR is the
+    sole broker where two linked accounts of the same broker type can differ
+    (a locally-run gateway can be pointed at either an equity or forex sub-
+    account), so it alone reads a per-account conn_params override. A missing
+    override defaults to "equity" — matching build_broker_accounts()'s own
+    default, so every account linked before this field existed (including the
+    real "IBKR Paper" account) keeps behaving exactly as before.
+
+    Takes the same dict shape list_accounts() returns.
+    """
+    broker = account["broker"]
+    if BROKER_META.get(broker, {}).get("uses_gateway"):
+        return account.get("conn_params", {}).get("asset_class", "equity")
+    classes = BROKER_META.get(broker, {}).get("asset_classes", frozenset({"equity"}))
+    return next(iter(classes))
 
 
 def _load_raw() -> list[dict]:
@@ -173,11 +200,15 @@ def add_account(
         # IBKR: no secrets. Store only non-secret connection config as metadata —
         # nothing goes into the OS keyring for these accounts.
         cp = conn_params or {}
+        asset_class = cp.get("asset_class", "equity")
+        if asset_class not in IBKR_ASSET_CLASSES:
+            raise ValueError(f"Unknown asset_class {asset_class!r}. Available: {IBKR_ASSET_CLASSES}")
         row["conn_params"] = {
             "host": cp.get("host", "127.0.0.1"),
             "port": int(cp.get("port", 4002)),
             "client_id": int(cp.get("client_id", 1)),
             "ibkr_account": cp.get("ibkr_account", ""),
+            "asset_class": asset_class,
         }
         row["api_key_last4"] = None
     else:
@@ -224,9 +255,9 @@ def build_broker_accounts(account_ids: list[str] | None = None) -> list[BrokerAc
                 client_id=cp.get("client_id", 1),
                 ibkr_account=cp.get("ibkr_account", ""),
                 is_paper=a["is_paper"],
-                # Not surfaced in the dashboard link form yet (Phase 2, forex
-                # scan-validation only so far) — defaults to "equity" so every
-                # existing linked IBKR account behaves exactly as before.
+                # Set via the Accounts tab's link form (an Equity/Forex radio on
+                # the IBKR branch). Defaults to "equity" for any account linked
+                # before that field existed, so nothing changes for them.
                 asset_class=cp.get("asset_class", "equity"),
             )
             obj.account_id = a["id"]

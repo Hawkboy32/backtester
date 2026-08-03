@@ -27,8 +27,10 @@ from backtester import events, execution_log, keystore
 from backtester.accounts import (
     BROKER_META,
     SUPPORTED_BROKERS,
+    account_asset_class,
     add_account,
     build_broker_accounts,
+    infer_asset_class,
     list_accounts,
     remove_account,
 )
@@ -520,6 +522,30 @@ def _known_tickers() -> dict[str, str]:
     refresh scripts are run."""
     known: dict[str, str] = {}
     for universe_name in UNIVERSE_REGISTRY:
+        try:
+            df = load_universe(universe_name)
+        except FileNotFoundError:
+            continue
+        for _, row in df.iterrows():
+            name = row["name"] if "name" in row and isinstance(row["name"], str) else ""
+            known.setdefault(row["ticker"], name)
+    return known
+
+
+_ASSET_CLASS_UNIVERSES = {
+    "equity": ["S&P 500", "Nasdaq-100 (US Tech 100)"],
+    "crypto": ["Crypto (top 15 USD pairs)"],
+    "forex": ["Forex (7 major USD pairs)"],
+}
+
+
+def _known_tickers_for_asset_class(asset_class: str) -> dict[str, str]:
+    """Same shape as _known_tickers(), scoped to only the universe(s) matching
+    one asset class — the Trade Execution tab's compatibility-gated ticker
+    picker (see render_execution_tab) uses this instead of the combined list,
+    so an equity account can't even be offered a forex/crypto ticker."""
+    known: dict[str, str] = {}
+    for universe_name in _ASSET_CLASS_UNIVERSES[asset_class]:
         try:
             df = load_universe(universe_name)
         except FileNotFoundError:
@@ -1379,13 +1405,14 @@ def render_accounts_tab() -> None:
     )
 
     linked = list_accounts()
-    if linked:
+
+    def _render_account_rows(accounts: list[dict]) -> None:
         hdr = st.columns([3, 2, 2, 3, 1])
         hdr[0].caption("Account")
         hdr[1].caption("Broker")
         hdr[2].caption("Mode")
         hdr[3].caption("Market")
-        for acct in linked:
+        for acct in accounts:
             cols = st.columns([3, 2, 2, 3, 1])
             cols[0].write(f"**{acct['nickname']}**")
             cols[1].write(BROKER_META.get(acct["broker"], {}).get("label", acct["broker"]))
@@ -1401,6 +1428,23 @@ def render_accounts_tab() -> None:
             if cols[4].button("Remove", key=f"remove_{acct['id']}"):
                 remove_account(acct["id"])
                 st.rerun()
+
+    if linked:
+        # Grouped by what each linked account actually trades (not just its
+        # broker type — IBKR alone can be either) so an equity/forex/crypto
+        # mismatch like the Trade Execution one is visible here too, not just
+        # prevented there. Fixed section order; empty sections render nothing.
+        sections = [
+            ("Equities", "equity"),
+            ("Forex & CFDs", "forex"),
+            ("Crypto", "crypto"),
+        ]
+        for label, asset_class in sections:
+            group = [a for a in linked if account_asset_class(a) == asset_class]
+            if not group:
+                continue
+            st.markdown(f"**{label}**")
+            _render_account_rows(group)
         st.caption(
             "Market status is cached for 60s. Alpaca/IBKR follow the US regular session; crypto trades "
             "24/7. IBKR also shows whether its local gateway is reachable (cached 30s)."
@@ -1482,6 +1526,7 @@ def render_accounts_tab() -> None:
         api_key = secret_key = extra_cred = ""
         ibkr_host = ibkr_account = ""
         ibkr_port, ibkr_client_id = 4002, 1
+        ibkr_asset_class = "Equity"
 
         if uses_gateway:
             # IBKR connects to a local gateway the user runs and logs into — no API
@@ -1491,6 +1536,16 @@ def render_accounts_tab() -> None:
                 "you run and log into — there's no API key to enter here. Start the gateway, enable its "
                 "API (Configure → Settings → API → Enable ActiveX and Socket Clients), and point this at "
                 "its host/port. Ports: IB Gateway **4002 paper / 4001 live** (TWS 7497 / 7496)."
+            )
+            ibkr_asset_class = st.radio(
+                "Asset class this account trades",
+                ["Equity", "Forex"],
+                index=0,
+                horizontal=True,
+                help="Set once here, matching how you've configured this IBKR account/permissions on "
+                "IBKR's side. Fixed for the account's lifetime in this dashboard — unlink and re-link "
+                "to change it. A single IBKR login can have separate equity and forex sub-accounts; "
+                "link each one separately if you trade both.",
             )
             ibkr_host = st.text_input("Gateway host", value="127.0.0.1")
             gwcol1, gwcol2 = st.columns(2)
@@ -1542,6 +1597,7 @@ def render_accounts_tab() -> None:
                             "port": int(ibkr_port),
                             "client_id": int(ibkr_client_id),
                             "ibkr_account": ibkr_account.strip(),
+                            "asset_class": "forex" if ibkr_asset_class == "Forex" else "equity",
                         },
                     )
                     st.success(f"Linked {nickname}.")
@@ -1579,24 +1635,41 @@ def render_execution_tab() -> None:
         st.info("Link at least one account in the **Accounts** tab first.")
         return
 
-    known = _known_tickers()
+    exec_asset_class_label = st.radio(
+        "Asset class", ["Equity", "Crypto", "Forex"], horizontal=True, key="exec_asset_class",
+        help="Scopes both the ticker list and the target-account list below to only "
+        "compatible combinations — an equity account can't be offered a forex ticker "
+        "(or vice versa), the mismatch that used to only get caught by the broker itself.",
+    )
+    asset_class_key = {"Equity": "equity", "Crypto": "crypto", "Forex": "forex"}[exec_asset_class_label]
+    # Keying the ticker widget per asset class forces a true remount when the
+    # radio changes, instead of reusing one widget instance whose displayed
+    # text otherwise doesn't reliably reset via session_state alone (observed
+    # live: popping session_state["exec_ticker"] left the combobox showing a
+    # stale equity ticker after switching to Forex, even though its options
+    # list had correctly narrowed) — a stale LABEL only, not a stale VALUE
+    # (the "Submit order" re-check below still catches a genuine mismatch),
+    # but confusing enough to fix properly rather than leave as a footnote.
+    ticker_widget_key = f"exec_ticker_{asset_class_key}"
+
+    known = _known_tickers_for_asset_class(asset_class_key)
     ticker_options = sorted(known)
-    # A crypto/forex pair, IG epic, or anything else not in the equity
-    # universe CSVs may still be a valid symbol for the selected broker —
-    # accept_new_options keeps free-text entry available, same as the
-    # Backtest tab's ticker picker.
-    current_ticker = st.session_state.get("exec_ticker")
+    # A hand-typed symbol not in this asset class's universe CSV (e.g. a raw
+    # IG epic) may still be valid for the selected broker — accept_new_options
+    # keeps free-text entry available, same as the Backtest tab's ticker picker.
+    current_ticker = st.session_state.get(ticker_widget_key)
     if current_ticker and current_ticker not in known:
         ticker_options = [current_ticker] + ticker_options
+    default_ticker = {"equity": "AAPL", "crypto": "X:BTCUSD", "forex": "C:EURUSD"}[asset_class_key]
     ticker_choice = st.selectbox(
         "Ticker (type to search, or enter any symbol not listed)",
         options=ticker_options,
-        index=ticker_options.index("AAPL") if "AAPL" in ticker_options else 0,
+        index=ticker_options.index(default_ticker) if default_ticker in ticker_options else 0,
         format_func=lambda t: f"{t} — {known[t]}" if known.get(t) else t,
-        key="exec_ticker",
+        key=ticker_widget_key,
         accept_new_options=True,
     )
-    ticker = (ticker_choice or "AAPL").upper().strip()
+    ticker = (ticker_choice or default_ticker).upper().strip()
     side = st.radio("Side", ["Buy", "Sell"], horizontal=True, key="exec_side")
 
     def _apply_size_preset(pct: float) -> None:
@@ -1670,7 +1743,15 @@ def render_execution_tab() -> None:
                         "Stop-loss stop price ($)", min_value=0.01, value=sl_default, key="exec_sl_price"
                     )
 
-    account_options = {f"{a['nickname']} ({'Paper' if a['is_paper'] else 'LIVE'})": a["id"] for a in linked}
+    compatible_accounts = [a for a in linked if account_asset_class(a) == asset_class_key]
+    account_options = {
+        f"{a['nickname']} ({'Paper' if a['is_paper'] else 'LIVE'})": a["id"] for a in compatible_accounts
+    }
+    if not compatible_accounts:
+        st.info(
+            f"No linked accounts trade {exec_asset_class_label}. Link one in the **Accounts** tab first."
+        )
+        return
     selected_labels = st.multiselect("Target accounts", options=list(account_options.keys()), key="exec_accounts")
     selected_ids = [account_options[label] for label in selected_labels]
 
@@ -1731,6 +1812,25 @@ def render_execution_tab() -> None:
         )
 
     if st.button("Submit order", type="primary", disabled=not live_ack or not account_orders):
+        # Defense-in-depth: account_orders was captured at "Preview order" time
+        # and lives in session_state, so it can go stale if the Asset class
+        # radio or ticker changes after previewing but before submitting (a
+        # full rerun narrows compatible_accounts/the ticker list immediately,
+        # but doesn't retroactively invalidate an already-built preview).
+        # Re-check every previewed account against the CURRENT selection
+        # before anything reaches a broker — mirrors the belt-and-suspenders
+        # check auto_trader.py's _trade_target already does per cycle.
+        compatible_ids = {a["id"] for a in compatible_accounts}
+        stale_orders = [
+            ao for ao in account_orders
+            if ao.account.account_id not in compatible_ids or infer_asset_class(ticker) != asset_class_key
+        ]
+        if stale_orders:
+            st.error(
+                "The ticker or asset class changed since this order was previewed — click "
+                "**Preview order** again to refresh it before submitting."
+            )
+            st.stop()
         order_side = OrderSide.BUY if side == "Buy" else OrderSide.SELL
         with st.spinner("Submitting order to all selected accounts..."):
             results = execute_order_across_accounts(account_orders, ticker, order_side)
@@ -2201,19 +2301,26 @@ def render_auto_trading_tab() -> None:
     st.markdown("**Target accounts**")
     st.caption(
         "Toggle each linked account independently — test one broker at a time, or several "
-        "together, without having to remember to remove others first."
+        "together, without having to remember to remove others first. Grouped by what each "
+        "account trades — a ticker only ever gets attempted against a matching account "
+        "(auto_trader.py's own asset-class guard), regardless of what's checked here."
     )
     selected_ids = []
-    for a in linked:
-        broker_label = BROKER_META.get(a["broker"], {}).get("label", a["broker"])
-        mode_label = "Paper" if a["is_paper"] else "LIVE"
-        checked = st.checkbox(
-            f"{a['nickname']} — {broker_label} ({mode_label})",
-            value=a["id"] in control.account_ids,
-            key=f"auto_account_{a['id']}",
-        )
-        if checked:
-            selected_ids.append(a["id"])
+    for section_label, asset_class in [("Equities", "equity"), ("Forex & CFDs", "forex"), ("Crypto", "crypto")]:
+        group = [a for a in linked if account_asset_class(a) == asset_class]
+        if not group:
+            continue
+        st.caption(section_label)
+        for a in group:
+            broker_label = BROKER_META.get(a["broker"], {}).get("label", a["broker"])
+            mode_label = "Paper" if a["is_paper"] else "LIVE"
+            checked = st.checkbox(
+                f"{a['nickname']} — {broker_label} ({mode_label})",
+                value=a["id"] in control.account_ids,
+                key=f"auto_account_{a['id']}",
+            )
+            if checked:
+                selected_ids.append(a["id"])
     live_selected = [a for a in linked if a["id"] in selected_ids and not a["is_paper"]]
 
     allow_live = control.allow_live
