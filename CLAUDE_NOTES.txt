@@ -1908,11 +1908,93 @@ testing at all, just noticing it in data that already existed.** Validated equit
 candidates now stand at 3: VWAP MR, Bollinger MR, Pivot Point Scalping. Not yet added to
 the actual roster — a finding to act on, not a decision made unilaterally.
 
-**FOLLOW-UP 2026-08-03: testing the new FVG confirmation filter on Opening Range Liquidity
-Reversal** (built same day, see the strategy's own commit) using `run_walkforward_sweep`'s
-first real (non-mocked) use — require_fvg_confirmation=True across the same 3 windows x 2
-universes, compared against the already-measured False baseline above. Running as of this
-note — see the next update for results.
+**FOLLOW-UP 2026-08-03 RESULT: FVG confirmation filter does NOT rescue Opening Range
+Liquidity Reversal.** First real (non-mocked) use of `run_walkforward_sweep` — clean run,
+tool worked correctly end to end. require_fvg_confirmation=True: mean=-0.31 std=0.15
+pct_positive=0% (n=6) per_fold=[-0.12,-0.44,-0.23,-0.21,-0.29,-0.55], vs the already-
+measured False baseline mean=-0.33 std=0.15 pct_positive=0% per_fold=[-0.15,-0.46,-0.25,
+-0.22,-0.3,-0.58]. Every window nudges marginally less negative (~0.02-0.03) and trade
+count drops slightly (a handful fewer per window), but the verdict is unchanged: still 0
+of 6 windows positive, same std, negligible effect size. Likely explanation: the
+strategy's entry already requires an oversized, fast decline that breaks the opening-range
+low, so a genuine 3-candle FVG is probably already present in most of those moves anyway —
+the extra filter is mostly redundant with conditions the strategy already enforces, not a
+meaningfully different lens on trade quality. STRATEGY_REGISTRY default (flag off) is
+correct and unchanged; require_fvg_confirmation stays available as an optional param for
+future experiments (e.g. combined with different liquidity_multiplier/reversal_window_
+minutes tuning) but isn't worth pursuing further as a fix on its own.
+
+=== SESSION CONSOLIDATION, 2026-08-01 through 2026-08-03 ===
+Closing summary of this multi-day stretch, for quick orientation without re-reading every
+update above in full.
+
+**What's now VALIDATED and safe to trust (equities, corrected engine):**
+- VWAP Mean Reversion (tuned: entry_deviation_pct=0.3%) — Sharpe ~3.45, the strongest
+  strategy in the project, now has its own custom conviction() hook (genuinely predictive
+  per the 2026-08-02 attribution analysis, unlike its old generic-fallback score).
+- Bollinger Mean Reversion (tuned: period=15, num_std=3.0) — Sharpe ~2.22-3.16 depending on
+  exact test, second strongest.
+- Pivot Point Scalping — Sharpe ~0.74, 100% of windows positive, ZERO tunable params. Found
+  2026-08-02 sitting unnoticed in existing Phase C data the whole time. NOT yet added to
+  the live roster (roster.json still only has the 3 combos from Phase D) — a real decision
+  still pending, not done silently.
+- Forex (IG, CFDs): VWAP Mean Reversion at entry_deviation_pct=0.2% (mean Sharpe 0.62, 100%
+  of 3 windows positive) and Bollinger Mean Reversion at num_std=4.0/period=20 (mean Sharpe
+  +1.17, 100% positive) — forex-SPECIFIC tunings, deliberately NOT written into
+  STRATEGY_REGISTRY's equities-tuned defaults. Neither is armed for real CFD auto-trading
+  yet — that's still the user's decision to make, same as before.
+
+**What's been tried and found NOT to work (don't re-test without a new angle):**
+- VWAP MR "acceptance confirmation" (require sustained bars beyond threshold) — makes it
+  WORSE (3.45 -> 1.49 as acceptance_bars 1->3).
+- RSI Mean-Reversion, Liquidity Sweep, Volume Spike Reversal (equities) — all confirmed an
+  overtrading problem (tightening/widening helped) but none reached positive territory.
+- RSI Divergence (equities, both default and longer-lookback variants) — looked promising
+  in a small single-window screen, did NOT hold up walk-forward (still net negative, 1/6
+  windows positive both variants).
+- Opening Range Liquidity Reversal (equities, default params) — consistently (not wildly,
+  just consistently) negative, 0/6 windows positive. The FVG confirmation filter (see
+  above) doesn't fix this either. Not proven dead — just not working on THIS universe at
+  THESE settings; large-cap equities may simply be the wrong universe for this pattern
+  (more of a small-cap/volatile-stock phenomenon per the Ross Cameron video review) —
+  untested on forex/crypto, and untested with different liquidity_multiplier/window tuning.
+- No forex strategy holds an edge at EQUITIES-TUNED default params (2026-07-27 slippage-fix
+  re-validation) — but DOES once properly re-tuned for forex specifically (see above) —
+  the lesson wasn't "forex has no edge," it was "don't assume equities tuning transfers."
+
+**Infrastructure built this stretch (all committed + pushed):**
+- IG (forex/CFD broker): fully live-verified end to end (session, market data, position
+  open/close), a real session-reuse bug found and fixed (IG tolerates one fresh login per
+  short window; connect-per-operation broke this), and a real process-level broker-caching
+  bug found and fixed (auto_trader.py was rebuilding broker instances — and so re-
+  authenticating IG — every single poll cycle).
+- CFD "crosstalk" fix: brokers now tagged with supported asset_classes; a ticker's asset
+  class is auto-inferred and mismatched accounts are skipped before any API call. IG can
+  now live in control.account_ids permanently without generating noise on equities-only
+  runs — verified end to end with mocks.
+- Daily P&L giveback guard (new daily_pnl_guard.py) — a lighter, self-resetting daily
+  counterpart to the account-level drawdown breaker, wired into the same blocked-accounts
+  mechanism, with its own Settings UI and clobber-prevention.
+- New strategy: Opening Range Liquidity Reversal, plus is_hammer/is_bullish_engulfing/
+  bearish_fvg_gap shape-check indicators, reusable for future strategies.
+- Reusable `run_walkforward_sweep` utility (paramsweep.py) — built after hand-writing the
+  same sweep-loop shape in four separate scratchpad scripts in one day; includes ready-made
+  per-scan progress logging (a real gap found the hard way: a sweep that only logs after
+  each full candidate can run for 5+ hours with zero visible output).
+- Auto Trading tab: per-account checkboxes replacing the old multiselect.
+- Trade Execution tab: searchable ticker/pair dropdown (S&P500/Nasdaq100/crypto/forex)
+  replacing free-text entry.
+
+**Still open / not yet decided (deliberately, not oversights):**
+- Whether to add Pivot Point Scalping to the live roster.
+- Whether/when to arm CFD auto-trading on the newly-tuned forex params — needs a conscious
+  decision, same reasoning as before (this is real, if paper, trading activity).
+- The equities auto-trader test (goal: reach `min_live_trades=5` in live_trades.db so the
+  roster's demotion logic finally has real data) never resumed after Friday 2026-07-31's
+  0-trade day — still open, whenever next convenient.
+- Phase 3 (extend validated equities winners' forex/crypto tuning further) and Phase 4 (a
+  light pass on the 11 "trend" strategies, deliberately deprioritized given trend-following
+  has lost money in every asset class tested this whole project) — not started.
 
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
