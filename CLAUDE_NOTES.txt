@@ -2196,6 +2196,76 @@ here needs the dashboard PROCESS restarted, not just the page reloaded, before t
   Tuesday 2026-08-04's open to see whether it actually trades and whether the account-risk
   breaker / roster demotion logic finally gets real live data for the first time.
 
+=== CONCURRENT MULTI-TARGET AUTO-TRADING: FOREX (IG) ALONGSIDE THE EQUITIES ROSTER (2026-08-03/04) ===
+Closed the "control schema needs per-account-group configuration" gap flagged earlier in this
+file — the equities roster and a forex (IG) target now trade CONCURRENTLY in the same poll cycle,
+each on its own accounts/strategy/params, gated on "a validated forex strategy actually worth
+running alongside equities" (satisfied by the earlier VWAP MR/Bollinger MR forex-specific tuning).
+
+**Architecture (commit de8852b):** `AutoTraderControl` gained `manual_strategy_params` (lets the
+PRIMARY, if in manual mode, use custom params instead of always falling back to the equities-tuned
+STRATEGY_REGISTRY default — previously impossible) and `extra_targets` (a list of additional
+CONCURRENT manual-style targets, each with its own account_ids/tickers/strategy_name/
+strategy_params — raw dicts, not a nested dataclass, so load_control/save_control needed zero
+changes). `_resolve_targets` appends every extra_targets group's tuples after the primary's;
+`run_cycle` unions account_ids across primary + all extra_targets. The existing per-(ticker,
+account) asset-class crosstalk guard (built earlier this session) already does all the routing —
+zero new filtering logic needed, a forex ticker from an extra target simply never matches an
+equity account in that same unified broker_accounts pool. Dashboard: new "Extra target (optional)"
+section in the Auto Trading tab (asset-class-scoped account/ticker pickers, strategy picker, JSON
+params-override textarea), with its OWN load-mutate-save "Save extra target" button — the existing
+"Save configuration" button now explicitly carries `manual_strategy_params`/`extra_targets`
+forward so it can never clobber this. Settings' risk list and Overview's positions panel extended
+to the same account union via a new `_all_target_account_ids()` helper.
+
+**Three REAL IG bugs found and fixed live, not just in code review:**
+1. `get_positions()` returned the raw IG epic as `Position.ticker` instead of the canonical
+   `"C:EURUSD"`-style ticker — so `has_position` was ALWAYS False for IG. A sell/exit signal would
+   never have reached the broker (filtered out before submission); a second BUY would have fallen
+   into IG's own position-aware close logic and silently closed instead of opening; and
+   `position_attribution.reconcile()` would have deleted every IG trade's attribution on the next
+   cycle. IG had never actually traded before this (only ever sat in `account_ids` as inert
+   config), so this bug was dormant until today. **Fixed** via a regex reverse-parse of the epic
+   format (`CS.D.<PAIR>.<TYPE>.IP` → `C:<PAIR>`) — restart-safe, doesn't depend on the in-memory
+   epic-resolution cache. **Confirmed live**: a real EUR/USD position showed `ticker='C:EURUSD'`
+   via `get_positions()`, and both open and close round-tripped cleanly.
+2. IG rejects order sizes that aren't a size it recognizes (`SIZE_INCREMENT`). First attempt
+   (floor to nearest multiple of `dealingRules.minDealSize`) was WRONG — confirmed live: size=4
+   (a clean multiple of minDealSize=1.0) was rejected, while size=1 and size=10 both passed the
+   size check (size=10 got only as far as a separate `INSUFFICIENT_FUNDS` rejection, proving 10
+   itself was valid). That pattern matches a **"1-2-5" preferred-number lot-size sequence** (1, 2,
+   5, 10, 20, 50, ...) — a common CFD-platform convention NOT exposed anywhere in the
+   `dealingRules` API response, inferred from live testing rather than documented. Fixed via
+   `_round_to_ig_size_step()`. **Confirmed live** at size=2.
+3. (Pre-existing, not newly introduced) Multiple stale dashboard server processes were found
+   simultaneously bound to port 8501 during this session's verification — each prior "restart"
+   had started a new Streamlit process without fully killing the old one, so the browser could
+   land on stale code unpredictably. Not a code bug, but worth remembering: if a fix "isn't taking
+   effect" after a restart that SHOULD have worked, check `netstat`/`tasklist` for more than one
+   listener on the dashboard's port before assuming the code itself is wrong.
+
+**Deployed safely**: the equities bot was LIVE AND ARMED the entire time this was built. Backend
+changes landed and the `auto_trader.py` process was restarted BEFORE any UI change could save a
+new-shaped `control.json` — confirmed the restarted process stayed healthy (same pid, fresh
+heartbeats, zero errors) across two full poll cycles on the OLD-shaped file first, avoiding the
+real deployment-ordering hazard where a new-shaped file would have killed the old-code process
+(`AutoTraderControl(**data)` rejects unknown keys, fails closed to `killed=True`).
+
+**LIVE END-TO-END CONFIRMATION**: the real extra target was configured (IG, Bollinger Mean
+Reversion, `num_std=4.0/period=20` — the forex-tuned params, EUR/USD only for now) and the
+auto-trader's very next poll cycle correctly evaluated it: `"C:EURUSD/Bollinger Mean Reversion:
+SELL @ 1.15435"` — generated a real signal, correctly recognized no position was held (we'd just
+closed it manually), and correctly did NOT submit a phantom order. Equities and forex now
+genuinely trade concurrently in the same cycle, each on their own accounts and tuning.
+
+**Known limitations, deliberately deferred, not hidden:** sizing_mode/sizing_value/
+vol_target_enabled/max_trades_per_day/multiplier/timespan all stay GLOBAL, shared identically
+across the primary and every extra target — a forex trade and an equity trade use the same
+dollar-sizing base and bar granularity, and compete for the same daily trade cap (primary
+evaluated first, so extra targets are what get starved if the cap fills early). Only ONE extra
+target is exposed in the UI for now (the backend schema supports a list). The other 6 forex
+majors' epic resolution/sizing haven't been individually exercised live yet — only EUR/USD has.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,
