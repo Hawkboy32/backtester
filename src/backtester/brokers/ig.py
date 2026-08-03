@@ -41,6 +41,8 @@ broker in this project — verify against a live account before assuming):
 
 from __future__ import annotations
 
+import math
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -93,6 +95,27 @@ def _num(value, default: float = 0.0) -> float:
         return default
 
 
+# Currency-CFD epics follow "CS.D.<PAIR>.<TYPE>.IP" (e.g. "CS.D.EURUSD.CFD.IP"
+# / "CS.D.EURUSD.MINI.IP") — the middle segment IS the plain 6-letter pair
+# name, so it can be parsed straight back into this app's usual Polygon-style
+# ticker ("C:EURUSD") without needing _resolve_epic's in-memory cache (which
+# is empty on every fresh process start, so a cache-only reverse lookup would
+# still return raw epics for any position opened before THIS instance
+# existed — a real gap for a long-running bot that gets restarted).
+_EPIC_PAIR_RE = re.compile(r"^CS\.D\.([A-Z]{6})\.")
+
+
+def _ticker_from_epic(epic: str) -> str:
+    """Best-effort reverse of _resolve_epic: a real currency-CFD epic ->
+    this app's "C:<PAIR>" ticker form. Falls back to the raw epic unchanged
+    for anything that doesn't match the expected forex-CFD shape (e.g. a
+    position IG shows that this app didn't open/resolve itself) — never
+    raises, since get_positions() must not fail just because one row's
+    epic looks unfamiliar."""
+    match = _EPIC_PAIR_RE.match(epic)
+    return f"C:{match.group(1)}" if match else epic
+
+
 # REVISED 2026-07-31: the throttle above wasn't enough — a clean login
 # followed by ANOTHER fresh login shortly after (even 20s+ later, even with
 # no retries) reliably failed, while the SAME already-authenticated session
@@ -140,6 +163,9 @@ class IGBroker(BrokerAccount):
         # are stable for a given instrument, so this persists for this
         # instance's lifetime — same reasoning as caching the session itself.
         self._epic_cache: dict[str, str] = {}
+        # Per-epic minimum-deal-size/increment cache (see _resolve_min_deal_size)
+        # — also stable per instrument, same caching reasoning as the epic cache.
+        self._min_deal_size_cache: dict[str, float] = {}
 
     def _new_session(self) -> IGService:
         """Always creates a brand-new, freshly-authenticated IGService — does
@@ -214,6 +240,32 @@ class IGBroker(BrokerAccount):
         self._epic_cache[ticker] = epic
         return epic
 
+    def _resolve_min_deal_size(self, epic: str) -> float:
+        """IG rejects an order whose size isn't a clean multiple of the
+        instrument's own minimum deal size — error code SIZE_INCREMENT,
+        confirmed live 2026-08-04 (a generic %-of-equity/fixed-dollar-sized
+        order landed on a size IG wouldn't accept, the same class of gap as
+        IBKR's fractional-share rejection, but per-instrument and IG-
+        specific rather than a fixed broker-wide flag). Fetched via
+        IGService.fetch_market_by_epic()'s real dealingRules.minDealSize.value
+        field (confirmed against the trading-ig SDK's own response shape,
+        not guessed) and cached per-instance alongside _epic_cache — stable
+        per instrument, not worth re-fetching every order. Falls back to 1.0
+        (whole units) if the field is missing/unparseable — the conservative
+        default IG itself effectively uses for most CFD instruments.
+        """
+        if epic in self._min_deal_size_cache:
+            return self._min_deal_size_cache[epic]
+        details = self._session().fetch_market_by_epic(epic)
+        try:
+            size = float(details["dealingRules"]["minDealSize"]["value"])
+            if size <= 0:
+                size = 1.0
+        except (KeyError, TypeError, ValueError):
+            size = 1.0
+        self._min_deal_size_cache[epic] = size
+        return size
+
     def get_account_snapshot(self) -> AccountSnapshot:
         svc = self._session()
         accounts = svc.fetch_accounts()
@@ -241,7 +293,7 @@ class IGBroker(BrokerAccount):
             current = (bid + offer) / 2 if (bid or offer) else None
             positions.append(
                 Position(
-                    ticker=str(row.get("epic")),
+                    ticker=_ticker_from_epic(str(row.get("epic"))),
                     qty=qty,
                     side="long" if str(row.get("direction", "")).upper() == "BUY" else "short",
                     avg_entry_price=entry,
@@ -309,6 +361,19 @@ class IGBroker(BrokerAccount):
         svc = self._session()
         try:
             ticker = self._resolve_epic(ticker)
+
+            min_size = self._resolve_min_deal_size(ticker)
+            rounded_qty = round(math.floor(qty / min_size) * min_size, 8)  # round off float repr noise
+            if rounded_qty <= 0:
+                return OrderResult(
+                    account_nickname=self.nickname, success=False,
+                    error=(
+                        f"Requested size {qty} is below {ticker}'s minimum deal size/increment "
+                        f"({min_size}) — raise the sizing value."
+                    ),
+                )
+            qty = rounded_qty
+
             # Fetch the RAW positions frame here, not get_positions()'s
             # translated Position list — closing needs IG's own dealId,
             # which the generic Position dataclass (shared across every

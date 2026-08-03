@@ -78,6 +78,21 @@ class AutoTraderControl:
     vol_target_ann: float = 20.0  # target annualized vol %, only used when vol_target_enabled
     use_roster: bool = False  # adaptive promotion/demotion roster (see backtester.roster) instead
     # of the single strategy_name/tickers pair above — those fields are ignored when this is True
+    manual_strategy_params: dict = field(default_factory=dict)  # {strategy_name: {param: value}},
+    # applied ONLY to the primary manual-mode tickers above (use_roster=False) — merged over
+    # STRATEGY_REGISTRY's default_params the same way scanner.run_scan's strategy_params override
+    # works. Roster mode ignores this; it already carries per-combo params via RosterEntry.params.
+    extra_targets: list[dict] = field(default_factory=list)  # additional CONCURRENT manual-style
+    # targets that trade alongside the primary (roster or manual) above, each shaped
+    # {"label": str, "account_ids": [str], "tickers": [str], "strategy_name": str,
+    # "strategy_params": {param: value}} — e.g. a forex account trading on its own
+    # separately-tuned params while the primary roster trades equities. Kept as raw dicts, not a
+    # nested dataclass, so load_control/save_control need no changes (JSON round-trips them as-is).
+    # Not another roster instance — roster.json is one global shared list; each extra target is
+    # always a fixed ticker list + strategy, same shape as (but independent from) manual mode.
+    # Relies entirely on auto_trader.py's existing per-(ticker,account) asset-class crosstalk guard
+    # to route correctly — an extra target's accounts get unioned into the same broker_accounts
+    # pool the primary uses, not treated as a separate pass.
     max_drawdown_enabled: bool = False  # account-level circuit breaker (see backtester.account_risk)
     max_drawdown_pct: float = 10.0  # % below peak equity that hard-blocks new entries for that account
     block_event_days: bool = True  # skip NEW entries on known risk-event days (FOMC — see backtester.events).

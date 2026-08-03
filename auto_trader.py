@@ -151,24 +151,45 @@ def _get_regime(daily_client: PolygonClient, ticker: str, target_vol_ann: float)
 
 def _resolve_targets(control) -> list[tuple[str, str, dict, bool]]:
     """Returns (ticker, strategy_name, params, no_new_entries) tuples to trade
-    this cycle. Manual mode: one entry per control.tickers, never blocked from
-    new entries. Roster mode: runs the cheap demotion-only pass (never
-    promotes — that's a deliberate, separate dashboard action) and trades
-    every active AND paused entry, so a paused entry can still exit an
-    existing position, just never open a new one.
+    this cycle. Manual mode (primary): one entry per control.tickers, never
+    blocked from new entries, params from control.manual_strategy_params
+    (merged over STRATEGY_REGISTRY defaults inside build_strategy — empty
+    dict here means "use the current default", same as always). Roster mode
+    (primary): runs the cheap demotion-only pass (never promotes — that's a
+    deliberate, separate dashboard action) and trades every active AND
+    paused entry, so a paused entry can still exit an existing position,
+    just never open a new one.
+
+    Then, regardless of which primary branch ran, appends one target per
+    ticker for every group in control.extra_targets — additional CONCURRENT
+    manual-style targets (e.g. a forex account trading its own separately-
+    tuned params alongside an equities roster primary). These are never
+    blocked from new entries either. Routing to the right accounts relies
+    entirely on the caller's existing per-(ticker,account) asset-class
+    guard, not on anything here — this function just returns tickers.
     """
     if not control.use_roster:
-        return [(ticker, control.strategy_name, {}, False) for ticker in control.tickers]
+        primary = [
+            (ticker, control.strategy_name, control.manual_strategy_params.get(control.strategy_name, {}), False)
+            for ticker in control.tickers
+        ]
+    else:
+        state = roster.load_roster()
+        state = roster.apply_demotion_checks(state, live_trades.recent_performance, state.config)
+        roster.save_roster(state)
 
-    state = roster.load_roster()
-    state = roster.apply_demotion_checks(state, live_trades.recent_performance, state.config)
-    roster.save_roster(state)
+        primary = [
+            (entry.ticker, entry.strategy_name, entry.params, entry.status == "paused")
+            for entry in state.entries
+            if entry.status in ("active", "paused")
+        ]
 
-    return [
-        (entry.ticker, entry.strategy_name, entry.params, entry.status == "paused")
-        for entry in state.entries
-        if entry.status in ("active", "paused")
+    extra = [
+        (ticker, group.get("strategy_name", ""), group.get("strategy_params", {}), False)
+        for group in control.extra_targets
+        for ticker in group.get("tickers", [])
     ]
+    return primary + extra
 
 
 def _trade_target(
@@ -405,7 +426,14 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
 
     try:
         linked = accounts_module.list_accounts()
-        target_meta = [a for a in linked if a["id"] in control.account_ids]
+        # Union the primary's account_ids with every extra_targets group's
+        # own account_ids — a forex extra target's IG account needs to be in
+        # this same pool for its trades to happen at all. Safe when
+        # extra_targets is empty (today's real state): identical to before.
+        all_account_ids = set(control.account_ids) | {
+            aid for group in control.extra_targets for aid in group.get("account_ids", [])
+        }
+        target_meta = [a for a in linked if a["id"] in all_account_ids]
         if not control.allow_live:
             target_meta = [a for a in target_meta if a["is_paper"]]
         if not target_meta:

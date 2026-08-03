@@ -449,7 +449,8 @@ no way to say "I'm off on purpose".
         st.rerun()
 
     linked = list_accounts()
-    watched = [a for a in linked if a["id"] in control.account_ids]
+    watched_ids = _all_target_account_ids(control)
+    watched = [a for a in linked if a["id"] in watched_ids]
     blocked_any = False
     for account in watched:
         risk_status = account_risk.get_status(account["id"])
@@ -468,7 +469,7 @@ no way to say "I'm off on purpose".
                         st.rerun()
                     except Exception as e:  # noqa: BLE001
                         st.error(f"Could not re-arm: {e}")
-    if control.account_ids and not blocked_any:
+    if watched_ids and not blocked_any:
         st.caption("No target accounts are currently risk-blocked.")
 
     st.divider()
@@ -503,7 +504,7 @@ no way to say "I'm off on purpose".
         if gb_status and gb_status.get("blocked"):
             giveback_blocked_any = True
             st.warning(f"{account['nickname']}: giveback-blocked today — {gb_status['reason']}")
-    if control.account_ids and not giveback_blocked_any:
+    if watched_ids and not giveback_blocked_any:
         st.caption("No target accounts are currently giveback-blocked today.")
 
 
@@ -554,6 +555,19 @@ def _known_tickers_for_asset_class(asset_class: str) -> dict[str, str]:
             name = row["name"] if "name" in row and isinstance(row["name"], str) else ""
             known.setdefault(row["ticker"], name)
     return known
+
+
+def _all_target_account_ids(control: AutoTraderControl) -> set[str]:
+    """Every account id the auto-trader could touch this cycle: the primary
+    control.account_ids PLUS every extra_targets group's own account_ids
+    (see auto_trader.py's _resolve_targets/run_cycle, which unions the same
+    way). Settings' risk/giveback-blocked lists and Overview's positions
+    panel both need this union too, or an extra target's account (e.g. a
+    forex IG account) is correctly protected by the engine-level guards but
+    invisible and non-re-armable from the dashboard."""
+    return set(control.account_ids) | {
+        aid for group in control.extra_targets for aid in group.get("account_ids", [])
+    }
 
 
 def _friendly_broker_error(error: str | None) -> str:
@@ -2369,10 +2383,110 @@ def render_auto_trading_tab() -> None:
             # Same reasoning: the daily P&L giveback guard is also Settings-owned.
             giveback_enabled=control.giveback_enabled,
             giveback_pct=control.giveback_pct,
+            # And the "Extra target" section below owns these two — carry them
+            # forward so saving ordinary settings here never wipes it.
+            manual_strategy_params=control.manual_strategy_params,
+            extra_targets=control.extra_targets,
         )
         save_control(new_control)
         st.success("Configuration saved.")
         st.rerun()
+
+    st.divider()
+    st.markdown("### Extra target (optional)")
+    st.caption(
+        "An additional CONCURRENT target that trades alongside everything above — e.g. a forex "
+        "account running its own separately-tuned strategy while the primary (roster or manual) "
+        "trades equities. Independent save button, own account/ticker/strategy/params — but "
+        "still shares the primary's daily trade cap, sizing, and bar interval (not "
+        "independently configurable yet), and is evaluated AFTER the primary each cycle, so "
+        "this is what gets skipped first on a day the shared cap fills early."
+    )
+
+    existing_extra = control.extra_targets[0] if control.extra_targets else {}
+
+    extra_asset_class_label = st.radio(
+        "Asset class", ["Equity", "Crypto", "Forex"], horizontal=True, key="extra_asset_class",
+    )
+    extra_asset_class_key = {"Equity": "equity", "Crypto": "crypto", "Forex": "forex"}[extra_asset_class_label]
+
+    extra_accounts_in_class = [a for a in linked if account_asset_class(a) == extra_asset_class_key]
+    extra_account_options = {
+        f"{a['nickname']} — {BROKER_META.get(a['broker'], {}).get('label', a['broker'])} "
+        f"({'Paper' if a['is_paper'] else 'LIVE'})": a["id"]
+        for a in extra_accounts_in_class
+    }
+    if not extra_account_options:
+        st.info(f"No linked accounts trade {extra_asset_class_label}. Link one in the **Accounts** tab first.")
+    extra_selected_labels = st.multiselect(
+        "Extra target accounts",
+        options=list(extra_account_options.keys()),
+        default=[
+            label for label, aid in extra_account_options.items()
+            if aid in existing_extra.get("account_ids", [])
+        ],
+        key="extra_target_accounts",
+    )
+    extra_account_ids = [extra_account_options[label] for label in extra_selected_labels]
+
+    extra_known = _known_tickers_for_asset_class(extra_asset_class_key)
+    extra_tickers = st.multiselect(
+        "Extra target tickers",
+        options=sorted(extra_known),
+        default=[t for t in existing_extra.get("tickers", []) if t in extra_known],
+        format_func=lambda t: f"{t} — {extra_known[t]}" if extra_known.get(t) else t,
+        key="extra_target_tickers",
+    )
+
+    extra_strategy_options = list(STRATEGY_REGISTRY.keys())
+    extra_strategy_default_idx = (
+        extra_strategy_options.index(existing_extra["strategy_name"])
+        if existing_extra.get("strategy_name") in extra_strategy_options else 0
+    )
+    extra_strategy_name = st.selectbox(
+        "Extra target strategy", options=extra_strategy_options,
+        index=extra_strategy_default_idx, key="extra_target_strategy",
+    )
+
+    extra_params_text = st.text_area(
+        "Strategy params override (JSON, merged over the strategy's normal defaults — leave as "
+        "{} to use the defaults)",
+        value=json.dumps(existing_extra.get("strategy_params", {})),
+        key="extra_target_params_json",
+        help='e.g. {"entry_deviation_pct": 0.2} for VWAP Mean Reversion, or {"num_std": 4.0, '
+        '"period": 20} for Bollinger Mean Reversion — the forex-tuned values validated '
+        "separately from the equities defaults, not achievable any other way today.",
+    )
+
+    extra_label = st.text_input(
+        "Label (for your own reference only)",
+        value=existing_extra.get("label", ""), key="extra_target_label",
+    )
+
+    if st.button("Save extra target"):
+        try:
+            extra_params = json.loads(extra_params_text) if extra_params_text.strip() else {}
+            if not isinstance(extra_params, dict):
+                raise ValueError('must be a JSON object, e.g. {"param": value}')
+        except (json.JSONDecodeError, ValueError) as e:
+            st.error(f"Strategy params override isn't valid JSON: {e}")
+        else:
+            # Load-mutate-save so only extra_targets changes — never clobber
+            # the primary config this same tab's other Save button owns.
+            fresh = load_control()
+            if extra_account_ids and extra_tickers and extra_strategy_name:
+                fresh.extra_targets = [{
+                    "label": extra_label or f"{extra_asset_class_label} extra target",
+                    "account_ids": extra_account_ids,
+                    "tickers": extra_tickers,
+                    "strategy_name": extra_strategy_name,
+                    "strategy_params": extra_params,
+                }]
+            else:
+                fresh.extra_targets = []  # nothing meaningful configured — clear it
+            save_control(fresh)
+            st.success("Extra target saved." if fresh.extra_targets else "Extra target cleared (incomplete config).")
+            st.rerun()
 
     st.divider()
     st.markdown("### Start / Stop")
@@ -2792,7 +2906,7 @@ def render_overview_page() -> None:
     st.divider()
     st.markdown("### Open positions")
     linked = list_accounts()
-    target_ids = [a["id"] for a in linked if a["id"] in control.account_ids]
+    target_ids = [a["id"] for a in linked if a["id"] in _all_target_account_ids(control)]
     if not target_ids:
         st.info(
             "No auto-trading accounts are configured yet. Link one under **Accounts**, then set it "
