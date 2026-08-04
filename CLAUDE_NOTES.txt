@@ -1658,6 +1658,28 @@ actual default_params. Report the validated (or invalidated) result next — do 
 the sweep numbers above as a decided change.
 
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
+- **Self-hosted ntfy + richer notification coverage (2026-08-04, deferred until testing is done,
+  the bot is running consistently, and the Raspberry Pi is being set up).** Two related upgrades
+  to `notifications.py`, discussed but explicitly parked until the Pi work happens (self-hosting
+  needs always-on hardware to be worth it, and the Pi is already planned for the bigger
+  laptop-sleep-reliability fix — see the always-on hosting notes above — so this rides along with
+  that, not standalone):
+  1. **Self-host ntfy** instead of the public `ntfy.sh` — closes a real privacy gap (the public
+     server is unauthenticated pub-sub; anyone who guesses the topic name can subscribe and see
+     real trade activity/P&L, mitigated today only by the topic name being a random string, not
+     real auth). Code-side: `NTFY_BASE` is currently a hardcoded constant
+     (`"https://ntfy.sh"`) — needs to become a configurable setting. Phone access while away from
+     home needs either port-forwarding+a domain (more exposure, needs real TLS/auth) or a private
+     mesh VPN like Tailscale (matches this project's own earlier Pi-hosting plan — phone reaches
+     the Pi as if on the home LAN from anywhere, nothing exposed to the public internet).
+  2. **Use more of what ntfy already supports, even before self-hosting**: `notify_trade_open`/
+     `notify_trade_close` never pass ntfy's `priority` param (already plumbed through `notify()`,
+     just unused) or tags/emoji — every notification looks the same regardless of urgency. Bigger
+     gap: `notify()` is ONLY ever called on a successful trade open/close today — nothing pings
+     the phone for an order REJECTION (this session alone had several: IBKR fractional-share,
+     IG SIZE_INCREMENT), the account-risk drawdown breaker tripping, the daily P&L giveback guard
+     blocking, or the bot hitting an error/kill-switch engaging. Wiring failures into
+     notifications is probably the higher-value half of this, independent of self-hosting.
 - **DONE 2026-08-01 — Daily P&L giveback rule for auto_trader.py** (source: reaction video
   reviewing Ross Cameron/Warrior Trading, 2026-07-31). `src/backtester/daily_pnl_guard.py`
   — once an account's profit for TODAY has given back more than `giveback_pct` (default 25,
