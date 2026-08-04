@@ -1658,6 +1658,25 @@ actual default_params. Report the validated (or invalidated) result next — do 
 the sweep numbers above as a decided change.
 
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
+- **Fix `_another_instance_alive()`'s singleton guard — real process-liveness check, not just
+  heartbeat age (2026-08-04, priority: sooner than the ntfy/Pi batch below — once this current
+  test phase finishes).** Found live: after the laptop was shut down, `auto_trader.py` died
+  mid-cycle without updating `status.json`. On reboot, EVERY restart attempt (the auto-start
+  shortcut's own, and several manual ones) was silently blocked — the guard
+  (`auto_trader.py` ~line 557) only checks `datetime.now() - last_heartbeat < max(300, 3 *
+  poll_interval_seconds)` (~6 min with the current 120s poll interval), never whether that PID
+  is an actual running process. A heartbeat written moments before a hard kill still "looks
+  fresh" for up to 6 minutes, so nothing could restart in that window — invisible to the user
+  since it runs headless via `pythonw.exe` (no console, no error shown). Worked around this
+  time by manually correcting `status.json`'s `running` field to `False` (the honest truth,
+  once actual process-liveness was confirmed via `tasklist`/searching by commandline) before
+  relaunching. **Real fix**: check actual OS process liveness (e.g. `psutil.pid_exists(pid)` —
+  not currently a dependency, would need adding — or a Windows-specific `tasklist`/`OpenProcess`
+  check) in addition to/instead of pure heartbeat age, so a genuinely dead process never blocks
+  a legitimate restart regardless of how recently it died. Net risk from the gap as it stands:
+  not double-trading (the guard errs safe, just too conservatively) but the bot can be silently
+  offline during market hours for the full ~6-minute window with no visible sign anything's
+  wrong — the exact blind spot the notification-coverage idea below would also help catch.
 - **Self-hosted ntfy + richer notification coverage (2026-08-04, deferred until testing is done,
   the bot is running consistently, and the Raspberry Pi is being set up).** Two related upgrades
   to `notifications.py`, discussed but explicitly parked until the Pi work happens (self-hosting
