@@ -1657,6 +1657,27 @@ consistency check used for the Phase C baseline, before touching STRATEGY_REGIST
 actual default_params. Report the validated (or invalidated) result next — do not treat
 the sweep numbers above as a decided change.
 
+=== DIAGNOSTIC SCRIPT (added 2026-08-05) ===
+`python diagnose_bot.py` (top-level, next to auto_trader.py) — on-demand health check for
+whenever trade volume looks suspiciously low ("it should be making a few trades a day, why
+isn't it?"). Entirely read-only: never places an order, never mutates roster/control/
+account-risk state (deliberately skips roster.apply_demotion_checks, unlike auto_trader.py's
+own _resolve_targets) — safe to run anytime, including while the real bot is running.
+Reports, in order: real OS-level process liveness (not just heartbeat age — see the singleton-
+guard bug below) + control/status state; FOMC event-calendar coverage (flags if it's expired or
+expiring soon, since an expired calendar hard-blocks every BUY); per-account broker
+connectivity (market clock, snapshot, positions, each caught independently so one broken
+account doesn't hide the others); drawdown-blocked accounts; a LIVE replay of what every active
+roster entry + extra_target would signal right now (BUY/SELL/HOLD), so "everything's just HOLD
+right now" is distinguishable from a real failure; and a 14-day trade-attempt count from
+execution_log.jsonl with a flag if today+yesterday both show zero.
+First real run (2026-08-05) already caught a genuine live issue: IBKR Paper unreachable
+(WinError 1225 — IB Gateway/TWS wasn't running), plus confirmed the rest of the "zero trades
+today" picture was benign (equities market not yet open, IG's one non-HOLD signal was a SELL
+with no open position to close, i.e. correctly a no-op). Deliberately kept on-demand rather than
+scheduled — user's call, matches holding off on new automated/notification surface area until
+the current test phase wraps up (see ntfy idea below).
+
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
 - **Fix `_another_instance_alive()`'s singleton guard — real process-liveness check, not just
   heartbeat age (2026-08-04, priority: sooner than the ntfy/Pi batch below — once this current
