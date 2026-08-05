@@ -1804,6 +1804,33 @@ worked around the same way as before (manually correcting status.json's `running
 once real process-death was confirmed via `Get-CimInstance`/`tasklist`). Third live occurrence
 of this exact bug now — worth bumping priority once the current test phase wraps up.
 
+=== BUG FOUND: SELL quantity recomputed from sizing, not the actual held position (2026-08-05) ===
+Found via today's end-of-day review, directly exposed by the Alpaca live-data fix (equities
+were barely trading before that, on frozen data, so this never got exercised). In
+`auto_trader.py::_trade_target` (~line 383-385), the SAME `compute_qty_for_account(...)` sizing
+call is used for BOTH BUY and SELL — there's no branch that uses `existing_position.qty` (the
+actual held amount, already fetched fresh via `get_positions()` a few lines earlier, sitting
+right there unused for this purpose) as the SELL quantity. A SELL should close the position
+that's actually held; instead it recomputes "how many shares would today's sizing_value buy at
+today's price" and tries to sell THAT many — which only matches the held quantity by coincidence
+(same price, same size_multiplier as the original buy).
+
+Real consequence seen live today: DDOG was bought at $286.86, partially sold once successfully,
+then every subsequent cycle's SELL attempt kept requesting ~1.09 shares (a fresh sizing-based
+number) against a position that had already shrunk to 0.0034 shares — failed with Alpaca's
+"insufficient qty available" error FIVE times in a row over ~90 minutes (17:27–18:44 UTC) before
+the market closed for the day. Same pattern on MPWR, one failure. Current actual exposure is
+trivial — both positions are down to dust (DDOG 0.0034 shares ≈ $0.95, MPWR 0.0013 shares ≈
+$1.74, combined unrealized P&L about -$0.01) — but the BUG itself is real and will keep
+misfiring on every future SELL where price has moved since entry, potentially leaving a stuck,
+never-fully-closed position indefinitely (each attempt just fails and moves on, no retry-with-
+correct-qty logic).
+
+Fix (not yet applied — found end of day, deferred to next session): for
+`order_side is OrderSide.SELL`, use `existing_position.qty` directly instead of calling
+`compute_qty_for_account(...)` — sizing/vol-target scaling is a BUY-only (new entry) concept;
+closing a position should always mean "sell what's actually held," full stop.
+
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
 - **Conservative/aggressive risk dial — manual now, conviction/regime-driven "end game" later
   (2026-08-05, deferred until the current test phase finishes — user's own call).** Full
