@@ -1805,22 +1805,68 @@ once real process-death was confirmed via `Get-CimInstance`/`tasklist`). Third l
 of this exact bug now — worth bumping priority once the current test phase wraps up.
 
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
-- **Manual conservative/moderate/aggressive risk-dial control (2026-08-05, deferred until the
-  current test phase finishes — user's own call).** Idea: a single control (dashboard + maybe
-  mobile) that bundles several already-existing risk knobs into a small set of named presets
-  (e.g. Conservative / Moderate / Aggressive, maybe with room for custom in between), so each
-  end of the scale can be deliberately paper-tested to see where its real limits are — NOT a
-  push toward live aggressive trading, a controlled way to explore the space safely (consistent
-  with [[trading-bot-goals-and-risk-posture]] — cautious by default, aggressive only when
-  deliberately chosen for a bounded test). Knobs that already exist and would likely compose
-  into this, not net-new: `sizing_value`/`sizing_mode` (position size), `vol_target_ann` (GARCH
-  target vol), `max_drawdown_pct`, `giveback_pct`, `max_trades_per_day`, `block_event_days`, and
-  per-strategy entry-sensitivity params (e.g. Bollinger `num_std`, VWAP `entry_deviation_pct` —
-  tighter = more frequent/aggressive entries). Open design question for whenever this gets
-  picked up: whether "aggressive" should also loosen entry-signal params themselves (more
-  trades, lower selectivity) or stay scoped to sizing/risk-limit knobs only (same trades, bigger
-  bets) — probably worth prototyping both and comparing, exactly the kind of thing the presets
-  would make easy to A/B. Nothing built yet — this is a discussion note, not a design decision.
+- **Conservative/aggressive risk dial — manual now, conviction/regime-driven "end game" later
+  (2026-08-05, deferred until the current test phase finishes — user's own call).** Full
+  discussion, in order, so the reasoning survives even if only the conclusion gets read later:
+
+  1. Started as: a single manual control (dashboard + maybe mobile) bundling existing risk
+     knobs into named presets (Conservative/Moderate/Aggressive) so each end could be
+     deliberately paper-tested — consistent with [[trading-bot-goals-and-risk-posture]] (cautious
+     by default, aggressive only when deliberately chosen for a bounded test).
+  2. Two candidate axes debated: (a) loosen entry-signal params themselves (Bollinger `num_std`,
+     VWAP `entry_deviation_pct` — more trades, lower selectivity) vs (b) widen sizing/risk-limit
+     knobs only (`sizing_value`, `vol_target_ann`, `max_drawdown_pct`, `giveback_pct` — same
+     trades, bigger bets). Worked through pros/cons of both — (a) is really a strategy-quality
+     question already answered more cheaply by offline param sweeps than live testing could;
+     (b) is a capital-allocation question that genuinely needs real broker constraints (margin,
+     size increments, fill quality) to test meaningfully, which only live paper trading provides.
+  3. Considered testing via two git branches kept off master — real gap found: `control.json` is
+     gitignored runtime state, not tracked code, and only one `auto_trader.py` can safely trade a
+     given set of accounts at once (the singleton guard exists specifically to prevent this).
+     Branching isolates the *code*, not the live comparison — true parallel A/B would need a
+     second git worktree AND a second dedicated set of paper broker accounts; sequential
+     branch-switching is simpler but confounds "different settings" with "different market week."
+  4. Better direction (2026-08-05, same day): use the EXISTING backtester instead of live paper
+     accounts at all — sidesteps every issue in #3 (no live capital, no parallel-account
+     coordination, fully repeatable). Checked what's actually already backtestable vs what would
+     need new code:
+     - Entry-selectivity sweeps (axis 2a): fully supported today via `paramsweep.py` — zero new
+       code, literally just run it.
+     - GARCH vol-target sizing (`vol_target_ann`): fully supported today — `engine.py`'s
+       `regime_by_date`/`size_multiplier` is already wired into `BacktestEngine.run()`.
+     - Fixed-dollar `sizing_value` (axis 2b, the live bot's REAL sizing mode): **NOT modeled by
+       the engine at all** — `BacktestEngine.run()` always goes all-in per trade
+       (`spend = cash * size_multiplier`), single-ticker-in-isolation by design. Testing "$500
+       vs $2000 per trade" the way the live bot actually sizes needs a small, contained engine
+       change (parameterize the spend amount) before it's backtestable.
+     - `max_drawdown_pct`/`giveback_pct` circuit breakers: **not modeled either** (they're live-
+       only modules, `account_risk.py`/`daily_pnl_guard.py`, tracking peak equity across cycles)
+       — but likely cheap to approximate WITHOUT engine changes, as a post-hoc pass over a
+       backtest's resulting equity curve (find where an X% drawdown-from-peak would have
+       tripped) rather than threading breaker logic into the simulation loop itself.
+     - Confirmed data exists for the user's example asset pairings across market types: TSLA/
+       AAPL (equities), gold/silver (either `C:XAUUSD`/`C:XAGUSD` commodity-FX tickers or `GLD`/
+       `SLV` ETF proxies — both checked, both have data), GBPUSD/EURGBP (forex) — all fine on the
+       current Polygon plan since backtesting only needs fully-closed historical days, which
+       sidesteps the same-day-data gap entirely (see the section above).
+  5. **The actual end game, per the user (2026-08-05):** not a static manual dial at all — sizing
+     that scales itself UP when the bot is confident and DOWN when uncertain, automatically. Two
+     hooks already exist in this codebase for exactly that, currently unused for sizing: per-
+     signal `conviction` (`compute_conviction` — a 0-100% confidence score computed on every
+     non-HOLD signal, currently logged only, doesn't touch sizing anywhere) and the GARCH regime
+     classification (`calm`/`normal`/`storm` — already blocks/shrinks size in `storm`, could
+     equally scale UP in `calm`). User's explicit sequencing: build the MANUAL dial first (so
+     there's human control while learning), automatic conviction/regime-driven throttling is the
+     later end-game, built only once the sweep evidence below shows whether conviction/regime
+     actually correlate with better risk-adjusted outcomes in this bot's specific strategies —
+     not built on an untested assumption.
+
+  **Next concrete step, whenever this gets picked up**: scope actual sweep runs (which
+  strategies, which param grids/date ranges, which of the confirmed asset pairings) covering the
+  two axes that are already fully backtestable (selectivity, vol-target sizing) — the
+  fixed-dollar-sizing engine change and the drawdown-breaker post-hoc analysis are separate,
+  smaller follow-ups once the first sweep results are in. Nothing built yet — this whole entry is
+  a discussion record, not a design decision.
 - **Fix `_another_instance_alive()`'s singleton guard — real process-liveness check, not just
   heartbeat age (2026-08-04, priority: sooner than the ntfy/Pi batch below — once this current
   test phase finishes).** Found live: after the laptop was shut down, `auto_trader.py` died
