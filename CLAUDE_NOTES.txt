@@ -1678,6 +1678,35 @@ with no open position to close, i.e. correctly a no-op). Deliberately kept on-de
 scheduled — user's call, matches holding off on new automated/notification surface area until
 the current test phase wraps up (see ntfy idea below).
 
+=== POLYGON RATE-LIMIT COLLISION FIX (2026-08-05) ===
+Found via diagnose_bot.py's very first run: auto_trader.py and Mobile_App/backend/signal_api.py
+are separate processes, each independently fetching fresh bars for the SAME tickers (whatever
+the roster + extra_targets currently are) on roughly the same ~120s cadence — and each defaults
+to its own uncoordinated 5-req/min PolygonClient rate limiter (confirmed: this account really is
+on Polygon's free tier, ~5/min is the true ceiling, not an overly conservative code default).
+Self-throttling per-process doesn't stop a real 429 when both processes' cycles land close
+together — reproduced live (SWK's signal replay failed with HTTP 429 during a diagnose_bot.py
+run that overlapped the live bot's own cycle).
+Fix: added `src/backtester/current_signals.py` — auto_trader.py's `_trade_target` now writes
+each ticker's already-computed signal/price/conviction to `auto_trader_state/current_signals.json`
+every cycle (zero extra Polygon calls — reuses bars/signal it already fetched). Mobile_App's
+`signal_service.compute_current_signal` now checks this snapshot FIRST (matching ticker +
+strategy_name, younger than 360s) and only falls back to its own direct Polygon fetch if the
+snapshot is missing/mismatched/stale (e.g. auto_trader.py isn't running). Verified live:
+restarted both processes, confirmed the mobile backend's `/signals` output is now byte-for-byte
+identical to auto_trader.py's own snapshot (same signal/price/conviction/timestamp), and the
+SWK 429 that had been happening is gone.
+Note: this conviction snapshot is a SEPARATE computation from `entry_conviction` further down in
+`_trade_target` (which stays BUY-only, used for real position sizing/attribution) — the snapshot
+computes conviction whenever signal != HOLD (matching what the mobile app already showed),
+purely for display, at zero extra cost since compute_conviction is pure math over bars already
+in hand, not a network call.
+Restarting auto_trader.py to pick this up hit the SAME singleton-guard bug documented below
+(pid was genuinely dead but its last heartbeat still looked "fresh" for ~4 more minutes) —
+worked around the same way as before (manually correcting status.json's `running` to `false`
+once real process-death was confirmed via `Get-CimInstance`/`tasklist`). Third live occurrence
+of this exact bug now — worth bumping priority once the current test phase wraps up.
+
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
 - **Fix `_another_instance_alive()`'s singleton guard — real process-liveness check, not just
   heartbeat age (2026-08-04, priority: sooner than the ntfy/Pi batch below — once this current

@@ -69,7 +69,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from backtester import account_risk, accounts as accounts_module, daily_pnl_guard
-from backtester import events, heartbeat, live_trades, notifications, position_attribution, roster, volatility
+from backtester import current_signals, events, heartbeat, live_trades, notifications, position_attribution, roster, volatility
 from backtester.auto_trader_state import (
     AutoTraderStatus, load_control, load_control_checked, load_status, save_status,
 )
@@ -241,6 +241,18 @@ def _trade_target(
         volume=row["volume"],
     )
     signal = strategy.on_bar(bars, current)
+
+    # Publish this cycle's read for the ticker regardless of hold/blocked/
+    # executed outcome below — see current_signals.py. Conviction here is a
+    # SEPARATE, display-only computation from entry_conviction further down
+    # (which stays BUY-only, for sizing/attribution); costs zero extra
+    # Polygon calls since it's pure math over bars already fetched above.
+    snapshot_conviction = compute_conviction(strategy, bars, current) if signal.value != "hold" else None
+    current_signals.record_signal(
+        ticker=ticker, strategy_name=strategy_name, signal=signal.value,
+        price=float(current.close), conviction=snapshot_conviction,
+        bar_timestamp=current.timestamp.isoformat(),
+    )
 
     if signal.value == "hold":
         return
