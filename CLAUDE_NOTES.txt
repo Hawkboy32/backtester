@@ -1805,6 +1805,22 @@ once real process-death was confirmed via `Get-CimInstance`/`tasklist`). Third l
 of this exact bug now — worth bumping priority once the current test phase wraps up.
 
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
+- **Manual conservative/moderate/aggressive risk-dial control (2026-08-05, deferred until the
+  current test phase finishes — user's own call).** Idea: a single control (dashboard + maybe
+  mobile) that bundles several already-existing risk knobs into a small set of named presets
+  (e.g. Conservative / Moderate / Aggressive, maybe with room for custom in between), so each
+  end of the scale can be deliberately paper-tested to see where its real limits are — NOT a
+  push toward live aggressive trading, a controlled way to explore the space safely (consistent
+  with [[trading-bot-goals-and-risk-posture]] — cautious by default, aggressive only when
+  deliberately chosen for a bounded test). Knobs that already exist and would likely compose
+  into this, not net-new: `sizing_value`/`sizing_mode` (position size), `vol_target_ann` (GARCH
+  target vol), `max_drawdown_pct`, `giveback_pct`, `max_trades_per_day`, `block_event_days`, and
+  per-strategy entry-sensitivity params (e.g. Bollinger `num_std`, VWAP `entry_deviation_pct` —
+  tighter = more frequent/aggressive entries). Open design question for whenever this gets
+  picked up: whether "aggressive" should also loosen entry-signal params themselves (more
+  trades, lower selectivity) or stay scoped to sizing/risk-limit knobs only (same trades, bigger
+  bets) — probably worth prototyping both and comparing, exactly the kind of thing the presets
+  would make easy to A/B. Nothing built yet — this is a discussion note, not a design decision.
 - **Fix `_another_instance_alive()`'s singleton guard — real process-liveness check, not just
   heartbeat age (2026-08-04, priority: sooner than the ntfy/Pi batch below — once this current
   test phase finishes).** Found live: after the laptop was shut down, `auto_trader.py` died
