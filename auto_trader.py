@@ -380,12 +380,24 @@ def _trade_target(
         elif order_side is OrderSide.SELL and not has_position:
             continue
 
-        try:
-            effective_sizing_value = control.sizing_value * size_multiplier
-            qty = compute_qty_for_account(broker_account, current.close, sizing_mode, effective_sizing_value)
-        except Exception as e:  # noqa: BLE001
-            status.last_error = f"{broker_account.nickname}: sizing failed: {e}"
-            continue
+        if order_side is OrderSide.SELL:
+            # Close what's actually held, not a fresh sizing calculation —
+            # sizing_value/size_multiplier are an ENTRY (new-position) concept.
+            # Recomputing "how many shares would today's sizing buy at today's
+            # price" here only matched the held qty by coincidence (same price,
+            # same size_multiplier as the original buy) and broke the moment
+            # either changed: found live 2026-08-05 — DDOG failed to close 5x
+            # in a row ("insufficient qty available") because a partial sell
+            # had already shrunk the position, but each retry kept requesting
+            # a freshly-computed ~1.09 shares against a ~0.003-share remainder.
+            qty = existing_position.qty
+        else:
+            try:
+                effective_sizing_value = control.sizing_value * size_multiplier
+                qty = compute_qty_for_account(broker_account, current.close, sizing_mode, effective_sizing_value)
+            except Exception as e:  # noqa: BLE001
+                status.last_error = f"{broker_account.nickname}: sizing failed: {e}"
+                continue
 
         account_orders.append(AccountOrder(account=broker_account, qty=qty))
         order_contexts.append({"account": broker_account, "existing_position": existing_position})
