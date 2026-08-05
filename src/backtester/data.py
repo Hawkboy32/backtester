@@ -213,3 +213,43 @@ class PolygonClient:
                 }
             )
         return articles
+
+
+def cache_stats(cache_dir: Path | str = DEFAULT_CACHE_DIR) -> tuple[int, int]:
+    """(file_count, total_bytes) for the on-disk bar cache."""
+    cache_dir = Path(cache_dir)
+    if not cache_dir.exists():
+        return 0, 0
+    files = list(cache_dir.glob("*.pkl"))
+    return len(files), sum(f.stat().st_size for f in files)
+
+
+def prune_cache(cache_dir: Path | str = DEFAULT_CACHE_DIR, max_age_days: int = 30) -> tuple[int, int]:
+    """Delete cached bar files last written more than max_age_days ago.
+
+    The cache has no TTL by design — bars for a closed historical range never
+    change, so there's nothing to invalidate. But every unique (ticker,
+    date-range, granularity) key ever fetched gets its own pickle kept
+    forever, and scans get re-run over shifting date windows over time, so
+    old entries just pile up as dead weight (727MB / 1050 files found on
+    2026-08-05, on a project that's only been running a few weeks). This
+    prunes by file MODIFICATION time (when it was fetched), not the date
+    range it covers, since a freshly re-fetched old-history file is still
+    useful. Returns (files_deleted, bytes_freed).
+    """
+    cache_dir = Path(cache_dir)
+    if not cache_dir.exists():
+        return 0, 0
+    cutoff = time.time() - max_age_days * 86400
+    deleted = 0
+    freed = 0
+    for f in cache_dir.glob("*.pkl"):
+        try:
+            stat = f.stat()
+            if stat.st_mtime < cutoff:
+                freed += stat.st_size
+                f.unlink()
+                deleted += 1
+        except OSError:
+            continue  # another process touched/removed it mid-scan — skip, not fatal
+    return deleted, freed

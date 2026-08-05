@@ -37,7 +37,7 @@ from backtester.accounts import (
 from backtester.auto_trader_state import AutoTraderControl, load_control, load_status, save_control, trigger_kill_switch
 from backtester.brokers.base import OrderSide
 from backtester.brokers.ibkr import check_gateway_reachable
-from backtester.data import PolygonClient, PolygonError
+from backtester.data import DEFAULT_CACHE_DIR, PolygonClient, PolygonError, cache_stats, prune_cache
 from backtester.engine import ENGINE_VERSION, BacktestEngine
 from backtester.execution import AccountOrder, SizingMode, compute_qty_for_account, execute_order_across_accounts
 from backtester.memory_report import save_report
@@ -506,6 +506,31 @@ no way to say "I'm off on purpose".
             st.warning(f"{account['nickname']}: giveback-blocked today — {gb_status['reason']}")
     if watched_ids and not giveback_blocked_any:
         st.caption("No target accounts are currently giveback-blocked today.")
+
+    st.divider()
+    st.markdown("### Data cache")
+    st.caption(
+        "Every unique (ticker, date range, granularity) bar fetch gets pickled to disk so scans "
+        "are resumable and don't re-fetch data they already have — but nothing ever removes an "
+        "old entry, so it grows forever as scans get re-run over shifting date windows."
+    )
+    file_count, total_bytes = cache_stats(DEFAULT_CACHE_DIR)
+    st.caption(f"Current cache: {file_count} file(s), {total_bytes / 1_048_576:.1f} MB")
+    cache_col1, cache_col2 = st.columns([2, 1])
+    with cache_col1:
+        max_age_days = st.number_input(
+            "Delete cache files older than (days)", min_value=1, max_value=365,
+            value=30, step=1, key="settings_cache_max_age",
+        )
+    with cache_col2:
+        st.write("")  # vertical alignment with the number_input's label above
+        if st.button("Prune old cache files", key="settings_prune_cache"):
+            deleted, freed = prune_cache(DEFAULT_CACHE_DIR, max_age_days=int(max_age_days))
+            if deleted:
+                st.success(f"Deleted {deleted} file(s), freed {freed / 1_048_576:.1f} MB.")
+            else:
+                st.info("Nothing older than that to delete.")
+            st.rerun()
 
 
 BACKTEST_CONFIG_KEYS = [
