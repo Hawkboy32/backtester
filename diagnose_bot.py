@@ -171,22 +171,55 @@ def check_risk_guards(account_ids: list[str]) -> None:
         print("No account_risk.json yet (no breaker has ever tripped).")
 
 
-def _replay_signal(client: PolygonClient, ticker: str, strategy_name: str, params: dict) -> str:
+def _pick_live_data_account(ticker: str, broker_accounts: list, account_asset_classes: dict) -> object | None:
+    """Same selection as auto_trader.py's own _pick_live_data_account (kept
+    as an independent copy rather than a cross-import between top-level
+    scripts, matching this project's existing pattern) - currently only
+    AlpacaBroker (equities) exposes get_live_bars. See CLAUDE_NOTES.txt for
+    why forex (IG) isn't here yet (its own live-data endpoint has a weekly
+    allowance far too scarce for repeated polling)."""
+    ticker_asset_class = accounts_module.infer_asset_class(ticker)
+    for broker_account in broker_accounts:
+        if ticker_asset_class not in account_asset_classes.get(broker_account.account_id, frozenset()):
+            continue
+        if hasattr(broker_account, "get_live_bars"):
+            return broker_account
+    return None
+
+
+def _replay_signal(
+    client: PolygonClient, ticker: str, strategy_name: str, params: dict,
+    live_data_account: object | None = None,
+) -> str:
     if strategy_name not in STRATEGY_REGISTRY:
         return f"unknown strategy '{strategy_name}'"
-    try:
-        bars = client.get_aggregates(
-            ticker=ticker,
-            from_date=(datetime.now(timezone.utc).date() - timedelta(days=LOOKBACK_DAYS)).isoformat(),
-            to_date=datetime.now(timezone.utc).date().isoformat(),
-            multiplier=1,
-            timespan="minute",
-        )
-    except Exception as e:  # noqa: BLE001
-        msg = f"data fetch failed: {e}"
-        if "429" in str(e) or "rate limit" in str(e).lower():
-            msg += " (likely just this script and the live bot polling Polygon at the same moment - re-run if it persists)"
-        return msg
+
+    from_date = (datetime.now(timezone.utc).date() - timedelta(days=LOOKBACK_DAYS)).isoformat()
+    to_date = datetime.now(timezone.utc).date().isoformat()
+    bars = None
+    source = "Polygon"
+    if live_data_account is not None:
+        try:
+            bars = live_data_account.get_live_bars(
+                ticker=ticker, from_date=from_date, to_date=to_date, multiplier=1, timespan="minute",
+            )
+            if bars.empty:
+                bars = None
+            else:
+                source = live_data_account.nickname
+        except Exception:  # noqa: BLE001
+            bars = None  # fall through to Polygon below
+
+    if bars is None:
+        try:
+            bars = client.get_aggregates(
+                ticker=ticker, from_date=from_date, to_date=to_date, multiplier=1, timespan="minute",
+            )
+        except Exception as e:  # noqa: BLE001
+            msg = f"data fetch failed: {e}"
+            if "429" in str(e) or "rate limit" in str(e).lower():
+                msg += " (likely just this script and the live bot polling Polygon at the same moment - re-run if it persists)"
+            return msg
 
     if bars.empty or len(bars) < 2:
         return "not enough bars returned"
@@ -199,14 +232,26 @@ def _replay_signal(client: PolygonClient, ticker: str, strategy_name: str, param
     )
     signal = strategy.on_bar(bars, current)
     if signal.value == "hold":
-        return f"HOLD @ {current.close}"
+        return f"HOLD @ {current.close} [{source}]"
     conviction = compute_conviction(strategy, bars, current)
-    return f"{signal.value.upper()} @ {current.close} (conviction {conviction:.0%})"
+    return f"{signal.value.upper()} @ {current.close} (conviction {conviction:.0%}) [{source}]"
 
 
 def check_current_signals(control) -> None:
     _hr("LIVE SIGNAL REPLAY (what would fire right now)")
     client = PolygonClient(use_cache=False)
+
+    all_account_ids = list(control.account_ids)
+    for group in control.extra_targets:
+        for aid in group.get("account_ids", []):
+            if aid not in all_account_ids:
+                all_account_ids.append(aid)
+    linked = accounts_module.list_accounts()
+    target_meta = [a for a in linked if a["id"] in all_account_ids]
+    broker_accounts = accounts_module.build_broker_accounts(all_account_ids)
+    account_asset_classes = {
+        a["id"]: frozenset({accounts_module.account_asset_class(a)}) for a in target_meta
+    }
 
     targets: list[tuple[str, str, dict]] = []
     if control.use_roster:
@@ -230,7 +275,8 @@ def check_current_signals(control) -> None:
 
     non_hold = 0
     for ticker, strategy_name, params in targets:
-        result = _replay_signal(client, ticker, strategy_name, params)
+        live_data_account = _pick_live_data_account(ticker, broker_accounts, account_asset_classes)
+        result = _replay_signal(client, ticker, strategy_name, params, live_data_account)
         print(f"  {ticker:12s} {strategy_name:28s} -> {result}")
         if not result.startswith("HOLD") and "failed" not in result and "unknown" not in result:
             non_hold += 1

@@ -192,6 +192,31 @@ def _resolve_targets(control) -> list[tuple[str, str, dict, bool]]:
     return primary + extra
 
 
+def _pick_live_data_account(
+    ticker: str, broker_accounts: list[BrokerAccount], account_asset_classes: dict[str, frozenset[str]],
+) -> BrokerAccount | None:
+    """First target account that both (a) can trade this ticker's asset
+    class and (b) exposes get_live_bars — currently only AlpacaBroker
+    (equities). Not account_asset_class-eligibility related (drawdown-
+    blocked / market-closed accounts are still fine to READ data from, just
+    not to trade on) — deliberately ignores blocked_account_ids/
+    market_closed_account_ids, unlike the order-routing loop below.
+
+    Forex (IG) has no entry here yet: its own live-data endpoint works but
+    has a weekly data-point allowance far too scarce for a 120s polling
+    loop (one test pull exhausted it — see CLAUDE_NOTES.txt), so forex
+    stays on Polygon until that gets a proper design. Returns None (falls
+    through to Polygon) for any ticker with no eligible account.
+    """
+    ticker_asset_class = accounts_module.infer_asset_class(ticker)
+    for broker_account in broker_accounts:
+        if ticker_asset_class not in account_asset_classes.get(broker_account.account_id, frozenset()):
+            continue
+        if hasattr(broker_account, "get_live_bars"):
+            return broker_account
+    return None
+
+
 def _trade_target(
     ticker: str,
     strategy_name: str,
@@ -215,17 +240,39 @@ def _trade_target(
         status.last_error = f"unknown strategy '{strategy_name}' — skipping {ticker}"
         return
 
-    try:
-        bars = client.get_aggregates(
-            ticker=ticker,
-            from_date=(datetime.now(timezone.utc).date() - timedelta(days=LOOKBACK_DAYS)).isoformat(),
-            to_date=_today_str(),
-            multiplier=control.multiplier,
-            timespan=control.timespan,
-        )
-    except Exception as e:  # noqa: BLE001
-        status.last_error = f"{ticker}: data fetch failed: {e}"
-        return
+    from_date = (datetime.now(timezone.utc).date() - timedelta(days=LOOKBACK_DAYS)).isoformat()
+    to_date = _today_str()
+
+    # Prefer a broker's own live data (currently only Alpaca/equities — see
+    # _pick_live_data_account) over Polygon: this account's Polygon plan has
+    # NO same-day intraday data at all (confirmed 2026-08-05, see
+    # CLAUDE_NOTES.txt), so a minute-bar strategy fed Polygon-only bars is
+    # really just re-evaluating yesterday's frozen close all day. Falls
+    # through to Polygon on any failure, empty result, or when no target
+    # account can supply live data for this ticker's asset class.
+    bars = None
+    live_data_account = _pick_live_data_account(ticker, broker_accounts, account_asset_classes)
+    if live_data_account is not None:
+        try:
+            bars = live_data_account.get_live_bars(
+                ticker=ticker, from_date=from_date, to_date=to_date,
+                multiplier=control.multiplier, timespan=control.timespan,
+            )
+            if bars.empty:
+                bars = None
+        except Exception as e:  # noqa: BLE001
+            status.last_error = f"{ticker}: live data fetch via {live_data_account.nickname} failed: {e}"
+            bars = None
+
+    if bars is None:
+        try:
+            bars = client.get_aggregates(
+                ticker=ticker, from_date=from_date, to_date=to_date,
+                multiplier=control.multiplier, timespan=control.timespan,
+            )
+        except Exception as e:  # noqa: BLE001
+            status.last_error = f"{ticker}: data fetch failed: {e}"
+            return
 
     if bars.empty or len(bars) < 2:
         return

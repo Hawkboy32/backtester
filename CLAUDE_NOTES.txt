@@ -1657,7 +1657,7 @@ consistency check used for the Phase C baseline, before touching STRATEGY_REGIST
 actual default_params. Report the validated (or invalidated) result next — do not treat
 the sweep numbers above as a decided change.
 
-=== POLYGON FREE TIER HAS NO SAME-DAY INTRADAY DATA — MAJOR FINDING, NOT YET FIXED (2026-08-05) ===
+=== POLYGON FREE TIER HAS NO SAME-DAY INTRADAY DATA — EQUITIES FIXED, FOREX STILL OPEN (2026-08-05) ===
 Discovered while investigating why the mobile app's DDOG/MPWR/SWK signals hadn't moved since
 the app was built. Queried Polygon directly (bypassing every cache) for DDOG, AAPL, and SPY —
 all three, mid-session on a normal trading day (11am ET, confirmed market OPEN via Alpaca's own
@@ -1709,15 +1709,50 @@ for broker accounts could supply real live data instead, at zero new cost:
   the more promising angle if this gets picked back up — untested, don't assume it works the same
   way.
 
-DECISION (2026-08-05): user chose to hold off on building either fix for now and think it through
-further before touching auto_trader.py's core data path — nothing has been changed in the live
-loop yet, this section is purely documenting what was learned so a future session (or a future
-returning-user conversation) doesn't have to rediscover any of this, especially the IG allowance
-trap. When this gets picked back up: Alpaca-for-equities is close to a drop-in, low-risk win;
-IG-for-forex needs either the streaming API investigated properly (with fresh allowance,
-carefully, ideally against a route that ISN'T the same scarce weekly-points endpoint) or a much
-more conservative design (e.g., pulling a single point at a much lower cadence than every cycle)
-before it's worth building at all.
+UPDATE (2026-08-05, later same day): user asked to go ahead and build the Alpaca fix for
+equities — IG/forex stays on Polygon, unchanged, per the reasoning above (allowance still
+exhausted, wrong shape for a 120s loop regardless of quota state).
+
+Built: `AlpacaBroker.get_live_bars(ticker, from_date, to_date, multiplier, timespan)` in
+brokers/alpaca.py — a second client on the SAME account (`StockHistoricalDataClient`, same
+api_key/secret_key already used for `TradingClient`), `feed=DataFeed.IEX` required explicitly on
+every call (the default feed 403s on "recent" data for a free/paper account). Returns a
+DataFrame in the EXACT same shape as `PolygonClient.get_aggregates()` (columns open/high/low/
+close/volume/vwap/transactions, UTC-indexed) — verified column-for-column identical except
+`transactions` is float64 not int64 (nothing in strategies/engine/conviction/volatility reads
+that column, confirmed via grep, so harmless). Verified: full 90-day lookback in one call
+(18,238 bars), no pagination issue, no rate-limit surprise (unlike IG) — Alpaca's free IEX feed
+appears to have no equivalent scarce weekly quota.
+
+auto_trader.py: new `_pick_live_data_account(ticker, broker_accounts, account_asset_classes)` —
+returns the first target account matching the ticker's asset class that exposes `get_live_bars`
+(currently only AlpacaBroker; returns None, i.e. "fall through to Polygon," for anything else,
+which is exactly how forex/C:EURUSD behaves right now). `_trade_target`'s bars-fetch step tries
+this first, falls back to the existing Polygon call on any failure/empty result/no eligible
+account — so nothing regresses for forex, crypto, or if Alpaca ever has an outage. Diagnose_bot.py
+got the identical treatment (its own copy of the picker, not a cross-import — matches this
+project's existing "each top-level script is self-contained" pattern) so its LIVE SIGNAL REPLAY
+section stays consistent with what the real bot sees, and now prints which source each signal
+came from (e.g. "[MyAlpaca]" vs "[Polygon]").
+
+Verified live before restarting anything: ran every active roster entry's real strategy
+(`build_strategy` + `on_bar`) against real `get_live_bars()` output — DDOG HOLD @ 285.13 (bar
+timestamped literally minutes old), **MPWR BUY @ 1322.09** (a real, currently-live signal that
+was completely invisible under the old frozen-Polygon setup, which showed HOLD @ 1334.73 all
+day), SWK SELL @ 103.02. Confirms the earlier "stuck" appearance wasn't just theoretical — real
+opportunities were being missed. diagnose_bot.py's full run after the code change (still against
+the OLD not-yet-restarted process) showed signal replay correctly using [MyAlpaca] for DDOG/MPWR/
+SWK and [Polygon] for C:EURUSD, non-hold count jumping from 1/4 to 3/4.
+
+Scope note: this only touches the LIVE trading loop (auto_trader.py + diagnose_bot.py's replay,
+which feeds current_signals.json, which the mobile app already reads from — no mobile-app code
+changes needed, it picks this up automatically). Backtesting/scanning (engine.py, scanner.py)
+still use Polygon exclusively, unchanged and correctly so — those only ever evaluate fully-closed
+historical days, where Polygon's EOD-only data is exactly the right tool, not a limitation.
+
+Still open: forex (IG) stays on Polygon — same stale-data gap as equities had, un-fixed. Revisit
+once IG's historical-price allowance resets and there's time to properly evaluate the separate
+streaming price API as an alternative (see notes above — don't reuse the same scarce endpoint).
 
 === DIAGNOSTIC SCRIPT (added 2026-08-05) ===
 `python diagnose_bot.py` (top-level, next to auto_trader.py) — on-demand health check for

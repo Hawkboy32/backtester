@@ -6,8 +6,13 @@ orders if is_paper=False was explicitly set when it was linked.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import pandas as pd
+from datetime import datetime, timedelta, timezone
 
+from alpaca.data.enums import DataFeed
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass
 from alpaca.trading.enums import OrderSide as AlpacaOrderSide
@@ -22,12 +27,24 @@ from alpaca.trading.requests import (
 
 from backtester.brokers.base import AccountSnapshot, BrokerAccount, EquityPoint, OrderResult, OrderSide, Position
 
+_TIMESPAN_TO_UNIT = {
+    "minute": TimeFrameUnit.Minute,
+    "hour": TimeFrameUnit.Hour,
+    "day": TimeFrameUnit.Day,
+}
+
 
 class AlpacaBroker(BrokerAccount):
     def __init__(self, nickname: str, api_key: str, secret_key: str, is_paper: bool = True):
         self.nickname = nickname
         self.is_paper = is_paper
         self._client = TradingClient(api_key=api_key, secret_key=secret_key, paper=is_paper)
+        # Separate client, same key pair — Alpaca's trading and market-data
+        # APIs are independent products under one account. Free/paper accounts
+        # only have rights to the IEX feed (not the full SIP tape); the default
+        # feed 403s on "recent" data ("subscription does not permit querying
+        # recent SIP data") unless IEX is requested explicitly everywhere below.
+        self._data_client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
 
     def get_account_snapshot(self) -> AccountSnapshot:
         account = self._client.get_account()
@@ -61,6 +78,43 @@ class AlpacaBroker(BrokerAccount):
     def get_open_order_tickers(self) -> set[str]:
         orders = self._client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN))
         return {o.symbol for o in orders}
+
+    def get_live_bars(
+        self, ticker: str, from_date: str, to_date: str, multiplier: int = 1, timespan: str = "minute",
+    ) -> pd.DataFrame:
+        """Same-day-capable alternative to PolygonClient.get_aggregates(),
+        shaped identically (columns: open/high/low/close/volume/vwap/
+        transactions, indexed by UTC timestamp) so strategy code needs no
+        changes at all. Exists because this account's Polygon plan has NO
+        same-day intraday data at all — bars only appear the day after a
+        session closes (confirmed 2026-08-05, see CLAUDE_NOTES.txt) — while
+        Alpaca's own free IEX feed, on the SAME account already used for
+        equities trading, returns live minute bars with no such gap and no
+        rate-limit surprise (unlike IG's history endpoint — see notes).
+
+        feed=DataFeed.IEX is required on every call, not just implied by
+        account tier: the default feed 403s requesting "recent" data on a
+        free/paper account ("subscription does not permit querying recent
+        SIP data").
+        """
+        unit = _TIMESPAN_TO_UNIT.get(timespan, TimeFrameUnit.Minute)
+        request = StockBarsRequest(
+            symbol_or_symbols=ticker,
+            timeframe=TimeFrame(multiplier, unit),
+            start=datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc),
+            end=datetime.fromisoformat(to_date).replace(tzinfo=timezone.utc) + timedelta(days=1),
+            feed=DataFeed.IEX,
+        )
+        raw = self._data_client.get_stock_bars(request).df
+        columns = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
+        if raw.empty:
+            return pd.DataFrame(columns=columns)
+        # Single-symbol request still comes back with a (symbol, timestamp)
+        # MultiIndex — drop the redundant symbol level.
+        if isinstance(raw.index, pd.MultiIndex):
+            raw = raw.droplevel("symbol")
+        raw = raw.rename(columns={"trade_count": "transactions"})
+        return raw[columns].sort_index()
 
     def get_equity_history(self, period: str = "1M", timeframe: str = "1D") -> list[EquityPoint]:
         history = self._client.get_portfolio_history(
