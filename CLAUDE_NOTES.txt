@@ -1657,6 +1657,68 @@ consistency check used for the Phase C baseline, before touching STRATEGY_REGIST
 actual default_params. Report the validated (or invalidated) result next — do not treat
 the sweep numbers above as a decided change.
 
+=== POLYGON FREE TIER HAS NO SAME-DAY INTRADAY DATA — MAJOR FINDING, NOT YET FIXED (2026-08-05) ===
+Discovered while investigating why the mobile app's DDOG/MPWR/SWK signals hadn't moved since
+the app was built. Queried Polygon directly (bypassing every cache) for DDOG, AAPL, and SPY —
+all three, mid-session on a normal trading day (11am ET, confirmed market OPEN via Alpaca's own
+clock), returned ZERO bars newer than the PREVIOUS day's close. This isn't ticker-specific
+(SPY/AAPL are about as liquid as it gets) — it's the account's Polygon plan: minute/intraday
+aggregates only become available after a trading day fully closes and finalizes, never
+same-day. This matches Polygon's documented free-tier behavior (EOD-only data, real-time/15min-
+delayed data reserved for paid tiers) and is consistent with the already-known "~2 years of
+DAILY history only" limitation noted elsewhere in this file — same plan, another facet of it.
+
+REAL IMPACT: this isn't just a mobile-app cosmetic issue. auto_trader.py's minute-bar strategies
+(VWAP Mean Reversion, Bollinger Mean Reversion — the whole current equities roster) have
+effectively been evaluating a FROZEN previous-close price all day, every cycle, for as long as
+this has been true — not real intraday movement. This is very likely the real explanation for
+the extended stretch of zero equity trades noticed a couple of days ago (Bash session,
+diagnose_bot.py's first run) — better than the "market not open yet" explanation given at the
+time, which was true at that moment but doesn't explain the FULL day. Does NOT affect
+backtesting/scanning — those only ever look at fully-closed historical days, where EOD-only data
+is exactly what's needed anyway; this is a LIVE-loop-only problem.
+
+Investigated (with explicit permission) whether either of the two already-linked, already-paid-
+for broker accounts could supply real live data instead, at zero new cost:
+- **Alpaca (equities) — CONFIRMED WORKING, no new cost, no rate-limit surprise.** Alpaca's own
+  market data API (`alpaca.data.historical.StockHistoricalDataClient`, already installed as part
+  of `alpaca-py`) requires passing `feed=DataFeed.IEX` explicitly (the default SIP feed 403s on
+  a free/paper account: "subscription does not permit querying recent SIP data"). With IEX
+  explicitly requested: pulled a live DDOG minute bar timestamped within a minute of the request,
+  AND successfully pulled the full 90-day lookback (18,088 bars, single request, no pagination
+  issue, no quota hit) — same credentials already stored for the existing Alpaca account
+  (`build_broker_accounts` + keyring, see accounts.py). This is a clean, ready-to-build fix for
+  the equities side whenever there's time to do it properly.
+- **IG (forex) — CONFIRMED WORKING but NOT VIABLE AS DESIGNED, real quota constraint found the
+  hard way.** `trading_ig`'s `IGService.fetch_historical_prices_by_epic_and_num_points` /
+  `_by_date_range` (resolution as a pandas-offset string like `"1Min"`, NOT the raw IG string
+  `"MINUTE"` — `conv_resol` needs the pandas form) DOES return genuine live minute data (pulled a
+  EURUSD bar timestamped within a minute of the request). BUT: IG's historical-price endpoint has
+  a real, scarce, account-level weekly data-point ALLOWANCE (the classic IG API limit, ~10,000
+  points/week for retail accounts) — separate from order/position/account endpoints, so this does
+  NOT affect actual trading capability, only this one endpoint. A single 7-day/1-minute pull
+  (7,234 points) was enough to fully exhaust it — the VERY NEXT call, even a 1-point request,
+  failed with `error.public-api.exceeded-account-historical-data-allowance`. **This account's IG
+  historical-price allowance is currently exhausted** (as of 2026-08-05, exact reset time
+  unknown — `IGService.log_allowance()`/the `data["allowance"]` field on a successful response
+  reports `remainingAllowance` + `allowanceExpiry` in seconds, worth checking once it's usable
+  again) as a direct, known side effect of this investigation. A 120s-poll-interval bot fetching
+  even a handful of points every cycle would exhaust a weekly quota like this in hours, not days
+  — the endpoint as used here is fundamentally the wrong shape for a live polling loop. IG does
+  have a separate real-time STREAMING price API (different quota, not yet investigated) that's
+  the more promising angle if this gets picked back up — untested, don't assume it works the same
+  way.
+
+DECISION (2026-08-05): user chose to hold off on building either fix for now and think it through
+further before touching auto_trader.py's core data path — nothing has been changed in the live
+loop yet, this section is purely documenting what was learned so a future session (or a future
+returning-user conversation) doesn't have to rediscover any of this, especially the IG allowance
+trap. When this gets picked back up: Alpaca-for-equities is close to a drop-in, low-risk win;
+IG-for-forex needs either the streaming API investigated properly (with fresh allowance,
+carefully, ideally against a route that ISN'T the same scarce weekly-points endpoint) or a much
+more conservative design (e.g., pulling a single point at a much lower cadence than every cycle)
+before it's worth building at all.
+
 === DIAGNOSTIC SCRIPT (added 2026-08-05) ===
 `python diagnose_bot.py` (top-level, next to auto_trader.py) — on-demand health check for
 whenever trade volume looks suspiciously low ("it should be making a few trades a day, why
