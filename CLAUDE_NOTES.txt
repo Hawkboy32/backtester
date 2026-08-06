@@ -1941,6 +1941,18 @@ simple fetch) that wasn't worth blocking on when OANDA's simpler request/respons
 available and the user already had a practice account ready to go.
 
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
+- **Trading 212's public API — worth checking back on, not actionable yet (2026-08-06, user's
+  own flag).** Docs: https://docs.trading212.com/api (their docs site is JS-rendered, didn't
+  fully load via fetch — pieced this together from search results instead). Currently: beta,
+  actively developed, separate demo (`demo.trading212.com/api/v0`) and live
+  (`live.trading212.com/api/v0`) environments, API key/secret auth, order placement (Market
+  live, +Limit/Stop/Stop-Limit in demo). Scoped to Invest/Stocks ISA accounts only as far as
+  could be confirmed — NOT CFD/forex, so it wouldn't touch the now-solved OANDA/forex side, only
+  potentially relevant for equities. Real open question, unconfirmed either way: does it expose
+  actual market-data/historical-candle endpoints, or is it account/order management only? That's
+  the one thing that would actually matter here (every broker investigation this week has come
+  down to data access, not order placement) — check their real docs directly next time this
+  comes up, the redoc.ly page needs a browser/JS to render, not a plain fetch.
 - **Conservative/aggressive risk dial — manual now, conviction/regime-driven "end game" later
   (2026-08-05, deferred until the current test phase finishes — user's own call).** Full
   discussion, in order, so the reasoning survives even if only the conclusion gets read later:
