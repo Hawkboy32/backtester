@@ -1831,7 +1831,38 @@ Fix (not yet applied — found end of day, deferred to next session): for
 `compute_qty_for_account(...)` — sizing/vol-target scaling is a BUY-only (new entry) concept;
 closing a position should always mean "sell what's actually held," full stop.
 
-=== OANDA FOR FOREX LIVE DATA — BUILT, WAITING ON ACCOUNT ACTIVATION (2026-08-06) ===
+=== OANDA FOR FOREX LIVE DATA — LIVE AND VERIFIED (2026-08-06) ===
+UPDATE (later same day): account finished activating, key authenticated — but that surfaced two
+real bugs in the request logic, both found live and fixed in order:
+1. OANDA rejects a `to` timestamp that's in the future outright ("Invalid value specified for
+   'to'. Time is in the future") — unlike Polygon, which just silently returns whatever's
+   available. Requesting through 23:59:59 of TODAY fails any time before the literal last
+   second of the UTC day, i.e. effectively always. Fixed: cap `to` at the real current moment.
+2. Bigger one: OANDA validates an IMPLIED candle count even for a plain from/to range with no
+   explicit `count` param, and rejects a wide one outright — "Maximum value for 'count'
+   exceeded" on the real 90-day 1-minute lookback (~90,000+ implied candles). The 5000-per-page
+   cap researched earlier was real but not the whole story: from+to doesn't just silently
+   truncate to 5000 the way earlier research suggested, it can hard-error on a wide range
+   before returning anything. Fixed by switching pagination to `from` + `count=5000`
+   (OANDA's actual sanctioned pagination shape per their own docs — from/to/count can't all be
+   combined anyway) instead of `from` + `to`, with the to-date cutoff now enforced by checking
+   each returned candle's own timestamp rather than sent to the API as a parameter.
+Verified live end-to-end after both fixes: full 90-day EUR/USD lookback returns 92,672 real
+candles in ~6 seconds, last bar essentially real-time. Restarted auto_trader.py — confirmed via
+`current_signals.json` directly that C:EURUSD now shows `"source": "OANDA (live)"` with a
+bar_timestamp within a minute of real time (matches the DDOG/MPWR/SWK equities fix from
+2026-08-05 exactly). diagnose_bot.py's own replay confirms the same `[OANDA]` tag. The mobile
+app picked this up with ZERO changes/restart of its own — it reads the same shared
+current_signals.json snapshot, confirmed via its own /signals endpoint showing the identical
+OANDA-sourced price and timestamp.
+Both open DDOG positions (MyAlpaca + IBKR Paper, from today's real VWAP MR entry) survived the
+auto_trader.py restart cleanly, confirming the "restart-safe" design claim made before doing
+it — position_attribution's positions.json (not in-memory) carried the attribution through
+with no gap, exactly as expected.
+This closes out the whole Polygon-EOD-only saga from 2026-08-05: BOTH equities (Alpaca) and
+forex (OANDA) now get genuine live intraday data for the auto-trader's real-time decisions;
+Polygon remains exactly where it belongs — backtesting/scanning over fully-closed historical
+days, never the live loop.
 UPDATE (later same day): key generated and saved in Settings, but the first real call
 (OandaDataClient().get_live_bars('C:EURUSD', ...)) returned 401 "Insufficient authorization
 to perform request." Ruled out the obvious code-side cause (wrong environment endpoint) —
