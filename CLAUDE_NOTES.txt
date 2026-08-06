@@ -1831,7 +1831,24 @@ Fix (not yet applied — found end of day, deferred to next session): for
 `compute_qty_for_account(...)` — sizing/vol-target scaling is a BUY-only (new entry) concept;
 closing a position should always mean "sell what's actually held," full stop.
 
-=== OANDA FOR FOREX LIVE DATA — BUILT, WAITING ON THE API KEY (2026-08-06) ===
+=== OANDA FOR FOREX LIVE DATA — BUILT, WAITING ON ACCOUNT ACTIVATION (2026-08-06) ===
+UPDATE (later same day): key generated and saved in Settings, but the first real call
+(OandaDataClient().get_live_bars('C:EURUSD', ...)) returned 401 "Insufficient authorization
+to perform request." Ruled out the obvious code-side cause (wrong environment endpoint) —
+confirmed the client correctly targets https://api-fxpractice.oanda.com (this account's a
+practice account) and the stored key has no whitespace/formatting issue. Researched the error:
+the #1 documented cause is a practice-vs-live token/environment mismatch, but the user's own
+OANDA UI showed "Your preferences are being processed — To change the setting, please come
+back later," and the practice account was only just opened — likely just needs time (the user's
+own estimate: up to 24h) for the account/API access to fully activate. Not a bug in what was
+built here. NEXT STEP: retest `OandaDataClient().get_live_bars(...)` once enough time has
+passed (try `python -c "from dotenv import load_dotenv; load_dotenv('.env'); from
+backtester.oanda_data import OandaDataClient; from datetime import datetime, timedelta,
+timezone; c = OandaDataClient(); to_date = datetime.now(timezone.utc).date().isoformat();
+from_date = (datetime.now(timezone.utc).date() - timedelta(days=2)).isoformat();
+print(c.get_live_bars('C:EURUSD', from_date, to_date, 1, 'minute').tail())"` from the
+backtester venv) — if it still 401s after a day or so, double-check the token was generated
+from the PRACTICE account's own token page specifically, not a live-account one.
 Closes the last gap from the Polygon EOD-only finding above: equities got fixed via Alpaca
 (see above), forex (C:EURUSD via IG) was left on Polygon because IG's own historical-price
 endpoint has a real weekly data-point allowance one test pull exhausted in a single call —
