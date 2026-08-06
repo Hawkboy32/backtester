@@ -1940,6 +1940,11 @@ implementation work (a persistent Lightstreamer subscription feeding a rolling b
 simple fetch) that wasn't worth blocking on when OANDA's simpler request/response shape was
 available and the user already had a practice account ready to go.
 
+=== PLAN: Saturday 2026-08-08 — tackle items 1-3 below ===
+User's own plan (2026-08-06): singleton guard fix, self-hosted ntfy/notifications, and the
+conservative/aggressive risk dial (see entries below) are all queued for Saturday 2026-08-08.
+Trading 212's API (also below) explicitly excluded — nothing actionable there yet.
+
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
 - **Trading 212's public API — worth checking back on, not actionable yet (2026-08-06, user's
   own flag).** Docs: https://docs.trading212.com/api (their docs site is JS-rendered, didn't
