@@ -33,9 +33,20 @@ def record_signal(
     price: float,
     conviction: float | None,
     bar_timestamp: str,
+    source: str | None = None,
+    recent_closes: list[float] | None = None,
+    levels: dict[str, float] | None = None,
 ) -> None:
     """Read-modify-write one ticker's entry. Never raises - a snapshot write
-    failing must never be allowed to interrupt the actual trading cycle."""
+    failing must never be allowed to interrupt the actual trading cycle.
+
+    source/recent_closes/levels are display-only additions for the mobile app
+    (so it can show what the strategy is actually looking at, not just the
+    final signal) - source is which feed the bars came from (e.g. a broker
+    nickname for live data, or "Polygon"), recent_closes is a short trailing
+    close-price series for a sparkline, levels is the strategy's own
+    Strategy.levels() output (see backtester.conviction.compute_levels).
+    """
     try:
         data = load_signals()
         data[ticker] = {
@@ -44,6 +55,9 @@ def record_signal(
             "price": price,
             "conviction": conviction,
             "bar_timestamp": bar_timestamp,
+            "source": source,
+            "recent_closes": recent_closes,
+            "levels": levels,
             "written_at": datetime.now(timezone.utc).isoformat(),
         }
         atomic_write_text(SIGNALS_PATH, json.dumps(data, indent=2))

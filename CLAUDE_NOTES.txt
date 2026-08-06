@@ -2543,6 +2543,22 @@ evaluated first, so extra targets are what get starved if the cap fills early). 
 target is exposed in the UI for now (the backend schema supports a list). The other 6 forex
 majors' epic resolution/sizing haven't been individually exercised live yet — only EUR/USD has.
 
+=== MOBILE APP DETAIL PASS (2026-08-06) ===
+User wanted to be able to "watch what [the bot's] looking at" from the mobile app, not just the
+final BUY/SELL/HOLD + conviction. Added a new optional `Strategy.levels(history, current) -> dict
+| None` hook (src/backtester/strategy.py), same fail-safe pattern as the existing `conviction()`
+hook (wrapped by `compute_levels()` in conviction.py — a buggy override never breaks a trade,
+DISPLAY ONLY, never sizes/gates anything). Implemented for the two strategies currently live
+(VWAP Mean Reversion: vwap/deviation_pct/entry_threshold_pct; Bollinger Mean Reversion:
+mid/lower/upper/num_std) — others return None until/unless given their own override.
+`current_signals.record_signal()` (and its one call site in `auto_trader.py::_trade_target`) now
+also publishes `source` (which feed the bars came from — a broker nickname + "(live)", or
+"Polygon") and `recent_closes` (last `RECENT_CLOSES_COUNT=30` closes, for a sparkline) alongside
+the existing signal/price/conviction fields — all zero extra Polygon calls, pure math/labels over
+data already fetched that cycle. The actual UI work (sparkline, freshness/source labels, levels
+readout) lives in the companion `trading-signals-mobile` repo (separate GitHub repo, see that
+repo's own CLAUDE_NOTES.txt) — this repo only had to publish the extra data.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,

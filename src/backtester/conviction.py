@@ -42,6 +42,16 @@ def compute_conviction(strategy: Strategy, history: pd.DataFrame, current: Bar) 
     return _generic_conviction(history, current)
 
 
+def compute_levels(strategy: Strategy, history: pd.DataFrame, current: Bar) -> dict[str, float] | None:
+    """Return the strategy's current reference levels (see Strategy.levels), or
+    None if it doesn't define any. DISPLAY ONLY. A buggy hook never propagates —
+    same fail-safe pattern as compute_conviction."""
+    try:
+        return strategy.levels(history, current)
+    except Exception:  # noqa: BLE001 — an optional display hook must never break a trade
+        return None
+
+
 def _generic_conviction(history: pd.DataFrame, current: Bar, lookback: int = 20) -> float:
     """Fallback strength from entry-bar context, for strategies without a bespoke
     hook. v1 heuristic (NOT ground truth): blend (a) the size of the current bar's

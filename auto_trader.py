@@ -77,11 +77,12 @@ from backtester.brokers.base import BrokerAccount, OrderSide
 from backtester.data import PolygonClient, PolygonError
 from backtester.execution import AccountOrder, SizingMode, compute_qty_for_account, execute_order_across_accounts
 from backtester.execution_log import log_results
-from backtester.conviction import compute_conviction
+from backtester.conviction import compute_conviction, compute_levels
 from backtester.strategies import STRATEGY_REGISTRY, build_strategy
 from backtester.strategy import Bar
 
 LOOKBACK_DAYS = 90  # enough history for any strategy's default window, even on daily bars
+RECENT_CLOSES_COUNT = 30  # trailing closes published for the mobile app's sparkline (see current_signals.py)
 VOL_REGIME_LOOKBACK_DAYS = 1100  # daily-bar history fetched for the GARCH regime
 
 # In-process cache: {ticker: (date_computed, RegimeInfo | None)}. The regime is a
@@ -251,6 +252,7 @@ def _trade_target(
     # through to Polygon on any failure, empty result, or when no target
     # account can supply live data for this ticker's asset class.
     bars = None
+    source_label = None
     live_data_account = _pick_live_data_account(ticker, broker_accounts, account_asset_classes)
     if live_data_account is not None:
         try:
@@ -260,6 +262,8 @@ def _trade_target(
             )
             if bars.empty:
                 bars = None
+            else:
+                source_label = f"{live_data_account.nickname} (live)"
         except Exception as e:  # noqa: BLE001
             status.last_error = f"{ticker}: live data fetch via {live_data_account.nickname} failed: {e}"
             bars = None
@@ -270,6 +274,7 @@ def _trade_target(
                 ticker=ticker, from_date=from_date, to_date=to_date,
                 multiplier=control.multiplier, timespan=control.timespan,
             )
+            source_label = "Polygon"
         except Exception as e:  # noqa: BLE001
             status.last_error = f"{ticker}: data fetch failed: {e}"
             return
@@ -290,15 +295,20 @@ def _trade_target(
     signal = strategy.on_bar(bars, current)
 
     # Publish this cycle's read for the ticker regardless of hold/blocked/
-    # executed outcome below — see current_signals.py. Conviction here is a
-    # SEPARATE, display-only computation from entry_conviction further down
-    # (which stays BUY-only, for sizing/attribution); costs zero extra
-    # Polygon calls since it's pure math over bars already fetched above.
+    # executed outcome below — see current_signals.py. Conviction/levels here
+    # are SEPARATE, display-only computations from entry_conviction further
+    # down (which stays BUY-only, for sizing/attribution); both cost zero
+    # extra Polygon calls since they're pure math over bars already fetched
+    # above. recent_closes lets the mobile app draw a sparkline of what the
+    # strategy is actually looking at without a second fetch of its own.
     snapshot_conviction = compute_conviction(strategy, bars, current) if signal.value != "hold" else None
+    snapshot_levels = compute_levels(strategy, bars, current)
     current_signals.record_signal(
         ticker=ticker, strategy_name=strategy_name, signal=signal.value,
         price=float(current.close), conviction=snapshot_conviction,
-        bar_timestamp=current.timestamp.isoformat(),
+        bar_timestamp=current.timestamp.isoformat(), source=source_label,
+        recent_closes=[float(c) for c in bars["close"].tail(RECENT_CLOSES_COUNT)],
+        levels=snapshot_levels,
     )
 
     if signal.value == "hold":

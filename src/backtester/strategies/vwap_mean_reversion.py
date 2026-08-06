@@ -94,3 +94,20 @@ class VwapMeanReversionStrategy(Strategy):
         if curr_deviation_pct >= 0:
             return None  # not actually below VWAP at all right now
         return (-curr_deviation_pct - self.entry_deviation_pct) / self.entry_deviation_pct
+
+    def levels(self, history: pd.DataFrame, current: Bar) -> dict[str, float] | None:
+        """Session VWAP, this bar's %-deviation from it, and the entry threshold
+        - what this strategy is actually watching, for display (#detail request)."""
+        if len(history) < self.min_bars + 1:
+            return None
+        vwap = session_vwap(history)
+        curr_vwap = vwap.iloc[-1]
+        if pd.isna(curr_vwap):
+            return None
+        curr_close = history["close"].iloc[-1]
+        deviation_pct = (curr_close - curr_vwap) / curr_vwap * 100
+        return {
+            "vwap": float(curr_vwap),
+            "deviation_pct": float(deviation_pct),
+            "entry_threshold_pct": -self.entry_deviation_pct,
+        }

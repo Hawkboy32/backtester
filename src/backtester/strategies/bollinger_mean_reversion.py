@@ -60,3 +60,21 @@ class BollingerMeanReversionStrategy(Strategy):
         if half_width <= 0:
             return None
         return (curr_lower - curr_close) / half_width
+
+    def levels(self, history: pd.DataFrame, current: Bar) -> dict[str, float] | None:
+        """Mid/upper/lower band values this bar - what this strategy is actually
+        watching, for display (#detail request)."""
+        if len(history) < self.period + 1:
+            return None
+        closes = history["close"]
+        mid = closes.rolling(self.period).mean()
+        std = closes.rolling(self.period).std()
+        curr_mid, curr_std = mid.iloc[-1], std.iloc[-1]
+        if pd.isna(curr_mid) or pd.isna(curr_std):
+            return None
+        return {
+            "mid": float(curr_mid),
+            "lower": float(curr_mid - self.num_std * curr_std),
+            "upper": float(curr_mid + self.num_std * curr_std),
+            "num_std": self.num_std,
+        }

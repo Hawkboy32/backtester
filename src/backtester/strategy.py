@@ -79,3 +79,13 @@ class Strategy(ABC):
         natural strength exists (e.g. how far past a band/threshold price is).
         """
         return None
+
+    def levels(self, history: pd.DataFrame, current: Bar) -> dict[str, float] | None:
+        """Optional: the reference values (band/VWAP/threshold levels etc.) this
+        strategy is currently watching, for display purposes only — e.g. so a
+        human can see WHY a signal fired, not just that it did. Called every bar
+        (not just on entry), unlike conviction(). DISPLAY ONLY — never consulted
+        for sizing or gating. Default None; override where the strategy has
+        natural reference levels worth surfacing (see backtester.conviction's
+        compute_levels() for the safe wrapper callers should use)."""
+        return None
