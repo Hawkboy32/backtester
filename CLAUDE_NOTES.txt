@@ -1944,6 +1944,9 @@ available and the user already had a practice account ready to go.
 User's own plan (2026-08-06): singleton guard fix, self-hosted ntfy/notifications, and the
 conservative/aggressive risk dial (see entries below) are all queued for Saturday 2026-08-08.
 Trading 212's API (also below) explicitly excluded — nothing actionable there yet.
+Also queued for the same day (added later, same conversation): Mobile_App's floating
+"chat head" bubble idea — see Mobile_App's own CLAUDE_NOTES.txt for the full design
+discussion (Android Bubbles API, no overlay permission needed).
 
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
 - **Trading 212's public API — worth checking back on, not actionable yet (2026-08-06, user's
