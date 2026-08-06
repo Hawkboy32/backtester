@@ -78,13 +78,19 @@ class OandaDataClient:
         self.base_url = PRACTICE_BASE_URL if practice else LIVE_BASE_URL
         self.session = session or requests.Session()
 
-    def _get_page(self, instrument: str, granularity: str, from_iso: str, to_iso: str) -> list[dict]:
+    def _get_page(self, instrument: str, granularity: str, from_iso: str, count: int) -> list[dict]:
+        # `from` + `count` (not `from` + `to`) deliberately — OANDA validates an
+        # IMPLIED candle count even for a plain from/to range and rejects a wide
+        # one outright ("Maximum value for 'count' exceeded", found live
+        # 2026-08-06 on a 90-day 1-minute request — ~90,000+ implied candles).
+        # from/to/count can't all be combined anyway (OANDA's own docs); this is
+        # the sanctioned pagination shape, not just a workaround.
         url = f"{self.base_url}/v3/instruments/{instrument}/candles"
         params = {
             "price": "M",  # midpoint — one clean OHLC series, not separate bid/ask
             "granularity": granularity,
             "from": from_iso,
-            "to": to_iso,
+            "count": count,
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
         resp = self.session.get(url, params=params, headers=headers, timeout=30)
@@ -118,24 +124,31 @@ class OandaDataClient:
         # — found live 2026-08-06: requesting through 23:59:59 of TODAY errors
         # with "Invalid value specified for 'to'. Time is in the future" any
         # time before the last second of the UTC day, which is effectively
-        # always. Cap at the real current moment instead.
+        # always. Cap at the real current moment instead; used below as the
+        # pagination stop boundary (see _get_page's from+count docstring for
+        # why `to` isn't sent to the API directly).
         end_of_day = pd.Timestamp(f"{to_date}T23:59:59Z")
-        now = pd.Timestamp.now(tz="UTC")
-        to_iso = min(end_of_day, now).strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_ts = min(end_of_day, pd.Timestamp.now(tz="UTC"))
         cursor = f"{from_date}T00:00:00Z"
 
         rows: list[dict] = []
         seen_times: set[str] = set()
         for _ in range(MAX_PAGES):
-            candles = self._get_page(instrument, granularity, cursor, to_iso)
+            candles = self._get_page(instrument, granularity, cursor, MAX_CANDLES_PER_REQUEST)
             if not candles:
                 break
 
             new_last_time = None
+            reached_end = False
             for c in candles:
                 if not c.get("complete", True):
                     continue  # skip the still-forming current candle — same "closed bar only" contract as Polygon/Alpaca
                 t = c["time"]
+                ts = pd.Timestamp(t)
+                ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+                if ts > to_ts:
+                    reached_end = True  # candles are chronological — nothing after this page matters
+                    break
                 if t in seen_times:
                     continue  # OANDA's next page overlaps its own last candle
                 seen_times.add(t)
@@ -144,15 +157,15 @@ class OandaDataClient:
                 o, h, l, close = float(mid["o"]), float(mid["h"]), float(mid["l"]), float(mid["c"])
                 volume = float(c.get("volume", 0))
                 rows.append({
-                    "timestamp": pd.Timestamp(t, tz="UTC") if pd.Timestamp(t).tzinfo is None else pd.Timestamp(t).tz_convert("UTC"),
+                    "timestamp": ts,
                     "open": o, "high": h, "low": l, "close": close,
                     "volume": volume,
                     "vwap": (o + h + l + close) / 4,  # OANDA has no vwap field — simple 4-point approximation
                     "transactions": int(volume),  # OANDA's "volume" is tick count, the closest analog to Polygon's transactions
                 })
 
-            if len(candles) < MAX_CANDLES_PER_REQUEST or new_last_time is None:
-                break  # last page (fewer than the cap came back, or nothing new — done)
+            if reached_end or len(candles) < MAX_CANDLES_PER_REQUEST or new_last_time is None:
+                break  # reached the to-date boundary, the present, or nothing new — done
             cursor = new_last_time
 
         columns = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
