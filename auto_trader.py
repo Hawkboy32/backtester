@@ -78,6 +78,7 @@ from backtester.data import PolygonClient, PolygonError
 from backtester.execution import AccountOrder, SizingMode, compute_qty_for_account, execute_order_across_accounts
 from backtester.execution_log import log_results
 from backtester.conviction import compute_conviction, compute_levels
+from backtester.oanda_data import OandaDataClient, OandaError
 from backtester.strategies import STRATEGY_REGISTRY, build_strategy
 from backtester.strategy import Bar
 
@@ -193,23 +194,51 @@ def _resolve_targets(control) -> list[tuple[str, str, dict, bool]]:
     return primary + extra
 
 
-def _pick_live_data_account(
+_oanda_client: OandaDataClient | None | bool = False  # False = not checked yet, None = checked, unavailable
+
+
+def _get_oanda_client() -> OandaDataClient | None:
+    """Lazily built, cached for the process lifetime — OANDA is a plain data
+    client (no session/auth handshake to keep warm like IG's), so the only
+    reason to cache is avoiding re-reading the env var and re-raising
+    OandaError every single cycle once we already know it's unconfigured.
+    Returns None (falls through to Polygon) until OANDA_API_KEY is set —
+    expected to be unset until the user generates the key, see
+    CLAUDE_NOTES.txt."""
+    global _oanda_client
+    if _oanda_client is False:
+        try:
+            _oanda_client = OandaDataClient()
+        except OandaError:
+            _oanda_client = None
+    return _oanda_client
+
+
+def _pick_live_data_source(
     ticker: str, broker_accounts: list[BrokerAccount], account_asset_classes: dict[str, frozenset[str]],
-) -> BrokerAccount | None:
-    """First target account that both (a) can trade this ticker's asset
-    class and (b) exposes get_live_bars — currently only AlpacaBroker
-    (equities). Not account_asset_class-eligibility related (drawdown-
-    blocked / market-closed accounts are still fine to READ data from, just
-    not to trade on) — deliberately ignores blocked_account_ids/
+) -> BrokerAccount | OandaDataClient | None:
+    """Find a live-data source for this ticker, preferring (in order): OANDA
+    for forex (a data-only client, never a target account — see
+    CLAUDE_NOTES.txt for why: IG's own historical-price endpoint has a real
+    weekly allowance too scarce for a 120s polling loop, one test pull
+    exhausted it), then the first target account that both (a) can trade
+    this ticker's asset class and (b) exposes get_live_bars — currently only
+    AlpacaBroker (equities). Not account_asset_class-eligibility related
+    (drawdown-blocked / market-closed accounts are still fine to READ data
+    from, just not to trade on) — deliberately ignores blocked_account_ids/
     market_closed_account_ids, unlike the order-routing loop below.
 
-    Forex (IG) has no entry here yet: its own live-data endpoint works but
-    has a weekly data-point allowance far too scarce for a 120s polling
-    loop (one test pull exhausted it — see CLAUDE_NOTES.txt), so forex
-    stays on Polygon until that gets a proper design. Returns None (falls
-    through to Polygon) for any ticker with no eligible account.
+    Returns None (falls through to Polygon) when nothing above is available
+    — e.g. OANDA_API_KEY isn't set yet, or the ticker is neither forex nor
+    covered by a live-data-capable broker account.
     """
     ticker_asset_class = accounts_module.infer_asset_class(ticker)
+
+    if ticker_asset_class == "forex":
+        oanda = _get_oanda_client()
+        if oanda is not None:
+            return oanda
+
     for broker_account in broker_accounts:
         if ticker_asset_class not in account_asset_classes.get(broker_account.account_id, frozenset()):
             continue
@@ -244,16 +273,16 @@ def _trade_target(
     from_date = (datetime.now(timezone.utc).date() - timedelta(days=LOOKBACK_DAYS)).isoformat()
     to_date = _today_str()
 
-    # Prefer a broker's own live data (currently only Alpaca/equities — see
-    # _pick_live_data_account) over Polygon: this account's Polygon plan has
-    # NO same-day intraday data at all (confirmed 2026-08-05, see
+    # Prefer live data (Alpaca for equities, OANDA for forex once configured
+    # — see _pick_live_data_source) over Polygon: this account's Polygon plan
+    # has NO same-day intraday data at all (confirmed 2026-08-05, see
     # CLAUDE_NOTES.txt), so a minute-bar strategy fed Polygon-only bars is
     # really just re-evaluating yesterday's frozen close all day. Falls
-    # through to Polygon on any failure, empty result, or when no target
-    # account can supply live data for this ticker's asset class.
+    # through to Polygon on any failure, empty result, or when no live
+    # source is available for this ticker's asset class.
     bars = None
     source_label = None
-    live_data_account = _pick_live_data_account(ticker, broker_accounts, account_asset_classes)
+    live_data_account = _pick_live_data_source(ticker, broker_accounts, account_asset_classes)
     if live_data_account is not None:
         try:
             bars = live_data_account.get_live_bars(

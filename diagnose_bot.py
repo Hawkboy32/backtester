@@ -172,13 +172,22 @@ def check_risk_guards(account_ids: list[str]) -> None:
 
 
 def _pick_live_data_account(ticker: str, broker_accounts: list, account_asset_classes: dict) -> object | None:
-    """Same selection as auto_trader.py's own _pick_live_data_account (kept
+    """Same selection as auto_trader.py's own _pick_live_data_source (kept
     as an independent copy rather than a cross-import between top-level
-    scripts, matching this project's existing pattern) - currently only
-    AlpacaBroker (equities) exposes get_live_bars. See CLAUDE_NOTES.txt for
-    why forex (IG) isn't here yet (its own live-data endpoint has a weekly
-    allowance far too scarce for repeated polling)."""
+    scripts, matching this project's existing pattern): OANDA for forex
+    (once OANDA_API_KEY is set - data only, IG stays the only forex
+    execution venue, see CLAUDE_NOTES.txt for why IG's own historical-price
+    endpoint isn't used for this), else the first target account exposing
+    get_live_bars - currently only AlpacaBroker (equities)."""
     ticker_asset_class = accounts_module.infer_asset_class(ticker)
+
+    if ticker_asset_class == "forex":
+        try:
+            from backtester.oanda_data import OandaDataClient, OandaError
+            return OandaDataClient()
+        except OandaError:
+            pass  # OANDA_API_KEY not set yet - fall through below
+
     for broker_account in broker_accounts:
         if ticker_asset_class not in account_asset_classes.get(broker_account.account_id, frozenset()):
             continue

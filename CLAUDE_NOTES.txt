@@ -1831,6 +1831,67 @@ Fix (not yet applied — found end of day, deferred to next session): for
 `compute_qty_for_account(...)` — sizing/vol-target scaling is a BUY-only (new entry) concept;
 closing a position should always mean "sell what's actually held," full stop.
 
+=== OANDA FOR FOREX LIVE DATA — BUILT, WAITING ON THE API KEY (2026-08-06) ===
+Closes the last gap from the Polygon EOD-only finding above: equities got fixed via Alpaca
+(see above), forex (C:EURUSD via IG) was left on Polygon because IG's own historical-price
+endpoint has a real weekly data-point allowance one test pull exhausted in a single call —
+unusable for a 120s polling loop. Researched two alternatives (with the user, before building):
+IG's own STREAMING API (Lightstreamer) confirmed via IG Labs' own docs to support genuine
+CHART:{epic}:1MINUTE OHLC candle subscriptions on a SEPARATE, non-points-based quota from the
+historical endpoint — no new account needed, but a materially different integration shape
+(persistent subscription + background buffer, not a simple request/response fetch like every
+other data source in this codebase) — parked for later, flagged below. OANDA's free practice
+account won out for now: confirmed via OANDA's own docs genuinely free, no ID/documents needed
+for demo (a competing data vendor's blog claimed otherwise — wrong, or describing something
+else), generous rate limits (30 req/s REST, 20 concurrent streams), and a plain REST candles
+endpoint that's a natural fit for the existing "fetch bars, get a DataFrame back" pattern.
+
+Built (2026-08-06), NOT yet live-tested — the user has an OANDA practice account but hasn't
+generated the API key yet (will do once home):
+- `src/backtester/oanda_data.py` (new) — `OandaDataClient.get_live_bars(ticker, from_date,
+  to_date, multiplier, timespan)`, same output shape as PolygonClient.get_aggregates()/
+  AlpacaBroker.get_live_bars() (columns open/high/low/close/volume/vwap/transactions, UTC-
+  indexed) — zero strategy-code changes needed to consume it. Deliberately NOT a BrokerAccount
+  subclass: OANDA is data-only here, IG remains the ONLY forex execution venue (the user's own
+  framing: "only making the IG connection when putting the trade order in but can still see the
+  prices" — for a pair as liquid as EUR/USD, prices across major forex venues track each other
+  far more tightly than the same-instrument gap between two different stock exchanges, so
+  deciding off OANDA's quote while filling on IG is a reasonable, low-risk split).
+  Handles a real gotcha confirmed via OANDA's own docs: candle requests cap at 5000 per call
+  REGARDLESS of count vs from/to — a 90-day 1-minute lookback is ~90,000+ candles, so this
+  paginates internally (advances the from-cursor past the last COMPLETE candle each page,
+  de-dupes on timestamp) or it would silently truncate to whatever the first page covers.
+  `"C:EURUSD"` -> `"EUR_USD"` ticker conversion (`_to_oanda_instrument`).
+- `auto_trader.py`: `_pick_live_data_account` renamed `_pick_live_data_source` (return type
+  widened to `BrokerAccount | OandaDataClient | None`) — now tries OANDA FIRST for any forex
+  ticker (via a lazily-built, process-lifetime-cached `_get_oanda_client()`), falling through to
+  the existing broker-account search (Alpaca for equities) if that's empty, same as before.
+  `diagnose_bot.py` and Mobile_App's `signal_service.py` (its own direct-fetch fallback, for
+  when auto_trader.py itself isn't running) got the identical treatment for consistency — same
+  "each top-level script keeps its own copy rather than cross-importing" pattern already
+  established for the Alpaca fix.
+- `keystore.py`: added `"OANDA_API_KEY": "OANDA (forex live data)"` to `KNOWN_KEYS` — shows up
+  in the dashboard's Settings > API keys section automatically (fully generic UI, no other
+  app.py change needed), same as the Polygon key. **This is the ONLY thing left to do once
+  home**: generate the OANDA API key, paste it into Settings, restart auto_trader.py (env vars
+  are only read at process startup, same as every other config change in this project) — no
+  code changes needed, everything else is already wired and tested.
+- Verified without a real key (none exists yet): ticker conversion round-tripped correctly for
+  multiple pairs; the full pagination + incomplete-candle-skipping + schema logic verified
+  against mocked API responses matching OANDA's own documented schema exactly (confirmed
+  triggers a second page correctly, skips a still-forming candle, produces the right column
+  set); confirmed zero regression — `_pick_live_data_source`/`compute_current_signal` both
+  still correctly fall through to Polygon for forex exactly as before when `OANDA_API_KEY`
+  isn't set (`OandaDataClient()` raises `OandaError`, caught and treated as "unavailable" at
+  every call site). What's NOT yet verified: an actual live OANDA API call — impossible without
+  the real key, first priority once it's set.
+
+IG's own streaming API remains a live option for later — no new account needed, and it's
+literally IG's own feed so zero cross-venue price question at all — but is real, separate
+implementation work (a persistent Lightstreamer subscription feeding a rolling buffer, not a
+simple fetch) that wasn't worth blocking on when OANDA's simpler request/response shape was
+available and the user already had a practice account ready to go.
+
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
 - **Conservative/aggressive risk dial — manual now, conviction/regime-driven "end game" later
   (2026-08-05, deferred until the current test phase finishes — user's own call).** Full
