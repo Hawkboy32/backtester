@@ -113,7 +113,15 @@ class OandaDataClient:
             raise OandaError(f"Unsupported timespan/multiplier for OANDA: {timespan}/{multiplier}")
 
         instrument = _to_oanda_instrument(ticker)
-        to_iso = f"{to_date}T23:59:59Z"
+        # OANDA rejects a `to` timestamp that's in the future outright (unlike
+        # Polygon, which silently just returns whatever's actually available)
+        # — found live 2026-08-06: requesting through 23:59:59 of TODAY errors
+        # with "Invalid value specified for 'to'. Time is in the future" any
+        # time before the last second of the UTC day, which is effectively
+        # always. Cap at the real current moment instead.
+        end_of_day = pd.Timestamp(f"{to_date}T23:59:59Z")
+        now = pd.Timestamp.now(tz="UTC")
+        to_iso = min(end_of_day, now).strftime("%Y-%m-%dT%H:%M:%SZ")
         cursor = f"{from_date}T00:00:00Z"
 
         rows: list[dict] = []
