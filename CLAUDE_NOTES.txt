@@ -1963,7 +1963,27 @@ login + password-confirmed stop/re-arm buttons) recorded in Mobile_App's own CLA
 since that's where most of the actual work lands — this entry is just the dashboard-side
 cross-reference so it isn't missed when picking up backtester work Saturday.
 
+Also queued (2026-08-07): OANDA as a real, order-placing account in the accounts roster (not
+just a data source) — see the PENDING IDEAS entry immediately below for the design. User asked
+about it, chose to log it for Saturday rather than build it in the moment.
+
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
+- **OANDA paper account as a real execution venue, not just live data (2026-08-07, user's own
+  ask).** Today `oanda_data.py` is GET-only (candles), OANDA isn't in `accounts.py`'s
+  `BROKER_META`/`SUPPORTED_BROKERS`, so it can't be linked as an account at all — IG remains the
+  only thing that actually places forex trades. It's real, doable work to change that: OANDA's
+  v20 API supports order placement (`POST /v3/accounts/{id}/orders`) on both the practice and
+  live environments, so a full `OandaBroker(BrokerAccount)` — implementing
+  `submit_market_order`/`get_positions`/`get_account_snapshot`/`get_equity_history`/
+  `get_market_clock`, same shape as `ig.py`/`alpaca.py` — could be added, then registered in
+  `BROKER_META` (paper-supported, forex asset class, `has_market_hours=True`) with a normal
+  keyring-backed link form in the Accounts tab, using the practice account the user already has
+  set up. Explicitly scoped to PAPER only when this gets built (matches
+  [[trading-bot-goals-and-risk-posture]]'s cautious-by-default posture) — going live is a
+  separate, later decision. Once linked, it would also show up on the mobile side for free via
+  the already-designed market-open/closed + `trading_accounts` feature (see Mobile_App's own
+  CLAUDE_NOTES.txt) — no extra mobile work needed, that field was designed to carry exactly this.
+  Not started — logged only, per the user's own choice to defer to Saturday rather than build now.
 - **Trading 212's public API — worth checking back on, not actionable yet (2026-08-06, user's
   own flag).** Docs: https://docs.trading212.com/api (their docs site is JS-rendered, didn't
   fully load via fetch — pieced this together from search results instead). Currently: beta,
