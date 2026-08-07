@@ -120,6 +120,38 @@ def record_realized_trade(
     return row_id
 
 
+def list_recent_trades(limit: int = 50) -> list[dict]:
+    """Most recent closed round trips across every (ticker, strategy) combo,
+    newest first — for the mobile app's trade-history view (#31). Excludes
+    the literal 'mock-1' account_id: early-development test/mock rows, not a
+    real linked account (see broker_accounts.json for what those look like —
+    real UUIDs, not a human-readable placeholder), which would be actively
+    misleading shown in a display of real trading activity rather than a
+    display nuance worth silently tolerating.
+    """
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT ticker, strategy_name, is_paper, entry_time, entry_price,
+                      exit_time, exit_price, qty, pnl, pnl_pct, conviction
+               FROM live_trades
+               WHERE account_id != 'mock-1'
+               ORDER BY exit_time DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+
+    columns = [
+        "ticker", "strategy_name", "is_paper", "entry_time", "entry_price",
+        "exit_time", "exit_price", "qty", "pnl", "pnl_pct", "conviction",
+    ]
+    trades = []
+    for row in rows:
+        trade = dict(zip(columns, row))
+        trade["is_paper"] = bool(trade["is_paper"])
+        trades.append(trade)
+    return trades
+
+
 def recent_performance(ticker: str, strategy_name: str, lookback_n: int = 20) -> PerformanceSnapshot:
     """Rolling performance for one (ticker, strategy) combo from its most
     recent `lookback_n` closed live/paper trades, oldest-first internally for
