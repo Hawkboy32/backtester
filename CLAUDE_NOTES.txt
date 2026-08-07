@@ -1944,6 +1944,15 @@ available and the user already had a practice account ready to go.
 User's own plan (2026-08-06): singleton guard fix, self-hosted ntfy/notifications, and the
 conservative/aggressive risk dial (see entries below) are all queued for Saturday 2026-08-08.
 Trading 212's API (also below) explicitly excluded — nothing actionable there yet.
+UPDATE (2026-08-07): with spare time on the same day, did a "simple ones now, save the bigger
+ones for Saturday" pass — pulled forward and shipped 5 items that turned out contained enough:
+singleton guard fix (this list's own item 1, verified live), the Z Flip cover-screen widget
+(verified by the user on the real device: "works perfectly"), a mobile backend watchdog +
+auto-start, a roster health view, and a trade history screen (the latter three, new — see
+Mobile_App's own CLAUDE_NOTES.txt). Item 1 below is DONE as a result; ntfy and the risk dial
+remain, both genuinely bigger (new server infra / needs backtesting sweeps first) — still
+Saturday's real work, alongside the floating bubble, open positions + P&L, bigger chart on tap,
+local notifications, and the dashboard 2FA + mobile login/remote-stop system.
 Also queued for the same day (added later, same conversation): Mobile_App's floating
 "chat head" bubble idea — see Mobile_App's own CLAUDE_NOTES.txt for the full design
 discussion (Android Bubbles API, no overlay permission needed).
@@ -2029,25 +2038,17 @@ cross-reference so it isn't missed when picking up backtester work Saturday.
   fixed-dollar-sizing engine change and the drawdown-breaker post-hoc analysis are separate,
   smaller follow-ups once the first sweep results are in. Nothing built yet — this whole entry is
   a discussion record, not a design decision.
-- **Fix `_another_instance_alive()`'s singleton guard — real process-liveness check, not just
-  heartbeat age (2026-08-04, priority: sooner than the ntfy/Pi batch below — once this current
-  test phase finishes).** Found live: after the laptop was shut down, `auto_trader.py` died
-  mid-cycle without updating `status.json`. On reboot, EVERY restart attempt (the auto-start
-  shortcut's own, and several manual ones) was silently blocked — the guard
-  (`auto_trader.py` ~line 557) only checks `datetime.now() - last_heartbeat < max(300, 3 *
-  poll_interval_seconds)` (~6 min with the current 120s poll interval), never whether that PID
-  is an actual running process. A heartbeat written moments before a hard kill still "looks
-  fresh" for up to 6 minutes, so nothing could restart in that window — invisible to the user
-  since it runs headless via `pythonw.exe` (no console, no error shown). Worked around this
-  time by manually correcting `status.json`'s `running` field to `False` (the honest truth,
-  once actual process-liveness was confirmed via `tasklist`/searching by commandline) before
-  relaunching. **Real fix**: check actual OS process liveness (e.g. `psutil.pid_exists(pid)` —
-  not currently a dependency, would need adding — or a Windows-specific `tasklist`/`OpenProcess`
-  check) in addition to/instead of pure heartbeat age, so a genuinely dead process never blocks
-  a legitimate restart regardless of how recently it died. Net risk from the gap as it stands:
-  not double-trading (the guard errs safe, just too conservatively) but the bot can be silently
-  offline during market hours for the full ~6-minute window with no visible sign anything's
-  wrong — the exact blind spot the notification-coverage idea below would also help catch.
+- **DONE 2026-08-07 — singleton guard now checks real process liveness, not just heartbeat
+  age.** Was: after the laptop was shut down 2026-08-04, `auto_trader.py` died mid-cycle without
+  updating `status.json`, and every restart attempt was silently blocked because the guard only
+  checked heartbeat age (a dead process's last heartbeat still "looks fresh" for up to ~6
+  minutes) — worked around manually each time it recurred (several times this week). Fixed:
+  `_another_instance_alive()` now requires BOTH a real, live OS process (`_is_pid_alive()`,
+  `tasklist`-based) AND a recent heartbeat — closes the original gap without introducing a new
+  one (PID-only would incorrectly block on a hung-but-not-crashed process). Tested against the
+  exact 2026-08-04 scenario plus two edge cases via mocked load_status/_is_pid_alive. Verified
+  live the same day: restarted cleanly on the first try, no manual status.json correction needed
+  for the first time all week.
 - **Self-hosted ntfy + richer notification coverage (2026-08-04, deferred until testing is done,
   the bot is running consistently, and the Raspberry Pi is being set up).** Two related upgrades
   to `notifications.py`, discussed but explicitly parked until the Pi work happens (self-hosting
