@@ -2072,6 +2072,38 @@ about it, chose to log it for Saturday rather than build it in the moment.
   these results are read Saturday — read the .jsonl, group by (bucket, strategy), compare mean
   Sharpe/pct_profitable across the 5 target_vol_ann values per group to see whether tighter or
   looser sizing actually helped risk-adjusted returns, before deciding the dial's real range.
+
+  **DONE 2026-08-07/08 overnight — all 90 scans completed cleanly in 3993s (~66min), zero
+  errors.** Per (bucket, strategy) group, mean Sharpe across the 5 target_vol_ann values [10, 15,
+  20, 25, 30], with pct-of-folds-positive and total trades (same across a group — sizing doesn't
+  change trade count, only position size):
+  - Equities/VWAP MR: 1.01 → 1.19 → 1.26 → 1.28 → 1.26 (83% folds positive throughout). Peaks at
+    25, essentially flat 20-30.
+  - Equities/Bollinger MR: 1.63 → 1.79 → 1.89 → 1.95 → **2.00 (best)** (67%→83% folds positive).
+    Monotonically improves all the way to 30 — the upper end of the tested range, not yet a peak.
+  - Gold-Silver/VWAP MR: 0.74 → 0.83 → 0.91 → 0.97 → **1.04 (best)** (67%→83% folds positive).
+    Same shape as equities/VWAP MR — monotonically improves to 30, not yet peaked.
+  - Gold-Silver/Bollinger MR: **0.25 (best, at vol=10)** → 0.16 → 0.12 → 0.14 → 0.17 (flat 50%
+    folds positive throughout). Weak edge everywhere (Sharpe 0.12-0.25) — the only group where
+    LOWER sizing won, but this strategy/asset pairing isn't a strong candidate regardless of the
+    dial.
+  - Forex/VWAP MR: -0.01 → -0.07 → -0.07 → -0.07 → -0.07 (17% folds positive throughout, never
+    positive). Confirms the existing forex/VWAP MR finding (tuned entry_deviation_pct=0.2% is
+    still only marginal, see "Phase 3" entries above) — sizing can't fix a strategy with no real
+    edge on this pairing.
+  - Forex/Bollinger MR: 3.04 → 3.05 → 3.05 → 3.05 → **3.05 (best, effectively flat)** (83% folds
+    positive throughout). The strongest strategy in the whole sweep by far, but essentially
+    insensitive to the sizing dial — small sample though (36 total trades across all 3 windows).
+
+  **Reading across all six groups**: no case where a HIGHER vol-target ever hurt a strategy that
+  already had a real edge — the dial only ever helped or was neutral, never harmful, within the
+  10-30% range tested. Two groups (equities/Bollinger MR, gold-silver/VWAP MR) hadn't peaked yet
+  at 30%, meaning the "Aggressive" end of the eventual dial could reasonably go higher than 30%
+  for those specifically if wanted. The two structurally weak legs (gold-silver/Bollinger MR,
+  forex/VWAP MR) stay weak/negative regardless of sizing — a reminder the dial adjusts bet size on
+  an EXISTING edge, it doesn't create one; those two aren't good candidates for going aggressive
+  on regardless of what the dial ends up doing. Ready to use when Saturday's risk-dial work
+  starts — this answers the axis-2b question the "next concrete step" above was waiting on.
 - **DONE 2026-08-07 — singleton guard now checks real process liveness, not just heartbeat
   age.** Was: after the laptop was shut down 2026-08-04, `auto_trader.py` died mid-cycle without
   updating `status.json`, and every restart attempt was silently blocked because the guard only
