@@ -664,15 +664,50 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
     return status
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """Real OS-level process-liveness check, independent of anything either
+    process wrote to disk — see diagnose_bot.py's identical helper, which
+    exists for the same reason on the read-only diagnostic side."""
+    if os.name == "nt":
+        import subprocess
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return str(pid) in out.stdout
+        except Exception:  # noqa: BLE001
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def _another_instance_alive() -> bool:
-    """True if another auto-trader already looks alive — a fresh heartbeat from a
-    recent cycle. Guards against running two instances at once (which would
-    double every order), now that the trader can be auto-started on login as
-    well as launched from the dashboard. A stale heartbeat (dead/slept process)
-    is treated as free to take over."""
+    """True if another auto-trader instance is genuinely alive AND actively
+    looping right now. Requires BOTH signals to agree: (a) the recorded PID
+    is a real, live OS process — not just a heartbeat that still "looks
+    fresh" — and (b) that heartbeat is actually recent. Checking only the
+    heartbeat is the bug this replaced: on 2026-08-04, a hard-killed process's
+    last-written heartbeat still looked "fresh" for up to ~6 minutes
+    afterward, blocking every restart attempt for the full window even though
+    the PID was already gone (see CLAUDE_NOTES.txt). Checking only the PID
+    isn't enough either — a hung-but-not-crashed process, or in the unlikely
+    case the OS has already reused status.json's old PID for something
+    unrelated, would incorrectly block a restart forever. Requiring both
+    closes both gaps.
+
+    Guards against running two instances at once (which would double every
+    order), now that the trader can be auto-started on login as well as
+    launched from the dashboard.
+    """
     status = load_status()
     hb = status.last_heartbeat
-    if not hb or not status.running:
+    if not hb or not status.running or not status.pid or status.pid == os.getpid():
+        return False
+    if not _is_pid_alive(status.pid):
         return False
     try:
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(hb)).total_seconds()
@@ -680,7 +715,7 @@ def _another_instance_alive() -> bool:
         return False
     control = load_control()
     # a live loop beats at least once per poll interval; allow ~3 cycles of slack
-    return age < max(300, 3 * control.poll_interval_seconds) and status.pid != os.getpid()
+    return age < max(300, 3 * control.poll_interval_seconds)
 
 
 def main() -> None:
