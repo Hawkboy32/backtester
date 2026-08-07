@@ -40,6 +40,7 @@ from backtester.brokers.ibkr import check_gateway_reachable
 from backtester.data import DEFAULT_CACHE_DIR, PolygonClient, PolygonError, cache_stats, prune_cache
 from backtester.engine import ENGINE_VERSION, BacktestEngine
 from backtester.execution import AccountOrder, SizingMode, compute_qty_for_account, execute_order_across_accounts
+from backtester.live_trades import realized_pnl_by_account
 from backtester.memory_report import save_report
 from backtester.metrics import (
     MARKET_CALENDARS,
@@ -1344,6 +1345,8 @@ def _fetch_account_balances(account_ids: tuple[str, ...], history_period: str) -
         result["connect_error"] = str(e)
         return result
 
+    pnl_by_account = realized_pnl_by_account()
+
     for broker_account in broker_accounts:
         try:
             snapshot = broker_account.get_account_snapshot()
@@ -1354,6 +1357,10 @@ def _fetch_account_balances(account_ids: tuple[str, ...], history_period: str) -
                     "equity": snapshot.equity,
                     "cash": snapshot.cash,
                     "buying_power": snapshot.buying_power,
+                    # Realized P&L only (closed round trips from live_trades.db) —
+                    # not unrealized/open-position P&L, which _render_live_positions
+                    # already shows separately per open position.
+                    "realized_pnl": pnl_by_account.get(broker_account.account_id, 0.0),
                 }
             )
         except Exception as e:  # noqa: BLE001
@@ -1517,7 +1524,19 @@ def render_accounts_tab() -> None:
 
             balance_rows = fetched["rows"]
             if balance_rows:
-                st.dataframe(pd.DataFrame(balance_rows), use_container_width=True)
+                display_df = pd.DataFrame(balance_rows).rename(columns={"realized_pnl": "Realized P&L"})
+                st.dataframe(display_df, use_container_width=True)
+                total_pnl = sum(r["realized_pnl"] for r in balance_rows)
+                sign = "-" if total_pnl < 0 else "+"
+                st.metric(
+                    "Total realized P&L (all accounts)",
+                    f"${total_pnl:,.2f}",
+                    delta=f"{sign}${abs(total_pnl):,.2f}",
+                )
+                st.caption(
+                    "Realized P&L = closed round trips only (from live_trades.db), not unrealized "
+                    "P&L on currently open positions — see the Trade Execution tab for those."
+                )
 
             history_fig = go.Figure()
             for series in fetched["history"]:

@@ -152,6 +152,21 @@ def list_recent_trades(limit: int = 50) -> list[dict]:
     return trades
 
 
+def realized_pnl_by_account() -> dict[str, float]:
+    """Sum of realized P&L (closed round trips only, not unrealized/open-position
+    P&L) grouped by account_id — for the Accounts tab's per-account and grand
+    total figures. Excludes 'mock-1' for the same reason as list_recent_trades.
+    """
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT account_id, SUM(pnl) FROM live_trades
+               WHERE account_id != 'mock-1'
+               GROUP BY account_id"""
+        ).fetchall()
+    return {account_id: total for account_id, total in rows}
+
+
 def recent_performance(ticker: str, strategy_name: str, lookback_n: int = 20) -> PerformanceSnapshot:
     """Rolling performance for one (ticker, strategy) combo from its most
     recent `lookback_n` closed live/paper trades, oldest-first internally for
