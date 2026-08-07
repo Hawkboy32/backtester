@@ -1947,6 +1947,12 @@ Trading 212's API (also below) explicitly excluded — nothing actionable there 
 Also queued for the same day (added later, same conversation): Mobile_App's floating
 "chat head" bubble idea — see Mobile_App's own CLAUDE_NOTES.txt for the full design
 discussion (Android Bubbles API, no overlay permission needed).
+Also queued (2026-08-07): wire the existing, never-used `two_factor.py` TOTP module into
+`app.py`'s actual login flow (enrollment UI + TOTP prompt after password) — surfaced while
+scoping a mobile remote stop/re-arm feature. Full combined design (dashboard 2FA + mobile
+login + password-confirmed stop/re-arm buttons) recorded in Mobile_App's own CLAUDE_NOTES.txt,
+since that's where most of the actual work lands — this entry is just the dashboard-side
+cross-reference so it isn't missed when picking up backtester work Saturday.
 
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
 - **Trading 212's public API — worth checking back on, not actionable yet (2026-08-06, user's
