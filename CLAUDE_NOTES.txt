@@ -2761,6 +2761,55 @@ data already fetched that cycle. The actual UI work (sparkline, freshness/source
 readout) lives in the companion `trading-signals-mobile` repo (separate GitHub repo, see that
 repo's own CLAUDE_NOTES.txt) — this repo only had to publish the extra data.
 
+=== PLAN: first real-money live pilot, targeting ~start of September 2026 ===
+User's own call (2026-08-07): paper testing is going well enough to start preparing for a real-
+money pilot, but explicitly capped at a small, genuinely-affordable-to-lose amount — **£100 or
+less to begin with**, not the £1000s scale discussed in the abstract earlier the same
+conversation. "Obviously going broke is not the aim here."
+
+**Which account fits that budget — checked against each broker's real minimums:**
+- **Alpaca — the one to use.** $0 minimum, supports fractional shares, so £100 (~$125) can still
+  buy a workable slice of the pricier roster tickers (MPWR ~$1400/share, DDOG ~$238/share).
+- **IBKR — ruled out at this budget, not just a config question.** Needs a Margin account
+  (£2000+ minimum) for forex, AND separately its API flatly rejects fractional equity orders
+  (`supports_fractional_shares=False`, matches the real "use desktop version" failures already
+  seen in execution_log.jsonl) — at £100 you can't buy one whole share of MPWR or even DDOG.
+- **IG — also ruled out for now.** CFD/spread-betting minimum is £250 via card; bank transfer
+  showed "no fixed minimum" in a quick check but that's unconfirmed for this specific account
+  type (forex CFDs) — would need verifying directly with IG before relying on it, not assumed.
+
+**Real risk found and fixed before connecting anything**: sizing (`control.json`'s
+`sizing_mode`/`sizing_value`) is ONE GLOBAL setting applied to every linked account —
+`compute_qty_for_account` takes it as a plain parameter, no per-account override exists
+(`extra_targets` only override account_ids/tickers/strategy_name/strategy_params, not sizing).
+It was `fixed_dollars` at $1000/trade. Adding a real £100 Alpaca account into the same
+account_ids as-is would have tried to size trades at $1000 each against a $125 account from day
+one — the actual mechanism that would cause the "going broke" outcome the user is trying to
+avoid, not the strategy itself.
+
+**DONE 2026-08-07 — switched to `pct_equity` at 1.0%** (via `load_control`/`save_control`,
+picked up by auto_trader.py on its next 120s cycle, no restart needed). `PCT_EQUITY` sizes off
+each account's OWN equity (`snapshot.equity * (sizing_value/100)`), so one global setting scales
+correctly across very differently-sized accounts with no per-account special-casing needed.
+Effect on currently-connected accounts: MyAlpaca ~$996/trade (barely changed from the old flat
+$1000), MyIGPaper ~$99.80/trade (no real change in character), IBKR Paper ~$10,000/trade (up
+from $1000 — harmless since its paper equity is an inflated ~$1M fake balance, but worth knowing
+if using IBKR's paper results to judge realistic behavior, since its position sizes are now
+proportionally out of step with what a real IBKR account would ever run).
+Once the real Alpaca account exists at ~£100/$125: ~$1.25/trade — deliberately tiny, "prove the
+live plumbing works end-to-end" scale rather than meaningful P&L. Recommended (not yet decided):
+raise the % only once the live MECHANICS are confirmed solid (orders actually route/fill/close
+as expected), kept as a separate kind of confidence from how much the strategy is already
+trusted from paper testing.
+
+**Still to do, no rush before ~September**: user opens + funds the Alpaca LIVE account
+themselves (identity verification + real deposit — not something this assistant can do), then
+links it via the dashboard's Accounts tab with its real API keys, at which point it gets added
+into account_ids alongside the paper accounts. Worth a careful review pass right before that
+account_id actually goes live — re-confirm sizing looks right, confirm allow_live-style
+safeguards, and probably watch its first few real orders manually rather than trusting the
+automated loop unattended immediately, consistent with [[trading-bot-goals-and-risk-posture]].
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,
