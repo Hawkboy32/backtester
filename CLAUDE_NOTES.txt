@@ -1984,6 +1984,44 @@ about it, chose to log it for Saturday rather than build it in the moment.
   the already-designed market-open/closed + `trading_accounts` feature (see Mobile_App's own
   CLAUDE_NOTES.txt) — no extra mobile work needed, that field was designed to carry exactly this.
   Not started — logged only, per the user's own choice to defer to Saturday rather than build now.
+- **Add short-selling as a real, separately-validated mode — long_only / short_only / long_short
+  (2026-08-08, user's own idea).** Started from a market-crash worry, but the user's own
+  reframing is the real point: the mean-reversion strategies already generate SYMMETRIC signals
+  (price above the mean -> SELL, below -> BUY), yet only the BUY side is ever acted on — long-
+  only is structurally leaving half the signal space untouched, not just "no crash hedge."
+
+  **Important finding, checked before agreeing to anything — this is NOT a free unlock.**
+  `engine.py`'s `BacktestEngine.run()` is long-only BY DESIGN (BUY only enters when flat, SELL
+  only exits an existing long — exact mirror of `auto_trader.py`'s own live long-only gating,
+  see the "are we on long positions only?" Q&A this same session). Every Sharpe number this
+  project has ever trusted (Phase 1-4, every tuned param set) was validated long-side only. The
+  short side of a mean-reversion strategy does NOT automatically inherit the long side's track
+  record — it needs its own full walk-forward validation before it earns any trust, same
+  discipline as every other change here (see the "twice this project has learned not to trust
+  an in-sample result" lesson embedded in `paramsweep.py`'s own docstring).
+
+  **Agreed plan (2026-08-08), not yet built:**
+  1. `engine.py`: add a position-mode parameter (`long_only` / `short_only` / `long_short`) to
+     `BacktestEngine.run()` (or a new param alongside `regime_by_date`/`blocked_dates`) —
+     `long_only` keeps today's exact behavior unchanged (zero regression risk for existing
+     results); `short_only` flips the entry/exit conditions symmetrically (SELL opens when flat,
+     BUY closes an open short); `long_short` allows both directions to open depending on which
+     signal fires first while flat. Needs a correct symmetric P&L calc for the short side
+     (already directional slippage exists per the 2026-07-27 bug-fix note above — same care
+     needed for shorts, not just reused blindly).
+  2. Dashboard: add a position-mode selector (three options — Long only / Short only /
+     Long+Short, user's own words: "buttons") to wherever param sweeps / walk-forward runs are
+     configured, so each mode can be scanned independently.
+  3. Backtest scope: aim for roughly the SAME number of scans per mode as long-only already has
+     (comparable methodology across all three, not a more-thorough test for one) — same asset
+     pairings, same 3-window walk-forward discipline as everything else in this file.
+  4. Once backtest-validated: paper trade each mode the same way long-only has been paper tested
+     all along (roster promotion/demotion, live_trades tracking) — real decisions about which
+     mode(s) actually get trusted with money come from THAT evidence, not from the backtest
+     numbers alone, matching how every other strategy here has been treated.
+  Explicitly a SEPARATE project from the real-money live pilot already in motion (see the PLAN
+  entry above) — not to be bundled into that prep. Nothing built yet — this is a discussion
+  record and an agreed plan, not code.
 - **Trading 212's public API — worth checking back on, not actionable yet (2026-08-06, user's
   own flag).** Docs: https://docs.trading212.com/api (their docs site is JS-rendered, didn't
   fully load via fetch — pieced this together from search results instead). Currently: beta,
