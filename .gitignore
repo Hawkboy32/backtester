@@ -20,3 +20,5 @@ live_trades.db
 *.pkl
 *.log
 .DS_Store
+risk_dial_sweep_results.jsonl
+risk_dial_sweep_log.txt

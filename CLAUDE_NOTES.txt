@@ -2052,12 +2052,26 @@ about it, chose to log it for Saturday rather than build it in the moment.
      actually correlate with better risk-adjusted outcomes in this bot's specific strategies —
      not built on an untested assumption.
 
-  **Next concrete step, whenever this gets picked up**: scope actual sweep runs (which
-  strategies, which param grids/date ranges, which of the confirmed asset pairings) covering the
-  two axes that are already fully backtestable (selectivity, vol-target sizing) — the
-  fixed-dollar-sizing engine change and the drawdown-breaker post-hoc analysis are separate,
-  smaller follow-ups once the first sweep results are in. Nothing built yet — this whole entry is
-  a discussion record, not a design decision.
+  **STARTED 2026-08-07 night, running overnight — vol-target-sizing sweep (axis 2b).**
+  `risk_dial_vol_sweep.py` (new, repo root) launched in the background so results are ready
+  before Saturday's session rather than eating into it. Scope: holds each asset class's already
+  walk-forward-tuned entry params FIXED (axis 2a — Phase 1-4's own tuned values, not re-swept)
+  and varies ONLY `target_vol_ann` over [10, 15, 20, 25, 30] (centered on the 20% default), across
+  the same 3-window walk-forward discipline this project always uses (2026-04-16/05-19,
+  2026-05-20/06-22, 2026-06-23/07-26). Three asset buckets, matching the pairings confirmed
+  earlier in this entry: Equities (TSLA/AAPL, VWAP MR entry_deviation_pct=0.3 / Bollinger MR
+  period=15,num_std=3.0), Gold/Silver (GLD/SLV ETF proxies, same equity-tuned params), Forex
+  (C:GBPUSD/C:EURGBP, VWAP MR entry_deviation_pct=0.2 / Bollinger MR period=20,num_std=4.0) — 90
+  scans total (3 buckets x 2 strategies x 5 vol values x 3 windows). Smoke-tested against real
+  Polygon data before the full launch (single-ticker and 2-ticker calls both returned real,
+  sane numbers). Results append incrementally to `risk_dial_sweep_results.jsonl` (gitignored, one
+  JSON line per completed scan — `mean_sharpe`/`mean_return`/`pct_profitable`/`total_trades` per
+  (bucket, strategy, target_vol_ann, window)) so it's inspectable even mid-run, not just at the
+  end; progress log in `risk_dial_sweep_log.txt` (also gitignored). Fixed-dollar-sizing engine
+  change and the drawdown-breaker post-hoc analysis remain separate, smaller follow-ups once
+  these results are read Saturday — read the .jsonl, group by (bucket, strategy), compare mean
+  Sharpe/pct_profitable across the 5 target_vol_ann values per group to see whether tighter or
+  looser sizing actually helped risk-adjusted returns, before deciding the dial's real range.
 - **DONE 2026-08-07 — singleton guard now checks real process liveness, not just heartbeat
   age.** Was: after the laptop was shut down 2026-08-04, `auto_trader.py` died mid-cycle without
   updating `status.json`, and every restart attempt was silently blocked because the guard only
