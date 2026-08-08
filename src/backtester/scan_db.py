@@ -32,7 +32,10 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     multiplier INTEGER,
     timespan TEXT,
     strategy_names TEXT,
-    engine_version TEXT
+    engine_version TEXT,
+    position_mode TEXT,
+    market_calendar TEXT,
+    source TEXT
 );
 
 CREATE TABLE IF NOT EXISTS scan_results (
@@ -98,6 +101,21 @@ def _migrate(conn) -> None:
         # value. query_latest_run_id(engine_version=...) treats NULL as
         # never matching a specific version filter.
         conn.execute("ALTER TABLE scan_runs ADD COLUMN engine_version TEXT")
+    # position_mode/market_calendar/source: added 2026-08-08 for the long/
+    # short comparison sweep — real bug found the same day, record_scan()
+    # was silently DROPPING these from every meta dict it was ever handed
+    # (scanner.py/scan_runner.py built them correctly, this table just never
+    # had columns for them). Legacy rows get NULL, same "honest unknown, not
+    # backfilled with a guess" policy as engine_version above — EXCEPT the
+    # specific 54 rows from the sweep that triggered this fix, which got a
+    # one-off verified backfill (see CLAUDE_NOTES.txt) since their true
+    # position_mode was fully reconstructable from queue order, not guessed.
+    if "position_mode" not in existing_runs:
+        conn.execute("ALTER TABLE scan_runs ADD COLUMN position_mode TEXT")
+    if "market_calendar" not in existing_runs:
+        conn.execute("ALTER TABLE scan_runs ADD COLUMN market_calendar TEXT")
+    if "source" not in existing_runs:
+        conn.execute("ALTER TABLE scan_runs ADD COLUMN source TEXT")
 
 
 def init_db() -> None:
@@ -113,8 +131,8 @@ def record_scan(meta: dict, rows: list[ScanResultRow]) -> int:
         cursor = conn.execute(
             """INSERT INTO scan_runs
                (run_at, universe, num_tickers, from_date, to_date, multiplier, timespan,
-                strategy_names, engine_version)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                strategy_names, engine_version, position_mode, market_calendar, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 meta.get("run_at", datetime.now(timezone.utc).isoformat()),
                 meta.get("universe"),
@@ -125,6 +143,9 @@ def record_scan(meta: dict, rows: list[ScanResultRow]) -> int:
                 meta.get("timespan"),
                 json.dumps(meta.get("strategy_names", [])),
                 meta.get("engine_version"),
+                meta.get("position_mode"),
+                meta.get("market_calendar"),
+                meta.get("source"),
             ),
         )
         run_id = cursor.lastrowid

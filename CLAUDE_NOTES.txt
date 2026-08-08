@@ -2155,6 +2155,28 @@ CLAUDE_NOTES.txt) verifies against — same `auth_config.yaml` + same `two_facto
   through the first item with a fresh heartbeat, zero errors). Results land in `scan_history.db`
   exactly like any other scan, taggable by `source="playlist"` + the new `position_mode`/
   `market_calendar`/`tickers` meta fields for whenever this gets analyzed.
+- **Bug found in my own earlier work, fixed with a verified zero-data-loss recovery
+  (2026-08-08).** While checking the sweep above was correctly tagged, found that
+  `scan_db.py`'s `record_scan()` was silently dropping `position_mode`/`market_calendar`/
+  `source` from every scan it ever recorded — the `scan_runs` table schema simply had no
+  columns for them, so the hardcoded INSERT never wrote them despite `scan_runner.py`
+  correctly building them into its `meta` dict all along. An earlier test of
+  `scan_runner.py` had mocked `record_scan` itself, so it only proved the meta dict was
+  *passed*, never that `record_scan`'s own INSERT actually persisted it — the gap that let
+  this slip through. Net effect: all 54 rows from the long/short sweep (run_ids 41-94) had
+  no stored position_mode, so there was no way to tell which mode produced which result.
+  Recovery: reconstructed the mapping from insertion order — generated the exact predicted
+  54-item sequence from the known queueing logic (18 long_only, then 18 short_only, then 18
+  long_short, each in the same universe/strategy/date-window order) and diffed it against
+  the real `from_date`/`to_date`/`strategy_names`/`num_tickers` already stored for run_ids
+  41-94: zero mismatches. No other scans interleaved during the sweep, so the mapping is
+  exact, not inferred. Verified this mapping a second time immediately before writing
+  anything. Fixed `scan_db.py`: added `position_mode TEXT, market_calendar TEXT, source
+  TEXT` to `SCHEMA`, added idempotent `ALTER TABLE` migrations for the three columns, fixed
+  `record_scan()`'s INSERT to actually include them. Applied the migration to the real
+  `scan_history.db` (confirmed via `PRAGMA table_info`), then ran the backfill `UPDATE` for
+  all 54 rows using the double-verified mapping. Confirmed after: exactly 18 rows per
+  position_mode, no other rows touched.
 - **Trading 212's public API — worth checking back on, not actionable yet (2026-08-06, user's
   own flag).** Docs: https://docs.trading212.com/api (their docs site is JS-rendered, didn't
   fully load via fetch — pieced this together from search results instead). Currently: beta,
