@@ -2177,6 +2177,44 @@ CLAUDE_NOTES.txt) verifies against — same `auth_config.yaml` + same `two_facto
   `scan_history.db` (confirmed via `PRAGMA table_info`), then ran the backfill `UPDATE` for
   all 54 rows using the double-verified mapping. Confirmed after: exactly 18 rows per
   position_mode, no other rows touched.
+- **Walk-forward validation of the two promising shorting configs (2026-08-08, run_ids 95-100).**
+  The 54-item sweep above found two configs that looked both strong AND consistent across its 3
+  (contiguous, none held-out) windows: VWAP MR short_only on Gold/Silver, and Bollinger MR
+  long_only on Forex (the latter thin — only 9-15 trades per window on 2 pairs). Extended both,
+  via the same Backtest Playlist mechanism, in the two ways that actually mattered: (1) one new
+  window immediately BEFORE the existing three (2026-03-13..2026-04-15, same 33-day length) that
+  had never been scanned for either strategy/mode — genuinely held-out, not just re-averaging the
+  same data; (2) the forex leg broadened from 2 to 6 major USD pairs (added EURUSD/USDJPY/AUDUSD/
+  USDCAD to GBPUSD/EURGBP) across all 4 windows now, directly addressing the thin-trade-count
+  caveat. Params pulled from the live `playlist.json` (not retyped from memory) to match the
+  original sweep exactly: VWAP `entry_deviation_pct=0.3`, Bollinger `period=20,num_std=4.0`
+  (forex) / `period=15,num_std=3.0` (equity calendar, used for Gold/Silver).
+
+  **Results — both configs held up:**
+  - VWAP MR short_only, Gold/Silver: new window Sharpe +2.83 (prior 3 windows: 2.48, 1.81, 3.73)
+    — squarely inside the existing range, now 4/4 windows positive.
+  - Bollinger MR short_only, Gold/Silver: new window Sharpe +1.92 (prior 3: 1.06, 1.96, 1.43) —
+    same story, 4/4 positive.
+  - Bollinger MR long_only, Forex (now 6 pairs, all 4 windows): +2.72, +1.07, +2.55, +3.69 — all
+    positive, drawdown tiny throughout (-0.2% to -0.5%), trade count now healthy (24-57/window vs
+    9-15 before broadening). Sharpe dropped somewhat vs. the original 2-pair numbers (2.49-3.98) —
+    expected, broadening toward the mean rather than cherry-picking the best pair, and still
+    strongly positive everywhere.
+
+  **Two honest caveats, not resolved by this validation:**
+  1. Forex's profit factor is unusually high (8x-23x) and drawdown suspiciously tiny throughout —
+     all 4 windows here happened to be a calm FX regime (no central-bank-surprise-style shock).
+     Mean-reversion strategies characteristically look excellent right up until a strong trending
+     regime break, which this data simply hasn't contained yet. Not a flaw in the test — a real
+     gap in what any backtest on this specific period can tell you.
+  2. Still backtest-only. Step 4 of the original shorting plan (paper-trade a validated mode live
+     via `auto_trader.py`/roster, same discipline every other strategy here earned its trust
+     through) hasn't been started — `auto_trader.py` is still hardcoded long-only. Backtest
+     consistency across 4 windows is meaningfully more evidence than one sweep, but it's not the
+     same kind of evidence as live paper performance, consistent with how every other strategy
+     here has been treated.
+  Equities shorting was NOT re-tested here — the original sweep already showed it clearly
+  underperforming (Sharpe collapsed, drawdown roughly doubled) and nothing here changes that read.
 - **Trading 212's public API — worth checking back on, not actionable yet (2026-08-06, user's
   own flag).** Docs: https://docs.trading212.com/api (their docs site is JS-rendered, didn't
   fully load via fetch — pieced this together from search results instead). Currently: beta,
