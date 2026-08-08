@@ -2383,6 +2383,64 @@ def _render_adaptive_roster_section() -> None:
     st.divider()
 
 
+# Conservative/aggressive risk dial (CLAUDE_NOTES.txt "risk dial" entry). Only
+# ever touches the sizing/risk-LIMIT knobs (axis 2b) — never the strategies'
+# own entry-selectivity params (axis 2a), which are a separate, already-
+# answered question (Phase 1-4's own tuning). vol_target_ann values are taken
+# straight from the real overnight sweep's tested grid ([10, 15, 20, 25, 30]),
+# not interpolated — Conservative/Moderate/Aggressive map to the sweep's own
+# low/default/high points so each preset is backed by an actual measured
+# result, not a guess. All three enable vol-target sizing (the sweep only
+# ever tested it ON); Moderate matches today's status-quo defaults exactly,
+# so applying it is a no-op for an account already running the defaults.
+RISK_PRESETS = {
+    "Conservative": {
+        "sizing_value": 0.5, "vol_target_ann": 10.0,
+        "max_drawdown_pct": 7.0, "giveback_enabled": True, "giveback_pct": 15.0,
+    },
+    "Moderate": {
+        "sizing_value": 1.0, "vol_target_ann": 20.0,
+        "max_drawdown_pct": 10.0, "giveback_enabled": False, "giveback_pct": 25.0,
+    },
+    "Aggressive": {
+        "sizing_value": 2.0, "vol_target_ann": 30.0,
+        "max_drawdown_pct": 15.0, "giveback_enabled": False, "giveback_pct": 25.0,
+    },
+}
+
+
+def _apply_risk_preset(name: str) -> None:
+    """Load-mutate-save control.json (single source of truth) AND push the
+    same values into every affected widget's session_state key directly —
+    those widgets already have a `key=`, so Streamlit ignores `value=` on
+    later reruns once a key exists (same reasoning as the execution-cost
+    preset buttons above). Spans two tabs (sizing/vol-target live on this
+    page, max-drawdown/giveback live on Settings) — session_state is global
+    across st.navigation pages, so this correctly updates Settings too, even
+    though the button is here."""
+    preset = RISK_PRESETS[name]
+    control = load_control()
+    control.sizing_mode = SizingMode.PCT_EQUITY.value
+    control.sizing_value = preset["sizing_value"]
+    control.vol_target_enabled = True
+    control.vol_target_ann = preset["vol_target_ann"]
+    control.max_drawdown_enabled = True
+    control.max_drawdown_pct = preset["max_drawdown_pct"]
+    control.giveback_enabled = preset["giveback_enabled"]
+    control.giveback_pct = preset["giveback_pct"]
+    save_control(control)
+
+    st.session_state["auto_sizing_mode"] = "% of account equity"
+    st.session_state["auto_sizing_value"] = preset["sizing_value"]
+    st.session_state["auto_vol_target"] = True
+    st.session_state["auto_vol_target_ann"] = preset["vol_target_ann"]
+    st.session_state["settings_max_dd_enabled"] = True
+    st.session_state["settings_max_dd_pct"] = preset["max_drawdown_pct"]
+    st.session_state["settings_giveback_enabled"] = preset["giveback_enabled"]
+    st.session_state["settings_giveback_pct"] = preset["giveback_pct"]
+    st.session_state["risk_preset_applied"] = name
+
+
 def render_auto_trading_tab() -> None:
     st.subheader("Automated trading")
     st.warning(
@@ -2439,6 +2497,39 @@ def render_auto_trading_tab() -> None:
         tickers = control.tickers
         strategy_name = control.strategy_name
         _render_adaptive_roster_section()
+
+    st.markdown("**Risk profile**")
+    st.caption(
+        "Sets position sizing (% of equity), the GARCH vol-target, the account-level max-"
+        "drawdown breaker, and the daily P&L giveback guard together — the sizing/risk-LIMIT "
+        "knobs only, never the strategies' own entry logic (that's already tuned separately, "
+        "see CLAUDE_NOTES.txt). vol-target values come straight from the real overnight sweep "
+        "(2026-08-07/08): across every strategy with a genuine edge, higher sizing never hurt "
+        "risk-adjusted returns within the 10-30% range tested — it only ever helped or was "
+        "neutral. **Moderate matches today's defaults exactly** — applying it is a safe no-op on "
+        "an account already running as-is. Also updates the Settings page's account-risk and "
+        "giveback sections."
+    )
+    applied_preset = st.session_state.pop("risk_preset_applied", None)
+    if applied_preset is not None:
+        st.success(
+            f"**{applied_preset}** applied and saved — sizing/vol-target below and the "
+            "account-risk/giveback sections on the Settings page all updated together."
+        )
+    pcol1, pcol2, pcol3 = st.columns(3)
+    for pcol, name in zip((pcol1, pcol2, pcol3), RISK_PRESETS):
+        with pcol:
+            preset = RISK_PRESETS[name]
+            st.button(
+                name, key=f"risk_preset_{name}", width="stretch",
+                on_click=_apply_risk_preset, args=(name,),
+                help=(
+                    f"{preset['sizing_value']:.1f}% of equity/trade · "
+                    f"{preset['vol_target_ann']:.0f}% vol target · "
+                    f"{preset['max_drawdown_pct']:.0f}% max drawdown · "
+                    f"giveback guard {'on 15%' if preset['giveback_enabled'] else 'off'}"
+                ),
+            )
 
     with st.expander("Advanced settings", expanded=False):
         gcol1, gcol2, gcol3 = st.columns(3)

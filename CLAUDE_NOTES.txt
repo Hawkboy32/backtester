@@ -2195,6 +2195,33 @@ CLAUDE_NOTES.txt) verifies against — same `auth_config.yaml` + same `two_facto
   an EXISTING edge, it doesn't create one; those two aren't good candidates for going aggressive
   on regardless of what the dial ends up doing. Ready to use when Saturday's risk-dial work
   starts — this answers the axis-2b question the "next concrete step" above was waiting on.
+
+  **DONE 2026-08-08 — the manual dial itself, built on top of the sweep results above.** New
+  "Risk profile" section on the Auto Trading tab: three buttons (Conservative/Moderate/
+  Aggressive), each a `RISK_PRESETS` entry bundling `sizing_value` (% of equity),
+  `vol_target_ann`, `max_drawdown_pct`, and `giveback_enabled`/`giveback_pct` — the sizing/risk-
+  LIMIT knobs only (axis 2b), never the strategies' own entry-selectivity params (axis 2a stays
+  exactly as already tuned). `vol_target_ann` values come straight from the sweep's own tested
+  grid (10/20/30, not interpolated) — Conservative/Moderate/Aggressive map to the sweep's actual
+  low/default/high points, each backed by a real measured result. **Moderate matches today's live
+  defaults exactly** (sizing 1.0%, vol_target 20%, max_drawdown 10%, giveback off) — confirmed
+  against the real running control.json, so applying it is a genuine no-op on an account already
+  at defaults, not a silent change. One click does a full load-mutate-save of `control.json`
+  (all 5 fields atomically) AND pushes the same values into every affected widget's
+  `session_state` key so the UI doesn't look stale — including the Settings page's account-risk/
+  giveback sections, even though the button lives on the Auto Trading page (`session_state` is
+  global across `st.navigation` pages, confirmed this actually works that way in this app).
+  **Verified**: all three presets' full field set round-tripped correctly through an ISOLATED
+  control.json (mocked path, never touched the real file) — sizing_mode/sizing_value/
+  vol_target_enabled/vol_target_ann/max_drawdown_enabled/max_drawdown_pct/giveback_enabled/
+  giveback_pct all landed exactly as specified for each of the three presets; separately
+  confirmed the Moderate preset's values match the real live control.json byte-for-byte.
+  Dashboard boots clean with the change (browser preview, no server errors). Couldn't click the
+  actual buttons in-browser (needs the real dashboard password) — the underlying save/session-
+  state logic is fully verified in isolation, but worth one real click-through personally to see
+  the UI itself. The manual dial is deliberately the FIRST step per the original design's own
+  sequencing — automatic conviction/regime-driven throttling (the real "end game") stays a later,
+  separate decision once there's a track record on how this manual version performs.
 - **DONE 2026-08-07 — singleton guard now checks real process liveness, not just heartbeat
   age.** Was: after the laptop was shut down 2026-08-04, `auto_trader.py` died mid-cycle without
   updating `status.json`, and every restart attempt was silently blocked because the guard only
