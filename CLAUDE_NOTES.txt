@@ -2007,7 +2007,36 @@ CLAUDE_NOTES.txt) verifies against — same `auth_config.yaml` + same `two_facto
   separate, later decision. Once linked, it would also show up on the mobile side for free via
   the already-designed market-open/closed + `trading_accounts` feature (see Mobile_App's own
   CLAUDE_NOTES.txt) — no extra mobile work needed, that field was designed to carry exactly this.
-  Not started — logged only, per the user's own choice to defer to Saturday rather than build now.
+
+  **DONE 2026-08-08 — built as designed above.** New `src/backtester/brokers/oanda.py`:
+  `OandaBroker(BrokerAccount)` using OANDA's v20 REST API directly (`requests`, matching
+  `oanda_data.py`'s own style — no new SDK dependency). Order model: OANDA nets per-instrument
+  automatically, so BUY sends positive `units` and SELL sends negative `units` through the SAME
+  `POST /orders` call — no separate open/close endpoint needed (unlike IG). Reuses
+  `oanda_data.py`'s `_to_oanda_instrument`/`OandaError`/base-URL constants rather than duplicating
+  them. `get_equity_history` raises `NotImplementedError` (same honest gap as ig.py/coinbase.py/
+  kraken.py — no verified equity-curve endpoint), `get_market_clock` reuses `ibkr.py`'s
+  `_forex_clock_heuristic()` (same one ig.py already uses for forex CFDs).
+  Credentials: reuses the standard 2-field keyring flow (`api_key`=OANDA API token,
+  `secret_key`=OANDA account ID, which every order/position endpoint needs and isn't actually a
+  secret, but there was no reason to add a third credential field for it) — no dashboard code
+  changes needed, the Accounts tab's link form is fully data-driven off `BROKER_META`.
+  Registered in `BROKER_META` as forex-only, `supports_paper=True`. **Explicitly PAPER-only
+  scope, exactly as decided above** — `is_paper` still selects OANDA's practice vs live base URL
+  like every other broker here, so going live later is a config change, not a code change, but
+  nothing should flip that switch without a separate, deliberate decision.
+  **Verified**: full broker logic smoke-tested against realistic mocked OANDA v20 responses —
+  account snapshot parsing, position parsing (including a zero-units position correctly filtered
+  out), BUY order (positive units sent), SELL order (negative units sent, confirming the
+  netting-closes-a-long behavior), a rejected/cancelled order, an HTTP error response, the market
+  clock heuristic, and the equity-history NotImplementedError — all passed. Separately verified
+  the `accounts.py` integration end-to-end (add_account -> list_accounts -> account_asset_class
+  -> build_broker_accounts) using a throwaway test account, cleaned up after (real
+  `broker_accounts.json`/keyring untouched). Dashboard boots clean with the new broker registered
+  (checked via browser preview, no server errors). **Not yet linked to a real OANDA account** —
+  that's the user's own next step (enter the real API token + account ID in the dashboard's
+  Accounts tab) whenever they're ready to actually start paper-testing it; nothing here touches
+  real credentials or places a real order until that happens.
 - **Add short-selling as a real, separately-validated mode — long_only / short_only / long_short
   (2026-08-08, user's own idea).** Started from a market-crash worry, but the user's own
   reframing is the real point: the mean-reversion strategies already generate SYMMETRIC signals

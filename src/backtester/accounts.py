@@ -26,6 +26,7 @@ from backtester.brokers.ibkr import ASSET_CLASSES as IBKR_ASSET_CLASSES
 from backtester.brokers.ibkr import IBKRBroker
 from backtester.brokers.ig import IGBroker
 from backtester.brokers.kraken import KrakenBroker
+from backtester.brokers.oanda import OandaBroker
 from backtester.brokers.tastytrade_broker import TastytradeBroker
 from backtester.auto_trader_state import atomic_write_text
 
@@ -90,6 +91,17 @@ BROKER_META: dict[str, dict] = {
         "extra_cred_field": "Username",
         "supports_paper": True,  # IG has a real, documented demo account (verified 2026-07-21/27)
         "has_market_hours": True,  # forex CFDs — closed weekends, unlike crypto's real 24/7
+        "asset_classes": frozenset({"forex"}),
+    },
+    "oanda": {
+        "label": "OANDA (forex — paper execution, added 2026-08-08)",
+        # Two credentials, neither of them a traditional "secret key" — an
+        # OANDA API token (Bearer auth) plus the account ID every order/
+        # position endpoint is scoped to. Reuses the standard 2-field keyring
+        # slots rather than needing IG's extra_cred_field mechanism.
+        "cred_fields": ("API token", "Account ID"),
+        "supports_paper": True,  # OANDA's practice environment — the ONLY thing this is scoped to for now
+        "has_market_hours": True,  # spot forex — closed weekends
         "asset_classes": frozenset({"forex"}),
     },
 }
@@ -285,6 +297,11 @@ def build_broker_accounts(account_ids: list[str] | None = None) -> list[BrokerAc
             )
         elif broker == "alpaca":
             obj = AlpacaBroker(nickname=a["nickname"], api_key=api_key, secret_key=secret_key, is_paper=a["is_paper"])
+        elif broker == "oanda":
+            # secret_key holds the account ID here, not a real secret — see
+            # BROKER_META's "oanda" entry for why this reuses the standard
+            # 2-field slot instead of a dedicated field.
+            obj = OandaBroker(nickname=a["nickname"], api_key=api_key, account_id=secret_key, is_paper=a["is_paper"])
         elif broker == "coinbase":
             obj = CoinbaseBroker(nickname=a["nickname"], api_key=api_key, api_secret=secret_key)
         elif broker == "kraken":
