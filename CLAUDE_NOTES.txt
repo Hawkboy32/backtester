@@ -2228,6 +2228,34 @@ CLAUDE_NOTES.txt) verifies against — same `auth_config.yaml` + same `two_facto
      IG SIZE_INCREMENT), the account-risk drawdown breaker tripping, the daily P&L giveback guard
      blocking, or the bot hitting an error/kill-switch engaging. Wiring failures into
      notifications is probably the higher-value half of this, independent of self-hosting.
+
+  **DONE 2026-08-08 — the two independently-doable pieces, both shipped. Actually hosting ntfy on
+  the Pi is STILL BLOCKED** (no Pi exists yet — genuinely can't be finished today, not a scope
+  choice) but everything code-side that doesn't need the hardware is ready for when it does:
+  1. `NTFY_BASE` is no longer a hardcoded constant — `notifications.py`'s config now carries an
+     `ntfy_base` field (defaults to `DEFAULT_NTFY_BASE = "https://ntfy.sh"`), merged over an
+     older saved config missing the key so nothing breaks for an existing setup. New "Self-hosted
+     ntfy server (optional)" expander in the dashboard's Settings page lets you point it at your
+     own server the moment one exists — no code change needed then, just paste the URL.
+  2. **The higher-value half — wired failures into real notifications, not just dashboard log
+     lines**: `notify_order_rejected` (fires in `_trade_target` wherever a `not result.success`
+     was previously silently `continue`d past), `notify_drawdown_blocked`/`notify_giveback_blocked`
+     (fire in `run_cycle`, but ONLY on the actual blocked-transition each cycle — captured via
+     `get_status(...).blocked` BEFORE calling `check_and_update`, compared after — not every
+     subsequent cycle it stays blocked, which could otherwise spam for hours/days until re-arm),
+     `notify_kill_switch_engaged` (fires at the two real call sites — app.py's kill button and
+     Mobile_App's `/kill` endpoint — not from inside auto_trader.py's poll loop, so it fires
+     exactly once per real kill event rather than needing its own transition-detection).
+  **Verified**: config load/merge/save round-trip (including the backward-compat case — an old
+  config file missing `ntfy_base` still gets the public server, not a blank/broken URL);
+  `notify()` actually posts to the CONFIGURED base URL, not the old hardcoded default (mocked);
+  every new helper function's title/message/priority; the transition-detection logic specifically
+  — replayed a real 5-cycle scenario against the actual `account_risk.py` (first breach notifies
+  once, three subsequent still-blocked cycles do NOT re-notify, re-arm then a fresh breach
+  notifies again) — this is the exact spam scenario worth getting right, not just trusting the
+  logic by eye. Also sent one real live notification to the actual public ntfy.sh (a random
+  throwaway topic, nothing subscribed to it) to confirm the whole pipeline works over the real
+  network, not just against mocks.
 - **DONE 2026-08-01 — Daily P&L giveback rule for auto_trader.py** (source: reaction video
   reviewing Ross Cameron/Warrior Trading, 2026-07-31). `src/backtester/daily_pnl_guard.py`
   — once an account's profit for TODAY has given back more than `giveback_pct` (default 25,

@@ -463,6 +463,9 @@ def _trade_target(
 
     for ctx, result in zip(order_contexts, results):
         if not result.success:
+            notifications.notify_order_rejected(
+                ticker, order_side.value, ctx["account"].nickname, result.error or "unknown error"
+            )
             continue
         broker_account = ctx["account"]
         if order_side is OrderSide.BUY:
@@ -623,6 +626,11 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
     blocked_account_ids: set[str] = set()
     if control.max_drawdown_enabled:
         for broker_account in broker_accounts:
+            # Captured BEFORE check_and_update so the notification below fires
+            # only on the actual trip (this cycle's transition into blocked),
+            # not every subsequent cycle it stays blocked — it stays blocked
+            # until a manual re-arm, which could be hours/days away.
+            was_blocked = bool((account_risk.get_status(broker_account.account_id) or {}).get("blocked"))
             try:
                 equity = broker_account.get_account_snapshot().equity
                 blocked, reason = account_risk.check_and_update(
@@ -634,11 +642,14 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
             if blocked:
                 blocked_account_ids.add(broker_account.account_id)
                 status.last_error = f"{broker_account.nickname}: account risk limit breached — {reason}"
+                if not was_blocked:
+                    notifications.notify_drawdown_blocked(broker_account.nickname, reason or "")
 
     if control.giveback_enabled:
         for broker_account in broker_accounts:
             if broker_account.account_id in blocked_account_ids:
                 continue  # already blocked by the account-risk breaker above, no need to also check this
+            was_blocked = bool((daily_pnl_guard.get_status(broker_account.account_id) or {}).get("blocked"))
             try:
                 equity = broker_account.get_account_snapshot().equity
                 blocked, reason = daily_pnl_guard.check_and_update(
@@ -650,6 +661,8 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
             if blocked:
                 blocked_account_ids.add(broker_account.account_id)
                 status.last_error = f"{broker_account.nickname}: daily P&L giveback limit reached — {reason}"
+                if not was_blocked:
+                    notifications.notify_giveback_blocked(broker_account.nickname, reason or "")
 
     targets = _resolve_targets(control)
     if not targets:

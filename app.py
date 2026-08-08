@@ -328,10 +328,11 @@ def render_settings_page() -> None:
     st.divider()
     st.markdown("### Phone notifications")
     st.caption(
-        "Get a push to your phone each time the auto-trader opens or closes a trade. "
-        "Uses ntfy (free): install the **ntfy** app (iOS/Android), then in the app "
-        "subscribe to the exact topic name you set below. No account or password needed — "
-        "so pick a long, unguessable topic name (anyone who knows it can see your pings)."
+        "Get a push to your phone for trade opens/closes, order rejections, and risk-limit "
+        "trips (drawdown breaker, daily giveback guard, kill switch). Uses ntfy: install the "
+        "**ntfy** app (iOS/Android), then in the app subscribe to the exact topic name you set "
+        "below. No account or password needed — so pick a long, unguessable topic name (anyone "
+        "who knows it can see your pings), or self-host your own server below for real privacy."
     )
     notif_cfg = notifications.load_config()
     notif_enabled = st.checkbox(
@@ -343,11 +344,27 @@ def render_settings_page() -> None:
         key="notif_topic",
         help="Any unique string, e.g. mybot-aa39f1c2b7. Subscribe to this exact name in the ntfy app.",
     )
+    with st.expander("Self-hosted ntfy server (optional)"):
+        st.caption(
+            "The public ntfy.sh server is unauthenticated pub-sub — anyone who guesses your "
+            "topic name can subscribe and see real trade activity/P&L. Point this at your own "
+            "self-hosted ntfy instance (e.g. reachable over Tailscale) for real privacy. Leave "
+            "as the default if you don't have one set up."
+        )
+        notif_base = st.text_input(
+            "ntfy server URL",
+            value=notif_cfg.get("ntfy_base", notifications.DEFAULT_NTFY_BASE),
+            key="notif_base",
+        )
     ncol1, ncol2 = st.columns(2)
     with ncol1:
         if st.button("Save notification settings", key="notif_save"):
             notifications.save_config(
-                {"enabled": notif_enabled, "provider": "ntfy", "ntfy_topic": notif_topic.strip()}
+                {
+                    "enabled": notif_enabled, "provider": "ntfy",
+                    "ntfy_topic": notif_topic.strip(),
+                    "ntfy_base": notif_base.strip() or notifications.DEFAULT_NTFY_BASE,
+                }
             )
             st.success("Notification settings saved.")
     with ncol2:
@@ -355,14 +372,18 @@ def render_settings_page() -> None:
             ok = notifications.notify(
                 "Test notification",
                 "If you can read this on your phone, trade alerts are working.",
-                config={"enabled": True, "provider": "ntfy", "ntfy_topic": notif_topic.strip()},
+                config={
+                    "enabled": True, "provider": "ntfy",
+                    "ntfy_topic": notif_topic.strip(),
+                    "ntfy_base": notif_base.strip() or notifications.DEFAULT_NTFY_BASE,
+                },
             )
             if ok:
                 st.success("Sent — check your phone. If nothing arrives, confirm the app is subscribed to that exact topic.")
             elif not notif_topic.strip():
                 st.error("Enter a topic name first.")
             else:
-                st.error("Send failed — check your internet connection and the topic name.")
+                st.error("Send failed — check your internet connection, the topic name, and the server URL.")
 
     st.divider()
     st.markdown("### Bot-down alert (dead-man's switch)")
@@ -3054,6 +3075,7 @@ def _render_bot_status(status, control, *, kill_switch: bool = True, kill_key: s
 
     if kill_switch and st.button("🛑 KILL SWITCH — stop auto-trading now", type="primary", key=kill_key):
         trigger_kill_switch()
+        notifications.notify_kill_switch_engaged("the dashboard")
         st.success("Kill switch engaged. The trader will stop within one poll cycle.")
         st.rerun()
 
