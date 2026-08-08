@@ -2684,17 +2684,37 @@ def render_auto_trading_tab() -> None:
         st.rerun()
 
     st.divider()
-    st.markdown("### Extra target (optional)")
+    st.markdown("### Extra targets (optional)")
     st.caption(
-        "An additional CONCURRENT target that trades alongside everything above — e.g. a forex "
+        "Additional CONCURRENT targets that trade alongside everything above — e.g. a forex "
         "account running its own separately-tuned strategy while the primary (roster or manual) "
-        "trades equities. Independent save button, own account/ticker/strategy/params — but "
-        "still shares the primary's daily trade cap, sizing, and bar interval (not "
-        "independently configurable yet), and is evaluated AFTER the primary each cycle, so "
-        "this is what gets skipped first on a day the shared cap fills early."
+        "trades equities. Any number of these can run at once, each with its own account/ticker/"
+        "strategy/params — but they all still share the primary's daily trade cap, sizing, and "
+        "bar interval (not independently configurable yet), and are evaluated AFTER the primary "
+        "each cycle in order, so the last one in the list is what gets skipped first on a day "
+        "the shared cap fills early."
     )
 
-    existing_extra = control.extra_targets[0] if control.extra_targets else {}
+    if control.extra_targets:
+        for i, et in enumerate(control.extra_targets):
+            et_accounts = ", ".join(
+                next((a["nickname"] for a in linked if a["id"] == aid), aid)
+                for aid in et.get("account_ids", [])
+            )
+            with st.expander(et.get("label") or f"Extra target {i + 1}"):
+                st.write(f"Accounts: {et_accounts}")
+                st.write(f"Tickers: {', '.join(et.get('tickers', []))}")
+                st.write(f"Strategy: {et.get('strategy_name')} — params: {et.get('strategy_params', {})}")
+                if st.button("Remove this extra target", key=f"remove_extra_{i}"):
+                    fresh = load_control()
+                    fresh.extra_targets = [t for j, t in enumerate(fresh.extra_targets) if j != i]
+                    save_control(fresh)
+                    st.rerun()
+    else:
+        st.caption("None configured yet.")
+
+    st.markdown("**Add a new extra target**")
+    existing_extra: dict = {}  # the form below always builds a NEW entry, never edits one in place
 
     extra_asset_class_label = st.radio(
         "Asset class", ["Equity", "Crypto", "Forex"], horizontal=True, key="extra_asset_class",
@@ -2754,7 +2774,7 @@ def render_auto_trading_tab() -> None:
         value=existing_extra.get("label", ""), key="extra_target_label",
     )
 
-    if st.button("Save extra target"):
+    if st.button("Add extra target"):
         try:
             extra_params = json.loads(extra_params_text) if extra_params_text.strip() else {}
             if not isinstance(extra_params, dict):
@@ -2762,22 +2782,25 @@ def render_auto_trading_tab() -> None:
         except (json.JSONDecodeError, ValueError) as e:
             st.error(f"Strategy params override isn't valid JSON: {e}")
         else:
-            # Load-mutate-save so only extra_targets changes — never clobber
-            # the primary config this same tab's other Save button owns.
-            fresh = load_control()
             if extra_account_ids and extra_tickers and extra_strategy_name:
-                fresh.extra_targets = [{
+                # Load-mutate-save so only extra_targets changes — never clobber
+                # the primary config this same tab's other Save button owns, and
+                # APPEND rather than replace so this doesn't wipe out any extra
+                # targets already configured (e.g. an existing forex one) when
+                # adding another.
+                fresh = load_control()
+                fresh.extra_targets = fresh.extra_targets + [{
                     "label": extra_label or f"{extra_asset_class_label} extra target",
                     "account_ids": extra_account_ids,
                     "tickers": extra_tickers,
                     "strategy_name": extra_strategy_name,
                     "strategy_params": extra_params,
                 }]
+                save_control(fresh)
+                st.success("Extra target added.")
+                st.rerun()
             else:
-                fresh.extra_targets = []  # nothing meaningful configured — clear it
-            save_control(fresh)
-            st.success("Extra target saved." if fresh.extra_targets else "Extra target cleared (incomplete config).")
-            st.rerun()
+                st.error("Pick at least one account, one ticker, and a strategy before adding.")
 
     st.divider()
     st.markdown("### Start / Stop")

@@ -3127,6 +3127,47 @@ that needs the user's real login, which this assistant doesn't have and shouldn'
 override to $2/trade, leave the global sizing untouched for every other account, and go through
 the existing `allow_live` arm-phrase gate when actually ready to let it trade.
 
+**Real gotcha hit twice in a row while doing all this (2026-08-08) — worth a standing reminder.**
+Both the dashboard and `auto_trader.py` are long-running processes that import the `backtester`
+package once at startup; editing a shared module (`auto_trader_state.py`, `auto_trader.py`
+itself) never takes effect until the process is actually killed and relaunched — Streamlit's own
+"Rerun" prompt re-executes `app.py` but does NOT re-import already-imported modules, so it looks
+like nothing changed. Compounded by a second real mistake: repeated "restarts" without first
+confirming the old process was actually dead left THREE overlapping dashboard instances running
+at once (10:32am, 16:01, 16:21), each on whatever port Streamlit could grab, so the user kept
+looking at a stale one no matter how many times they restarted. Cleaned up by force-killing every
+leftover `python.exe`/`pythonw.exe`/`python3.13.exe` process tied to `streamlit run app.py` or
+`auto_trader.py`, confirming zero remained, then starting exactly one of each fresh. **The
+standing lesson**: after any edit to a shared module, verify old processes are actually gone
+(`Get-CimInstance Win32_Process`, not just closing a visible window — `auto_trader.py` in
+particular runs via `pythonw.exe`, no visible window at all) before declaring a restart done.
+
+**Extra targets extended to support more than one, then a real one added for OANDA
+(2026-08-08).** The dashboard's "Extra target" section only ever supported a SINGLE entry —
+`existing_extra = control.extra_targets[0]` and the save button did `fresh.extra_targets =
+[{...}]`, unconditionally replacing whatever was there — even though `AutoTraderControl.
+extra_targets` itself was always a plain list with no such limit. Only surfaced because the user
+wanted the existing IG forex extra target (EURUSD, Bollinger MR forex-tuned) to coexist with a
+new one for OANDA, and it would have silently clobbered IG's the moment anything else got saved.
+Fixed: the section now lists every existing extra target (label, accounts, tickers, strategy —
+each removable independently) above an "Add a new extra target" form that APPENDS rather than
+replaces (`fresh.extra_targets + [{...}]`).
+Added a real OANDA extra target using the just-validated (see the walk-forward entry above)
+Bollinger MR forex-tuned params (`period=20, num_std=4.0`) on **GBPUSD/USDJPY/AUDUSD/USDCAD** —
+deliberately the 4 major pairs NOT already covered by IG's EURUSD target, for broader coverage
+rather than duplicating the same pair on two brokers. All 4 are in `forex_universe.csv`'s known
+list (unlike EURGBP, which was only ever hand-listed for the playlist sweep) so they show up
+correctly pre-checked if the config is ever re-opened in the dashboard, rather than silently
+falling out of the visible selection. Verified: `app.py` syntax-checks clean; the two extra
+targets (IG + OANDA) coexist correctly in `control.json` after loading, appending, and reloading
+fresh — confirmed via direct save/reload, not just inspecting the file by eye. Dashboard
+restarted fresh afterward (this IS a code change, unlike a plain config edit — needed the
+restart per the lesson above); `auto_trader.py` itself did NOT need restarting for this one,
+since `extra_targets` is config it re-reads from `control.json` every cycle, not code.
+Like myOanda's addition to the primary account_ids, this can't actually place any real orders
+until the forex market reopens — both extra targets have existed/been added while markets are
+shut, so neither has been observed firing yet.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,
