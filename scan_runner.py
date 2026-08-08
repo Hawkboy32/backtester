@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 
 from backtester import playlist
 from backtester.data import PolygonClient
-from backtester.engine import ENGINE_VERSION
+from backtester.engine import ENGINE_VERSION, PositionMode
 from backtester.memory_report import save_report
 from backtester.playlist import PlaylistItem, PlaylistStatus
 from backtester.scan_db import record_scan
@@ -84,16 +84,25 @@ def run_item(item: PlaylistItem, status: PlaylistStatus) -> None:
     # just run_scan. An early failure escaping here would strand the item in
     # "running" forever and abort the whole queue, which a test caught.
     try:
-        universe_df = load_universe(item.universe)
-        tickers = sample_universe(universe_df, item.max_tickers)["ticker"].tolist()
+        if item.tickers:
+            # Explicit ticker list — skip universe sampling entirely (see
+            # PlaylistItem.tickers's own docstring for why).
+            tickers = list(item.tickers)
+        else:
+            universe_df = load_universe(item.universe)
+            tickers = sample_universe(universe_df, item.max_tickers)["ticker"].tolist()
         client = PolygonClient(requests_per_minute=int(item.requests_per_minute))
 
         # Same checkpoint scheme as the Scanner tab: an interrupted item resumes
-        # without re-fetching tickers it already finished.
+        # without re-fetching tickers it already finished. Includes every field
+        # that changes what gets fetched/computed — tickers/strategy_params/
+        # market_calendar/position_mode all included so two items that only
+        # differ in, say, position_mode never collide on the same checkpoint.
         config_key = (
-            f"{item.universe}|{item.max_tickers}|{sorted(item.strategy_names)}|{item.from_date}|"
-            f"{item.to_date}|{item.multiplier}|{item.timespan}|{item.vol_target_enabled}|"
-            f"{item.target_vol_ann}|{item.event_filter_enabled}"
+            f"{item.universe}|{item.max_tickers}|{sorted(tickers)}|{sorted(item.strategy_names)}|"
+            f"{item.strategy_params}|{item.from_date}|{item.to_date}|{item.multiplier}|"
+            f"{item.timespan}|{item.vol_target_enabled}|{item.target_vol_ann}|"
+            f"{item.event_filter_enabled}|{item.market_calendar}|{item.position_mode}"
         )
         results_dir = RESULTS_DIR / hashlib.sha256(config_key.encode()).hexdigest()[:16]
         checkpoint_path = results_dir / "scan_checkpoint.jsonl"
@@ -115,6 +124,9 @@ def run_item(item: PlaylistItem, status: PlaylistStatus) -> None:
             vol_target_enabled=item.vol_target_enabled,
             target_vol_ann=item.target_vol_ann,
             event_filter_enabled=item.event_filter_enabled,
+            market_calendar=item.market_calendar,
+            strategy_params=item.strategy_params or None,
+            position_mode=PositionMode(item.position_mode),
         )
     except KeyboardInterrupt:
         if stopped:
@@ -133,15 +145,19 @@ def run_item(item: PlaylistItem, status: PlaylistStatus) -> None:
         "run_at": _now(),
         "universe": item.universe,
         "num_tickers": len(tickers),
+        "tickers": tickers if item.tickers else None,
         "from_date": item.from_date,
         "to_date": item.to_date,
         "multiplier": int(item.multiplier),
         "timespan": item.timespan,
         "strategy_names": item.strategy_names,
+        "strategy_params": item.strategy_params or None,
         "engine_version": ENGINE_VERSION,
         "vol_target_enabled": item.vol_target_enabled,
         "target_vol_ann": item.target_vol_ann,
         "event_filter_enabled": item.event_filter_enabled,
+        "market_calendar": item.market_calendar,
+        "position_mode": item.position_mode,
         "source": "playlist",
     }
     try:

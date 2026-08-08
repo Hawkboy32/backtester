@@ -43,7 +43,19 @@ class PlaylistItem:
     label: str = ""
     universe: str = "S&P 500"
     max_tickers: int = 25
+    # Explicit ticker list — when non-empty, the runner uses these EXACT
+    # tickers instead of sampling `universe`/`max_tickers` (added 2026-08-08
+    # for the long/short comparison sweep, which needs specific confirmed
+    # pairings like TSLA/AAPL, not a random universe sample). Existing items
+    # with this left empty behave exactly as before — universe-sampled.
+    tickers: list[str] = field(default_factory=list)
     strategy_names: list[str] = field(default_factory=list)
+    # {strategy_name: {param: value}} overrides — added 2026-08-08 alongside
+    # `tickers`, same reasoning: without this the runner always used each
+    # strategy's bare REGISTRY_DEFAULTS, so any already-tuned param set
+    # (e.g. VWAP MR's entry_deviation_pct) couldn't be reused via a playlist
+    # item, only via the Scanner tab or an ad-hoc script.
+    strategy_params: dict = field(default_factory=dict)
     from_date: str = ""
     to_date: str = ""
     multiplier: int = 1
@@ -56,6 +68,17 @@ class PlaylistItem:
     vol_target_enabled: bool = False
     target_vol_ann: float = 20.0
     event_filter_enabled: bool = False
+    # "equity" (default, unchanged)/"crypto"/"forex" — added 2026-08-08
+    # alongside tickers/strategy_params. Previously the runner never passed
+    # this to run_scan at all, so every playlist item was silently annualized
+    # as if it were equities regardless of what it actually scanned — harmless
+    # while every item WAS equities, a real gap the moment a forex pairing
+    # (like the long/short sweep's GBPUSD/EURGBP bucket) gets queued.
+    market_calendar: str = "equity"
+    # "long_only" (default, unchanged) / "short_only" / "long_short" — see
+    # engine.PositionMode. Stored as the plain string value, not the enum,
+    # to stay JSON-safe like every other field here.
+    position_mode: str = "long_only"
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     status: str = PENDING
@@ -67,9 +90,13 @@ class PlaylistItem:
     error: str | None = None
 
     def describe(self) -> str:
-        return self.label or (
-            f"{self.universe} x{self.max_tickers} · {len(self.strategy_names)} strategies · "
-            f"{self.from_date}→{self.to_date} · {self.multiplier}{self.timespan[:1]}"
+        if self.label:
+            return self.label
+        ticker_part = f"{len(self.tickers)} tickers" if self.tickers else f"{self.universe} x{self.max_tickers}"
+        mode_part = f" [{self.position_mode}]" if self.position_mode != "long_only" else ""
+        return (
+            f"{ticker_part} · {len(self.strategy_names)} strategies · "
+            f"{self.from_date}→{self.to_date} · {self.multiplier}{self.timespan[:1]}{mode_part}"
         )
 
 

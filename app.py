@@ -3003,6 +3003,8 @@ def render_playlist_page() -> None:
                         bits.append("GARCH on")
                     if item.event_filter_enabled:
                         bits.append("event step-out on")
+                    if item.position_mode != "long_only":
+                        bits.append(f"mode: {item.position_mode}")
                     st.caption(" · ".join(bits))
                     if item.error:
                         st.error(item.error)

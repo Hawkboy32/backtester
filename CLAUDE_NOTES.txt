@@ -2121,11 +2121,40 @@ CLAUDE_NOTES.txt) verifies against — same `auth_config.yaml` + same `two_facto
   exists to not trust yet. (4) Confirmed `paramsweep.py` forwards `position_mode` correctly via
   a mocked `run_scan` call, without touching `paramsweep.py` at all.
 
-  **Step 3, next**: scope and run the actual long_only vs short_only vs long_short comparison
-  sweep — same 3-window walk-forward discipline, same asset pairings already used for the
-  vol-target sweep (or the live roster's own tickers), roughly comparable scan volume per mode.
-  Not started — infrastructure is ready, the actual comparison run is a separate step whenever
-  picked up.
+  **Step 3 — STARTED 2026-08-08, same day, running via the real "Backtest playlist" feature
+  (`app.py`'s Playlist page / `scan_runner.py`), not another ad-hoc script.** User's own explicit
+  ask: "set up a playlist of tests," and wanted each new mode run through the SAME number of
+  runs/combinations as the long tests. Checking `PlaylistItem` found it couldn't actually support
+  this yet — no `position_mode`, no `strategy_params` (always used bare STRATEGY_REGISTRY
+  defaults, never the already-tuned entry params), no `market_calendar` (silently always
+  annualized as equity — harmless until a forex item existed), and only universe-sampling, no
+  explicit ticker list (needed for the confirmed TSLA/AAPL, GLD/SLV, GBPUSD/EURGBP pairings, not
+  a random sample). Extended `playlist.py`'s `PlaylistItem` with all four (backward compatible —
+  an old item missing them loads with the same defaults as before, `describe()` only shows the
+  new bits when they're non-default) and `scan_runner.py`'s `run_item()` to actually use them
+  (explicit tickers skip universe-sampling entirely; checkpoint key and `record_scan` meta both
+  extended so two items differing only in `position_mode` never collide or lose provenance).
+
+  **Scope, mirroring the overnight vol-target sweep's own established asset pairings/windows/
+  tuned params exactly, with `position_mode` as the ONLY varying axis** (vol-target sizing left
+  OFF here — that's the separate, already-answered question from the earlier sweep, not
+  conflated with this one): 3 windows (the standard 04-16/05-19, 05-20/06-22, 06-23/07-26) x 3
+  asset buckets (Equities TSLA/AAPL, Gold-Silver GLD/SLV, Forex GBPUSD/EURGBP, same tuned entry
+  params as before — VWAP MR 0.3%/0.2%, Bollinger MR period=15,num_std=3.0 / period=20,num_std=4.0)
+  x 2 strategies x 3 position modes = **54 items queued, 18 per mode** — exactly matching the
+  user's own ask for equal runs/combinations across all three.
+  **Verified before queuing anything for real**: `PlaylistItem`'s new fields round-trip through
+  JSON correctly AND an old item missing them still loads fine with sane defaults (isolated temp
+  playlist file, real one untouched); `run_item()` passes tickers/strategy_params/market_calendar/
+  position_mode through to `run_scan` exactly as specified, and `record_scan`'s meta correctly
+  carries all four for provenance (mocked run_scan/record_scan, isolated files). Checked the REAL
+  playlist before queuing — 14 pre-existing items, all already DONE, runner not running — so the
+  54 new items were safe to append without clobbering or interrupting anything. Launched
+  `scan_runner.py` in the background; confirmed via the real status file it picked up the queue
+  correctly (`68/68` total, `18 long_only + 18 short_only + 18 long_short` pending, working
+  through the first item with a fresh heartbeat, zero errors). Results land in `scan_history.db`
+  exactly like any other scan, taggable by `source="playlist"` + the new `position_mode`/
+  `market_calendar`/`tickers` meta fields for whenever this gets analyzed.
 - **Trading 212's public API — worth checking back on, not actionable yet (2026-08-06, user's
   own flag).** Docs: https://docs.trading212.com/api (their docs site is JS-rendered, didn't
   fully load via fetch — pieced this together from search results instead). Currently: beta,

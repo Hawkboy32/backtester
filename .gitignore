@@ -22,3 +22,4 @@ live_trades.db
 .DS_Store
 risk_dial_sweep_results.jsonl
 risk_dial_sweep_log.txt
+shorting_sweep_log.txt
