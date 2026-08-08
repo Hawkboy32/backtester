@@ -36,6 +36,8 @@ def record_signal(
     source: str | None = None,
     recent_closes: list[float] | None = None,
     levels: dict[str, float] | None = None,
+    market_open: bool | None = None,
+    trading_accounts: list[str] | None = None,
 ) -> None:
     """Read-modify-write one ticker's entry. Never raises - a snapshot write
     failing must never be allowed to interrupt the actual trading cycle.
@@ -46,6 +48,14 @@ def record_signal(
     nickname for live data, or "Polygon"), recent_closes is a short trailing
     close-price series for a sparkline, levels is the strategy's own
     Strategy.levels() output (see backtester.conviction.compute_levels).
+
+    market_open/trading_accounts let the mobile app group signals by whether
+    the market is actually open for the account(s) that trade them, without
+    needing any broker-credential access of its own - auto_trader.py already
+    knows this every cycle (it has real broker connections), so it's simply
+    published here the same way source/recent_closes/levels already are.
+    market_open is None when trading_accounts is empty (no currently-linked
+    account trades this ticker's asset class) - "unknown", not "closed".
     """
     try:
         data = load_signals()
@@ -58,6 +68,8 @@ def record_signal(
             "source": source,
             "recent_closes": recent_closes,
             "levels": levels,
+            "market_open": market_open,
+            "trading_accounts": trading_accounts,
             "written_at": datetime.now(timezone.utc).isoformat(),
         }
         atomic_write_text(SIGNALS_PATH, json.dumps(data, indent=2))

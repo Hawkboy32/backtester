@@ -332,12 +332,23 @@ def _trade_target(
     # strategy is actually looking at without a second fetch of its own.
     snapshot_conviction = compute_conviction(strategy, bars, current) if signal.value != "hold" else None
     snapshot_levels = compute_levels(strategy, bars, current)
+    ticker_asset_class = accounts_module.infer_asset_class(ticker)
+    trading_accounts = [
+        a for a in broker_accounts
+        if ticker_asset_class in account_asset_classes.get(a.account_id, frozenset())
+    ]
+    market_open = (
+        any(a.account_id not in market_closed_account_ids for a in trading_accounts)
+        if trading_accounts else None
+    )
     current_signals.record_signal(
         ticker=ticker, strategy_name=strategy_name, signal=signal.value,
         price=float(current.close), conviction=snapshot_conviction,
         bar_timestamp=current.timestamp.isoformat(), source=source_label,
         recent_closes=[float(c) for c in bars["close"].tail(RECENT_CLOSES_COUNT)],
         levels=snapshot_levels,
+        market_open=market_open,
+        trading_accounts=[a.nickname for a in trading_accounts],
     )
 
     if signal.value == "hold":
@@ -382,7 +393,8 @@ def _trade_target(
     # attribution (BUY) and realized-P&L computation (SELL) after the fill.
     order_contexts: list[dict] = []
 
-    ticker_asset_class = accounts_module.infer_asset_class(ticker)
+    # ticker_asset_class computed earlier, just before record_signal() above —
+    # reused here rather than recomputed.
 
     for broker_account in broker_accounts:
         if broker_account.account_id in market_closed_account_ids:
