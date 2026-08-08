@@ -3096,6 +3096,37 @@ account_id actually goes live — re-confirm sizing looks right, confirm allow_l
 safeguards, and probably watch its first few real orders manually rather than trusting the
 automated loop unattended immediately, consistent with [[trading-bot-goals-and-risk-posture]].
 
+**Deposit made 2026-08-08 — real first step, deliberately tiny.** User funded the real Alpaca
+account with **£10** (not the full £100 discussed above), explicitly "to test the process" —
+2-3 days to clear, account not yet linked in the dashboard. Checking the numbers first: at the
+existing 1% `pct_equity` global sizing, a ~£10/$12.6 account sizes trades at ~$0.13 each —
+comfortably under Alpaca's real minimum fractional-order notional (~$1), so every live order
+would likely be REJECTED purely for being too small, never actually proving the plumbing works.
+
+**Built: per-account sizing override, so this doesn't require touching the paper accounts'
+sizing at all.** New `AutoTraderControl.account_sizing_overrides: dict[str, float]`
+(`{account_id: fixed $/trade}`) in `auto_trader_state.py` — an account not in the dict behaves
+exactly as before (global `sizing_mode`/`sizing_value`); one that IS present always sizes at
+that fixed dollar amount (still scaled by the GARCH `size_multiplier` the same way the global
+path is, so a storm-regime cut still applies). `auto_trader.py`'s `_trade_target` checks
+`control.account_sizing_overrides.get(broker_account.account_id)` right before the existing
+`compute_qty_for_account` call and swaps in `SizingMode.FIXED_DOLLARS` at the override value
+when present — a small, localized change, not a rework of the sizing path. Dashboard: the Auto
+Trading tab's per-account checkbox list now shows a "↳ Override sizing ($/trade — 0 = use the
+global sizing above)" number input under any checked account, wired into the same "Save
+configuration" button (`sizing_overrides` dict built alongside `selected_ids`).
+**Verified**: `AutoTraderControl` round-trips the new field through save/load correctly, AND an
+old `control.json` missing the key entirely still loads fine (backward compatible, default
+`{}`); confirmed the actual sizing math directly — a $100/share reference price against a
+$12.6-equity account with a $2 override produces exactly $2.00 notional (0.02 shares), versus
+$0.13 notional (0.0013 shares) on the old global-only `pct_equity` path, matching the numbers
+above exactly. Dashboard boots clean with the new UI (checked on a throwaway port, not the
+user's real running instance — couldn't click through the actual Auto Trading tab itself since
+that needs the user's real login, which this assistant doesn't have and shouldn't use).
+**Not yet used for real** — once the account is linked, the plan is to check it, set its
+override to $2/trade, leave the global sizing untouched for every other account, and go through
+the existing `allow_live` arm-phrase gate when actually ready to let it trade.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,

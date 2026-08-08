@@ -93,6 +93,13 @@ class AutoTraderControl:
     # Relies entirely on auto_trader.py's existing per-(ticker,account) asset-class crosstalk guard
     # to route correctly — an extra target's accounts get unioned into the same broker_accounts
     # pool the primary uses, not treated as a separate pass.
+    account_sizing_overrides: dict[str, float] = field(default_factory=dict)  # {account_id: fixed
+    # $/trade}, overriding the global sizing_mode/sizing_value for just that account — added
+    # 2026-08-08 for testing a real live account with a genuinely small, deliberate size (e.g. a
+    # £10 live pilot) without disturbing every other linked account's own sizing. Only FIXED_DOLLARS
+    # is supported as an override (that's the actual need — "trade this account at exactly $X" —
+    # not a general per-account sizing-mode selector nobody asked for). An account not in this dict
+    # behaves exactly as before, using the global sizing_mode/sizing_value.
     max_drawdown_enabled: bool = False  # account-level circuit breaker (see backtester.account_risk)
     max_drawdown_pct: float = 10.0  # % below peak equity that hard-blocks new entries for that account
     block_event_days: bool = True  # skip NEW entries on known risk-event days (FOMC — see backtester.events).

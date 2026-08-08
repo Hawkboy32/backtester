@@ -2600,6 +2600,7 @@ def render_auto_trading_tab() -> None:
         "(auto_trader.py's own asset-class guard), regardless of what's checked here."
     )
     selected_ids = []
+    sizing_overrides: dict[str, float] = {}
     for section_label, asset_class in [("Equities", "equity"), ("Forex & CFDs", "forex"), ("Crypto", "crypto")]:
         group = [a for a in linked if account_asset_class(a) == asset_class]
         if not group:
@@ -2615,6 +2616,15 @@ def render_auto_trading_tab() -> None:
             )
             if checked:
                 selected_ids.append(a["id"])
+                override = st.number_input(
+                    f"↳ Override sizing for {a['nickname']} ($/trade — 0 = use the global sizing above)",
+                    min_value=0.0,
+                    value=float(control.account_sizing_overrides.get(a["id"], 0.0)),
+                    step=1.0,
+                    key=f"auto_sizing_override_{a['id']}",
+                )
+                if override > 0:
+                    sizing_overrides[a["id"]] = override
     live_selected = [a for a in linked if a["id"] in selected_ids and not a["is_paper"]]
 
     allow_live = control.allow_live
@@ -2652,6 +2662,7 @@ def render_auto_trading_tab() -> None:
             max_trades_per_day=int(max_trades_per_day),
             sizing_mode=sizing_mode.value,
             sizing_value=sizing_value,
+            account_sizing_overrides=sizing_overrides,
             vol_target_enabled=vol_target_enabled,
             vol_target_ann=vol_target_ann,
             block_event_days=block_event_days,

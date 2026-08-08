@@ -443,9 +443,18 @@ def _trade_target(
             # a freshly-computed ~1.09 shares against a ~0.003-share remainder.
             qty = existing_position.qty
         else:
-            try:
+            account_override = control.account_sizing_overrides.get(broker_account.account_id)
+            if account_override is not None:
+                # Per-account override (e.g. a small live pilot account) - fixed
+                # dollars, still scaled by size_multiplier like the global path
+                # so a GARCH storm-regime cut still applies here too.
+                effective_sizing_mode = SizingMode.FIXED_DOLLARS
+                effective_sizing_value = account_override * size_multiplier
+            else:
+                effective_sizing_mode = sizing_mode
                 effective_sizing_value = control.sizing_value * size_multiplier
-                qty = compute_qty_for_account(broker_account, current.close, sizing_mode, effective_sizing_value)
+            try:
+                qty = compute_qty_for_account(broker_account, current.close, effective_sizing_mode, effective_sizing_value)
             except Exception as e:  # noqa: BLE001
                 status.last_error = f"{broker_account.nickname}: sizing failed: {e}"
                 continue
