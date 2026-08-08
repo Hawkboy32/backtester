@@ -1967,6 +1967,30 @@ Also queued (2026-08-07): OANDA as a real, order-placing account in the accounts
 just a data source) — see the PENDING IDEAS entry immediately below for the design. User asked
 about it, chose to log it for Saturday rather than build it in the moment.
 
+**DONE 2026-08-08 — dashboard 2FA wired into app.py's real login flow.** `require_auth()` now
+gates on `two_factor.is_enrolled(username)` after password success: enrolled users must pass a
+TOTP challenge (or a one-time recovery code) once per Streamlit session before the app renders
+(`_render_totp_challenge`), tracked via `st.session_state["totp_verified_user"]` — cleared
+automatically whenever auth_status isn't True, so a second/different login always re-challenges
+rather than trusting a stale session flag. Users who've never enrolled are never challenged
+(matches two_factor.py's own design — a mis-scanned QR can never lock anyone out). Enrollment UI
+added to the bottom of Settings (`_render_2fa_settings`): "Set up 2FA" generates a QR code (new
+`qrcode` dependency, `qrcode>=7.4` — Pillow was already present) from the provisioning URI, user
+scans + confirms with a real code before `complete_enrolment()` persists anything, then the 10
+recovery codes are shown once. Deliberately NO disable button in the UI — matches the module's
+own documented recovery path (a local-terminal `two_factor.disable(username)` call), shown as a
+copy-pasteable command instead once enrolled.
+Verified: full enrol -> wrong-code-rejected -> correct-code-accepted -> verify_code ->
+consume-recovery-code(single-use enforced) -> disable cycle smoke-tested end-to-end against the
+real pyotp/keyring/qrcode code paths (throwaway test username, cleaned up after). Dashboard
+boots clean with the change (checked via browser preview — login page renders, no server
+errors); couldn't verify the post-login TOTP challenge screen itself in-browser since that needs
+the real dashboard password, which this assistant doesn't have and shouldn't be typing in — one
+worth clicking through personally once to confirm the live UI, though the enrollment logic
+itself is now fully covered by the smoke test above.
+This is the foundation the mobile login + remote stop/re-arm feature (see Mobile_App's own
+CLAUDE_NOTES.txt) verifies against — same `auth_config.yaml` + same `two_factor.verify_code()`.
+
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
 - **OANDA paper account as a real execution venue, not just live data (2026-08-07, user's own
   ask).** Today `oanda_data.py` is GET-only (candles), OANDA isn't in `accounts.py`'s

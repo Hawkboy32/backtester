@@ -7,6 +7,7 @@ First-time setup (creates your login):  python scripts/setup_auth.py
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
 import sys
@@ -18,12 +19,13 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
+import qrcode
 import streamlit as st
 import streamlit_authenticator as stauth
 import yaml
 from streamlit_authenticator.utilities.exceptions import LoginError
 
-from backtester import events, execution_log, keystore
+from backtester import events, execution_log, keystore, two_factor
 from backtester.accounts import (
     BROKER_META,
     SUPPORTED_BROKERS,
@@ -229,6 +231,12 @@ def require_auth() -> tuple[stauth.Authenticate, str]:
         st.stop()
 
     auth_status = st.session_state.get("authentication_status")
+    if auth_status is not True:
+        # Not (or no longer) password-authenticated — drop any stale TOTP-passed
+        # flag from a previous login in this same browser session, so a second
+        # login (e.g. log out, log back in as someone else) always re-challenges
+        # 2FA rather than silently trusting the first login's verification.
+        st.session_state.pop("totp_verified_user", None)
     if auth_status is False:
         st.error("Username or password is incorrect.")
         st.stop()
@@ -237,7 +245,52 @@ def require_auth() -> tuple[stauth.Authenticate, str]:
         st.stop()
 
     username = st.session_state.get("username", "")
+
+    if two_factor.is_enrolled(username) and st.session_state.get("totp_verified_user") != username:
+        _render_totp_challenge(username)
+        st.stop()
+
     return authenticator, username
+
+
+def _render_totp_challenge(username: str) -> None:
+    """Second-factor gate shown after a successful password login, once per
+    Streamlit session (not re-asked on every rerun/page click — see the
+    totp_verified_user flag in require_auth). Only ever reached for a user who
+    has completed enrolment (two_factor.is_enrolled), so this can never lock
+    out someone who hasn't set 2FA up."""
+    st.title("Trading Bot Backtester")
+    st.subheader("Two-factor authentication")
+    st.caption("Enter the 6-digit code from your authenticator app.")
+
+    with st.form("totp_challenge_form"):
+        code = st.text_input("Authentication code", max_chars=10)
+        submitted = st.form_submit_button("Verify")
+    if submitted:
+        if two_factor.verify_code(code, username=username):
+            st.session_state["totp_verified_user"] = username
+            st.rerun()
+        else:
+            st.error("Incorrect code. Please try again.")
+
+    with st.expander("Use a recovery code instead"):
+        st.caption(
+            f"{two_factor.remaining_recovery_codes(username)} recovery code(s) remaining. "
+            "Each one can only be used once."
+        )
+        with st.form("totp_recovery_form"):
+            recovery_code = st.text_input("Recovery code")
+            recovery_submitted = st.form_submit_button("Use recovery code")
+        if recovery_submitted:
+            if two_factor.consume_recovery_code(username, recovery_code):
+                st.session_state["totp_verified_user"] = username
+                st.warning(
+                    f"Recovery code accepted — {two_factor.remaining_recovery_codes(username)} remaining. "
+                    "Consider re-enrolling 2FA from Settings soon to get a fresh set."
+                )
+                st.rerun()
+            else:
+                st.error("Invalid or already-used recovery code.")
 
 
 def render_settings_page() -> None:
@@ -532,6 +585,77 @@ no way to say "I'm off on purpose".
             else:
                 st.info("Nothing older than that to delete.")
             st.rerun()
+
+    st.divider()
+    _render_2fa_settings(st.session_state.get("username", ""))
+
+
+def _render_2fa_settings(username: str) -> None:
+    """Enrolment UI for src/backtester/two_factor.py — never enforced until
+    enrolment completes (a mis-scanned QR can never lock you out), and there's
+    deliberately no disable button here: the module's own documented recovery
+    path is a local-terminal `two_factor.disable(username)` call, not a
+    dashboard toggle — see that module's docstring for why."""
+    st.markdown("### Two-factor authentication (2FA)")
+    if not username:
+        st.caption("Log in to manage 2FA.")
+        return
+
+    if two_factor.is_enrolled(username):
+        st.success(
+            f"2FA is enabled for **{username}**. "
+            f"{two_factor.remaining_recovery_codes(username)} recovery code(s) remaining."
+        )
+        st.caption(
+            "To disable or reset 2FA, run this from a terminal on this machine: "
+            f'`python -c "from backtester import two_factor; two_factor.disable(\'{username}\')"`'
+        )
+        return
+
+    st.caption(
+        "Adds a 6-digit code (Google Authenticator, Authy, 1Password, etc.) on top of your "
+        "password — matters most once this dashboard is reachable from somewhere other than "
+        "this machine (e.g. over Tailscale), since a password alone would otherwise be enough "
+        "to control the bot."
+    )
+
+    if "totp_enrol_secret" not in st.session_state:
+        if st.button("Set up 2FA", key="totp_begin_enrol"):
+            secret, uri = two_factor.begin_enrolment(username)
+            st.session_state["totp_enrol_secret"] = secret
+            st.session_state["totp_enrol_uri"] = uri
+            st.rerun()
+        return
+
+    secret = st.session_state["totp_enrol_secret"]
+    uri = st.session_state["totp_enrol_uri"]
+    st.write("**1. Scan this QR code** in your authenticator app (or enter the key manually).")
+    qr_img = qrcode.make(uri)
+    buf = io.BytesIO()
+    qr_img.save(buf, format="PNG")
+    st.image(buf.getvalue(), width=220)
+    st.caption(f"Manual setup key: `{secret}`")
+
+    st.write("**2. Enter the 6-digit code** your app is now showing, to confirm it's set up correctly.")
+    with st.form("totp_complete_enrol_form"):
+        confirm_code = st.text_input("Authentication code", max_chars=10, key="totp_confirm_code")
+        confirm_submitted = st.form_submit_button("Confirm and enable 2FA")
+    if confirm_submitted:
+        codes = two_factor.complete_enrolment(username, secret, confirm_code)
+        if codes is None:
+            st.error("Incorrect code — check your app and try again.")
+        else:
+            del st.session_state["totp_enrol_secret"]
+            del st.session_state["totp_enrol_uri"]
+            st.session_state["totp_verified_user"] = username  # already proved possession this session
+            st.success("2FA enabled. Save these recovery codes now — this is the only time they're shown:")
+            st.code("\n".join(codes))
+            st.warning("Each code works once. Store them somewhere safe (password manager, printed copy) — not in this project's repo.")
+
+    if st.button("Cancel setup", key="totp_cancel_enrol"):
+        del st.session_state["totp_enrol_secret"]
+        del st.session_state["totp_enrol_uri"]
+        st.rerun()
 
 
 BACKTEST_CONFIG_KEYS = [
