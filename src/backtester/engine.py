@@ -1,12 +1,25 @@
-"""Single-asset, long-only backtest engine.
+"""Single-asset backtest engine — long-only by default, with optional
+short-only / long+short modes (see PositionMode below).
 
 Executes trades at the close of the bar on which a signal fires (no
 look-ahead: the strategy only sees history up to and including that bar).
+
+SHORT-SELLING SUPPORT (2026-08-08, see CLAUDE_NOTES.txt "Add short-selling
+as a real, separately-validated mode"). `shares` becomes negative to
+represent an open short — this is deliberately NOT a bolted-on separate code
+path: `equity = cash + shares * close` and `Trade.pnl = (exit - entry) *
+shares` are BOTH already sign-symmetric (verified: a short's cash proceeds
+land in `cash`, a negative `shares` then correctly subtracts a rising
+liability / adds a falling one). The only real new logic is which signal is
+allowed to OPEN vs CLOSE in which direction — see `position_mode` below.
+`PositionMode.LONG_ONLY` (the default) reproduces every existing result
+byte-for-byte — nothing about the long-only path changed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 
 import pandas as pd
 
@@ -21,7 +34,13 @@ from backtester.strategy import Bar, Signal, Strategy
 # both BUY and SELL fills, making a round trip's real transaction cost
 # silently near-zero regardless of the slippage_bps setting — every scan run
 # before this tag existed was computed under that bug.
-ENGINE_VERSION = "2026-07-27-directional-slippage-fix"
+ENGINE_VERSION = "2026-08-08-position-mode-shorting"
+
+
+class PositionMode(Enum):
+    LONG_ONLY = "long_only"
+    SHORT_ONLY = "short_only"
+    LONG_SHORT = "long_short"
 
 
 def _session_window_starts(index: pd.DatetimeIndex, sessions_needed: int) -> list[int]:
@@ -51,6 +70,8 @@ class Trade:
     entry_price: float
     exit_time: pd.Timestamp | None = None
     exit_price: float | None = None
+    # Positive = long, NEGATIVE = short (see module docstring — this sign
+    # convention is what makes .pnl below correct for both without a branch).
     shares: float = 0.0
     conviction: float | None = None  # [0,1] entry-signal strength (#25); logged only, never sizes
 
@@ -76,24 +97,36 @@ class BacktestEngine:
         slippage_bps: float = 0.0,
         regime_by_date: dict | None = None,
         blocked_dates: set | None = None,
+        position_mode: PositionMode = PositionMode.LONG_ONLY,
     ):
         """regime_by_date: optional {date: {"regime": "calm"/"normal"/"storm", "size_multiplier": float}},
         e.g. from backtester.volatility.regime_by_date(). When a bar's date has
-        an entry: new BUY entries are blocked while regime == "storm", and the
-        cash committed to a new position is scaled by size_multiplier instead
-        of using all available cash. Dates with no entry (or when this is
-        None) behave exactly as before — all-in, no filter.
+        an entry: new entries (either direction — see position_mode) are
+        blocked while regime == "storm", and the cash committed to a new
+        position is scaled by size_multiplier instead of using all available
+        cash. Dates with no entry (or when this is None) behave exactly as
+        before — all-in, no filter.
 
         blocked_dates: optional set of datetime.date on which NEW entries are
         suppressed (exits still fire) — e.g. backtester.events
         .blocked_dates_in_range() for known risk-event days like FOMC. The
         proactive complement to the reactive storm-regime block above.
+
+        position_mode: which signal direction(s) may OPEN a new position —
+        LONG_ONLY (default, today's exact existing behavior: BUY opens/SELL
+        closes only), SHORT_ONLY (SELL opens a short/BUY closes it — mirrors
+        LONG_ONLY exactly, just flipped), or LONG_SHORT (either signal may
+        open while flat, whichever fires first — still only ONE position
+        open at a time, never both directions simultaneously). See the
+        module docstring for why this needed no change to the P&L/equity
+        math itself, only to which signal is allowed to open/close when.
         """
         self.starting_cash = starting_cash
         self.commission_per_trade = commission_per_trade
         self.slippage_bps = slippage_bps
         self.regime_by_date = regime_by_date
         self.blocked_dates = blocked_dates
+        self.position_mode = position_mode
 
     def run(self, bars: pd.DataFrame, strategy: Strategy) -> BacktestResult:
         if bars.empty:
@@ -162,7 +195,11 @@ class BacktestEngine:
                 and pd.Timestamp(current.timestamp).date() in self.blocked_dates
             )
 
-            if signal is Signal.BUY and shares == 0 and regime != "storm" and not event_blocked:
+            can_open_long = self.position_mode in (PositionMode.LONG_ONLY, PositionMode.LONG_SHORT)
+            can_open_short = self.position_mode in (PositionMode.SHORT_ONLY, PositionMode.LONG_SHORT)
+            allow_new_entry = regime != "storm" and not event_blocked
+
+            if signal is Signal.BUY and shares == 0 and can_open_long and allow_new_entry:
                 spend = cash * size_multiplier
                 if spend > self.commission_per_trade:
                     shares = (spend - self.commission_per_trade) / buy_fill_price
@@ -174,11 +211,36 @@ class BacktestEngine:
                         entry_time=current.timestamp, entry_price=buy_fill_price,
                         shares=shares, conviction=conviction,
                     )
+            elif signal is Signal.SELL and shares == 0 and can_open_short and allow_new_entry:
+                # Opens a SHORT — shares goes negative (see module docstring for
+                # why equity/pnl need no special-casing for this). Sized the
+                # same way a long entry is: the notional "spend" is the short's
+                # dollar exposure, not literal cash outlay (a short generates
+                # proceeds rather than consuming cash up front).
+                spend = cash * size_multiplier
+                if spend > self.commission_per_trade:
+                    shares = -(spend - self.commission_per_trade) / sell_fill_price
+                    cash += abs(shares) * sell_fill_price - self.commission_per_trade
+                    conviction = compute_conviction(strategy, history, current)
+                    open_trade = Trade(
+                        entry_time=current.timestamp, entry_price=sell_fill_price,
+                        shares=shares, conviction=conviction,
+                    )
             elif signal is Signal.SELL and shares > 0:
+                # Closes an existing LONG (unchanged from before position_mode existed).
                 cash += shares * sell_fill_price - self.commission_per_trade
                 if open_trade is not None:
                     open_trade.exit_time = current.timestamp
                     open_trade.exit_price = sell_fill_price
+                    trades.append(open_trade)
+                    open_trade = None
+                shares = 0.0
+            elif signal is Signal.BUY and shares < 0:
+                # Closes an existing SHORT — buying back to cover costs cash.
+                cash -= abs(shares) * buy_fill_price + self.commission_per_trade
+                if open_trade is not None:
+                    open_trade.exit_time = current.timestamp
+                    open_trade.exit_price = buy_fill_price
                     trades.append(open_trade)
                     open_trade = None
                 shares = 0.0
@@ -187,11 +249,16 @@ class BacktestEngine:
             # Sanity guard against the accounting corruption seen in scan run 3
             # (silent sub -100% returns from phantom negative shares). With
             # entries blocked when spend <= commission, the one LEGITIMATE way
-            # equity dips below zero is a final sell whose proceeds are smaller
-            # than the commission — a busted account ends at worst -commission,
-            # like a real brokerage charging the fee anyway. Anything deeper
+            # a LONG-side equity dips below zero is a final sell whose proceeds
+            # are smaller than the commission — a busted account ends at worst
+            # -commission, like a real brokerage charging the fee anyway.
+            # Deep negative equity IS legitimate for an open short that's moved
+            # heavily against it (unbounded loss potential, unlike a long), so
+            # this guard only applies while flat or long (shares >= 0) — a
+            # short's own accounting is checked by the symmetric-math tests
+            # instead, not this floor. Anything deeper
             # than that is a genuine invariant violation.
-            if equity < -(self.commission_per_trade + 1e-6):
+            if shares >= 0 and equity < -(self.commission_per_trade + 1e-6):
                 raise RuntimeError(
                     f"Equity went to {equity:.2f} at {current.timestamp} — below the "
                     f"-commission floor ({-self.commission_per_trade:.2f}) that a busted "
@@ -202,12 +269,19 @@ class BacktestEngine:
 
         if open_trade is not None:
             last_row = bars.iloc[-1]
-            # A forced liquidation at the end of the window is still a real SELL —
-            # it must slip the same way an in-loop exit would, not fill at a
-            # frictionless raw close (that was a second, smaller instance of the
-            # same "final exit gets a free ride" gap fixed above).
+            # A forced liquidation at the end of the window is still a real
+            # fill — it must slip the same way an in-loop exit would, not fill
+            # at a frictionless raw close (that was a second, smaller instance
+            # of the same "final exit gets a free ride" gap fixed above).
+            # Direction depends on what's actually open: a long liquidates via
+            # a SELL (slips down), a short liquidates via a BUY-to-cover
+            # (slips up) — get this backwards and a short's final exit would
+            # silently look more profitable than a real cover ever would.
             open_trade.exit_time = bars.index[-1]
-            open_trade.exit_price = last_row["close"] * (1 - self.slippage_bps / 10_000)
+            if shares > 0:
+                open_trade.exit_price = last_row["close"] * (1 - self.slippage_bps / 10_000)
+            else:
+                open_trade.exit_price = last_row["close"] * (1 + self.slippage_bps / 10_000)
             trades.append(open_trade)
 
         equity_curve = pd.Series(equity_values, index=bars.index, name="equity")

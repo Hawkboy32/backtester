@@ -19,7 +19,7 @@ import pandas as pd
 
 from backtester import events, volatility
 from backtester.data import PolygonClient, PolygonError
-from backtester.engine import BacktestEngine
+from backtester.engine import BacktestEngine, PositionMode
 from backtester.metrics import (
     MARKET_CALENDARS,
     compute_report,
@@ -95,6 +95,7 @@ def run_scan(
     event_filter_enabled: bool = False,
     market_calendar: str = "equity",
     strategy_params: dict[str, dict] | None = None,
+    position_mode: PositionMode = PositionMode.LONG_ONLY,
 ) -> list[ScanResultRow]:
     """strategy_params: optional {strategy_name: {param: value}} overrides,
     merged over that strategy's STRATEGY_REGISTRY defaults (same merge
@@ -127,6 +128,15 @@ def run_scan(
     "equity" reproduces every existing equities scan's numbers exactly —
     getting this wrong doesn't error, it silently mis-annualizes Sharpe, so
     it must be set explicitly per-scan rather than guessed from the ticker.
+
+    position_mode: passed straight through to BacktestEngine — LONG_ONLY
+    (default, every existing scan's exact behavior, unchanged), SHORT_ONLY,
+    or LONG_SHORT (see engine.py's PositionMode / module docstring for the
+    full design). The seam a future short-selling sweep script uses —
+    paramsweep.py's run_param_sweep/run_walkforward_sweep already forward
+    **scan_kwargs straight through to this function, so passing
+    position_mode=PositionMode.SHORT_ONLY (etc.) there needs no changes to
+    paramsweep.py itself.
     """
     unknown = [name for name in strategy_names if name not in STRATEGY_REGISTRY]
     if unknown:
@@ -168,6 +178,7 @@ def run_scan(
                 slippage_bps=slippage_bps,
                 regime_by_date=regime_by_date,
                 blocked_dates=blocked_dates,
+                position_mode=position_mode,
             )
             result = engine.run(bars, strategy)
             report = compute_report(result.equity_curve, result.trades, periods_per_year=periods_per_year)

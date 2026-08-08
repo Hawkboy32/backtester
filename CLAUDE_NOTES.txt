@@ -2073,8 +2073,59 @@ CLAUDE_NOTES.txt) verifies against — same `auth_config.yaml` + same `two_facto
      mode(s) actually get trusted with money come from THAT evidence, not from the backtest
      numbers alone, matching how every other strategy here has been treated.
   Explicitly a SEPARATE project from the real-money live pilot already in motion (see the PLAN
-  entry above) — not to be bundled into that prep. Nothing built yet — this is a discussion
-  record and an agreed plan, not code.
+  entry above) — not to be bundled into that prep.
+
+  **DONE 2026-08-08 — steps 1-2 built (infrastructure), step 3 (actual comparison sweep) not
+  started yet.** User asked to "set everything up for shorting testing," with plenty of time
+  spare the same day.
+
+  **Step 1 — `engine.py`, exactly as planned.** New `PositionMode` enum (`LONG_ONLY`/
+  `SHORT_ONLY`/`LONG_SHORT`), a `position_mode` constructor param on `BacktestEngine` (default
+  `LONG_ONLY`). The key design insight, verified before writing any entry/exit logic: `equity =
+  cash + shares * close` and `Trade.pnl = (exit - entry) * shares` are BOTH already sign-
+  symmetric — a short's cash proceeds land in `cash`, negative `shares` then correctly
+  represents the liability, no formula changes needed anywhere. The only real new logic is which
+  signal is allowed to OPEN/CLOSE in which direction (`can_open_long`/`can_open_short` gates).
+  Two real correctness details the plan's own step 1 flagged and that got handled specifically:
+  (a) the "-commission equity floor" sanity guard (catches phantom-negative-share accounting
+  bugs) now only applies while flat-or-long — deep negative equity is a LEGITIMATE outcome for a
+  short that's moved heavily against it, not a bug; (b) the end-of-window forced-liquidation
+  slippage direction now depends on what's actually open — a long liquidates via a slipped-down
+  SELL (unchanged), a short liquidates via a slipped-UP buy-to-cover (new) — getting this
+  backwards would have silently made a short's final exit look better than a real cover ever
+  would. `ENGINE_VERSION` bumped (`2026-08-08-position-mode-shorting`) per its own stated
+  purpose — a real new capability, worth scan-provenance tracking even though `LONG_ONLY`'s
+  output is byte-identical to before.
+
+  **Step 2 — reconsidered, then built the actually-useful version.** The plan said "add a
+  selector to the dashboard wherever sweeps/walk-forward are configured" — but checking `app.py`
+  directly found NO param-sweep or walk-forward UI exists there at all; every sweep this project
+  has ever run (Phase 1-4, the OANDA vol-target sweep) went through ad-hoc scripts, never the
+  dashboard. So instead: threaded `position_mode` straight through `scanner.run_scan()` (the
+  actual shared entry point every code path funnels through — dashboard, scanner tab, AND sweep
+  scripts alike), which `paramsweep.py`'s `run_param_sweep`/`run_walkforward_sweep` already
+  forward via `**scan_kwargs` — confirmed this needed ZERO changes to `paramsweep.py` itself.
+
+  **Verified, in order**: (1) 8 scripted-strategy unit tests against a fake deterministic
+  strategy — LONG_ONLY regression (exact same trade/pnl shape as before), SHORT_ONLY opens on
+  SELL/closes on BUY with correct profit-on-fall and loss-on-rise P&L, SHORT_ONLY correctly
+  ignores a BUY-to-open signal, LONG_SHORT opens whichever direction fires first while flat
+  (both directions individually), storm-regime blocks a new SHORT the same way it already
+  blocked a new long, end-of-window forced liquidation of an open short slips in the buy-to-cover
+  direction (not the sell direction) — all passed. (2) Re-ran the EXACT scan (TSLA/VWAP MR,
+  2026-06-23/07-26, vol-target 15%) already verified earlier this session — byte-identical
+  Sharpe (-2.1682...) confirming zero regression on the default path. (3) Real live `run_scan`
+  call with `position_mode=SHORT_ONLY` against real Polygon data — worked cleanly, produced a
+  real (very different, Sharpe +2.48 vs -2.17) result — genuinely interesting but a SINGLE
+  ticker/window, exactly the in-sample-only result this project's own walk-forward discipline
+  exists to not trust yet. (4) Confirmed `paramsweep.py` forwards `position_mode` correctly via
+  a mocked `run_scan` call, without touching `paramsweep.py` at all.
+
+  **Step 3, next**: scope and run the actual long_only vs short_only vs long_short comparison
+  sweep — same 3-window walk-forward discipline, same asset pairings already used for the
+  vol-target sweep (or the live roster's own tickers), roughly comparable scan volume per mode.
+  Not started — infrastructure is ready, the actual comparison run is a separate step whenever
+  picked up.
 - **Trading 212's public API — worth checking back on, not actionable yet (2026-08-06, user's
   own flag).** Docs: https://docs.trading212.com/api (their docs site is JS-rendered, didn't
   fully load via fetch — pieced this together from search results instead). Currently: beta,
