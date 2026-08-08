@@ -93,13 +93,15 @@ class AutoTraderControl:
     # Relies entirely on auto_trader.py's existing per-(ticker,account) asset-class crosstalk guard
     # to route correctly — an extra target's accounts get unioned into the same broker_accounts
     # pool the primary uses, not treated as a separate pass.
-    account_sizing_overrides: dict[str, float] = field(default_factory=dict)  # {account_id: fixed
-    # $/trade}, overriding the global sizing_mode/sizing_value for just that account — added
-    # 2026-08-08 for testing a real live account with a genuinely small, deliberate size (e.g. a
-    # £10 live pilot) without disturbing every other linked account's own sizing. Only FIXED_DOLLARS
-    # is supported as an override (that's the actual need — "trade this account at exactly $X" —
-    # not a general per-account sizing-mode selector nobody asked for). An account not in this dict
-    # behaves exactly as before, using the global sizing_mode/sizing_value.
+    account_sizing_overrides: dict[str, dict] = field(default_factory=dict)  # {account_id:
+    # {"below_equity": float, "fixed_dollars": float}}, overriding the global sizing_mode/
+    # sizing_value for just that account WHILE its own equity stays under below_equity — added
+    # 2026-08-08 for a genuinely small live pilot account (e.g. a £10 deposit): trade it at a
+    # fixed, deliberate size while it's small, then auto-revert to the same global sizing (e.g.
+    # 1% pct_equity) every other account uses once it's grown past the threshold, with no manual
+    # switch-over needed. Re-evaluated fresh against a live equity snapshot on every entry signal,
+    # not a one-time decision. An account not in this dict behaves exactly as before, always using
+    # the global sizing_mode/sizing_value regardless of its equity.
     max_drawdown_enabled: bool = False  # account-level circuit breaker (see backtester.account_risk)
     max_drawdown_pct: float = 10.0  # % below peak equity that hard-blocks new entries for that account
     block_event_days: bool = True  # skip NEW entries on known risk-event days (FOMC — see backtester.events).

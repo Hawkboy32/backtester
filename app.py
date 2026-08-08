@@ -2600,7 +2600,7 @@ def render_auto_trading_tab() -> None:
         "(auto_trader.py's own asset-class guard), regardless of what's checked here."
     )
     selected_ids = []
-    sizing_overrides: dict[str, float] = {}
+    sizing_overrides: dict[str, dict] = {}
     for section_label, asset_class in [("Equities", "equity"), ("Forex & CFDs", "forex"), ("Crypto", "crypto")]:
         group = [a for a in linked if account_asset_class(a) == asset_class]
         if not group:
@@ -2616,15 +2616,31 @@ def render_auto_trading_tab() -> None:
             )
             if checked:
                 selected_ids.append(a["id"])
-                override = st.number_input(
-                    f"↳ Override sizing for {a['nickname']} ($/trade — 0 = use the global sizing above)",
-                    min_value=0.0,
-                    value=float(control.account_sizing_overrides.get(a["id"], 0.0)),
-                    step=1.0,
-                    key=f"auto_sizing_override_{a['id']}",
-                )
-                if override > 0:
-                    sizing_overrides[a["id"]] = override
+                existing_override = control.account_sizing_overrides.get(a["id"], {})
+                ocol1, ocol2 = st.columns(2)
+                with ocol1:
+                    below_equity = st.number_input(
+                        f"↳ {a['nickname']}: small-account sizing while equity is below ($, 0 = disabled)",
+                        min_value=0.0,
+                        value=float(existing_override.get("below_equity", 0.0)),
+                        step=10.0,
+                        key=f"auto_sizing_threshold_{a['id']}",
+                    )
+                with ocol2:
+                    fixed_dollars = st.number_input(
+                        f"↳ {a['nickname']}: fixed $/trade while below that",
+                        min_value=0.0,
+                        value=float(existing_override.get("fixed_dollars", 0.0)),
+                        step=1.0,
+                        key=f"auto_sizing_fixed_{a['id']}",
+                    )
+                if below_equity > 0 and fixed_dollars > 0:
+                    sizing_overrides[a["id"]] = {"below_equity": below_equity, "fixed_dollars": fixed_dollars}
+                elif below_equity > 0 or fixed_dollars > 0:
+                    st.warning(
+                        f"{a['nickname']}: set BOTH the threshold and the fixed $/trade for the "
+                        "override to apply — half-set values are ignored."
+                    )
     live_selected = [a for a in linked if a["id"] in selected_ids and not a["is_paper"]]
 
     allow_live = control.allow_live

@@ -3127,6 +3127,29 @@ that needs the user's real login, which this assistant doesn't have and shouldn'
 override to $2/trade, leave the global sizing untouched for every other account, and go through
 the existing `allow_live` arm-phrase gate when actually ready to let it trade.
 
+**Extended to auto-switch, same day, user's own idea.** The flat per-account override above
+required manually flipping it off once the account grew — instead, `account_sizing_overrides`
+now stores `{account_id: {"below_equity": float, "fixed_dollars": float}}` rather than a plain
+float. `auto_trader.py`'s `_trade_target` fetches a live equity snapshot for any account with an
+override configured and checks it FRESH on every entry signal (not decided once at startup): below
+the threshold, sizes at the fixed dollar amount; at or above it, automatically falls back to
+whatever the global `sizing_mode`/`sizing_value` is (currently 1% `pct_equity`, same as every
+other account) — no manual switch-over needed either direction. Still scaled by
+`size_multiplier` either way, so a GARCH storm-regime cut applies under the override too.
+Applied to `AlpacaLive`: `below_equity=65` (~£50 at a recent ~1.27 GBP/USD rate — no live FX
+conversion exists in this codebase, so this is a rounded USD approximation, not an exact
+figure; flagged to the user, welcome to correct with an exact number), `fixed_dollars=2` (the
+same test size already agreed). Dashboard's per-account override UI now takes two numbers
+("small-account sizing while equity is below $X" / "fixed $/trade while below that") instead of
+one, and only applies when BOTH are set (a `st.warning` catches a half-filled pair rather than
+silently doing nothing).
+**Verified**: the boundary behaves correctly in both directions — $12.60 and $64.99 equity both
+size at exactly $2.00 fixed; $65.00 and above switch cleanly to 1% `pct_equity` (matching the
+global rate exactly, e.g. $5,000 equity → $50.00/trade). The new nested-dict shape round-trips
+through save/load correctly. This is a real logic change inside `auto_trader.py` itself, not
+just a config value — needs the live `auto_trader.py` process restarted to take effect, same
+"stale in-memory import" lesson as below, not just a dashboard restart.
+
 **Real gotcha hit twice in a row while doing all this (2026-08-08) — worth a standing reminder.**
 Both the dashboard and `auto_trader.py` are long-running processes that import the `backtester`
 package once at startup; editing a shared module (`auto_trader_state.py`, `auto_trader.py`
