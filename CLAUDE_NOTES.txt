@@ -3220,6 +3220,25 @@ Like myOanda's addition to the primary account_ids, this can't actually place an
 until the forex market reopens — both extra targets have existed/been added while markets are
 shut, so neither has been observed firing yet.
 
+=== FULL REBRAND: STAR WARS COLOUR THEME (2026-08-09) ===
+Follow-up to the earlier Holotable/Datapad name-only rename — user wanted a real colour theme
+too this time, images excluded (they're sourcing those themselves). Direction: since the
+dashboard is literally named "Holotable," went with an actual hologram palette rather than
+generic sci-fi colours — a cyan-blue glow (`#3dc7f0`) on a near-black, faintly blue backdrop
+(`#0b0e14`), with a warm gold (`#e0a94a`) as the secondary accent. Same two hex pairs used
+identically across all three surfaces (dashboard, mobile app, widget/bubble) deliberately, so
+it reads as one brand, not three separate reskins.
+`.streamlit/config.toml`: `primaryColor`/`backgroundColor`/`secondaryBackgroundColor`/
+`textColor` updated to the new palette; kept `base = "dark"` and `font = "monospace"` as-is —
+monospace already suits a console/readout feel, no reason to touch it.
+**Verified against the real running dashboard, not just visual inspection**: restarted fresh,
+hit it via the Browser tool, read `getComputedStyle` on `document.body` directly — background
+`rgb(11, 14, 20)` and text `rgb(232, 241, 250)` both matched the configured hex exactly. Could
+only check the pre-login page (no real credentials in this session) — the authenticated pages
+inherit the same Streamlit theme automatically, but haven't been eyeballed directly.
+See Mobile_App's own CLAUDE_NOTES.txt for the Flutter/widget/bubble side of this same change —
+same two colours, `ColorScheme.fromSeed` there instead of a theme.toml.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,
