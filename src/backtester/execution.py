@@ -23,6 +23,44 @@ class SizingMode(Enum):
     FIXED_DOLLARS = "fixed_dollars"
 
 
+def sliding_pct_equity(equity: float, start_pct: float, target_pct: float, floor_notional: float = 1.0) -> float:
+    """The %-of-equity sizing rate for a small account that's sliding from an
+    aggressive starting rate down toward the account's real target rate as it
+    grows — replaces a hard equity threshold (auto_trader_state.py's earlier
+    account_sizing_overrides shape) with a smooth interpolation, added
+    2026-08-09 at the user's own suggestion after the earlier threshold was
+    found to not actually line up with when the target rate clears a real
+    broker's minimum order size.
+
+    Both ends of the slide are DERIVED from floor_notional (the broker's real
+    minimum notional per order, e.g. Alpaca's ~$1 for fractional shares), not
+    picked arbitrarily:
+      - e_lo = floor_notional / (start_pct/100): the equity at which
+        start_pct ITSELF barely clears the floor. Below this even the
+        aggressive starting rate can't place a valid order, so the rate
+        stays pinned at start_pct rather than trying to go higher.
+      - e_hi = floor_notional / (target_pct/100): the equity at which the
+        account's real target_pct clears the floor on its own - past this
+        point there's no more reason to boost sizing above target_pct, so
+        the slide is done and this function is no longer even needed by the
+        caller (target_pct applies directly).
+    Interpolated log-linearly in equity between the two (so the visually
+    "smooth" decline happens over the actual order-of-magnitude range that
+    matters, e.g. $2 to $100, not skewed by a linear equity axis), with the
+    rate itself interpolated linearly between start_pct and target_pct.
+    """
+    if target_pct <= 0 or start_pct <= target_pct:
+        return target_pct
+    e_lo = floor_notional / (start_pct / 100)
+    e_hi = floor_notional / (target_pct / 100)
+    if equity <= e_lo:
+        return start_pct
+    if equity >= e_hi:
+        return target_pct
+    frac = (math.log(equity) - math.log(e_lo)) / (math.log(e_hi) - math.log(e_lo))
+    return start_pct + (target_pct - start_pct) * frac
+
+
 @dataclass
 class AccountOrder:
     account: BrokerAccount

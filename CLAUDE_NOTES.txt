@@ -3179,6 +3179,41 @@ through save/load correctly. This is a real logic change inside `auto_trader.py`
 just a config value — needs the live `auto_trader.py` process restarted to take effect, same
 "stale in-memory import" lesson as below, not just a dashboard restart.
 
+**Redesigned from a hard threshold to a smooth slide (2026-08-09), user's own suggestion after
+backtesting exposed a real gap.** The £10 backtest comparisons that day (see the shorting/sizing
+entries below) surfaced two problems with the flat $65 threshold above: (1) it didn't line up
+with the actual global rate — 1% only clears Alpaca's ~$1 minimum order size at $100+ equity, not
+$65, so the account would have kept getting rejected between $65-$100 even after "switching" to
+pct_equity; (2) a hard switch is a discontinuity, not a real reason to prefer one specific dollar
+value over another nearby one. User's own reframing: since it's genuinely small money either way,
+size aggressively (50%) while tiny and let it SLIDE down smoothly toward the real target rate as
+the account grows, rather than picking one flip point.
+
+New `backtester.execution.sliding_pct_equity(equity, start_pct, target_pct, floor_notional=1.0)`:
+both ends of the slide are DERIVED from the real broker minimum, not picked arbitrarily —
+`e_lo = floor_notional / (start_pct/100)` (equity where start_pct itself barely clears the
+floor — below this it's pinned at start_pct, can't go higher) and `e_hi = floor_notional /
+(target_pct/100)` (equity where the account's real target rate clears the floor on its own — the
+slide is done, target_pct applies directly from there). Log-linear in equity between the two,
+percentage interpolated linearly between start_pct and target_pct. `target_pct` is ALWAYS read
+live as `control.sizing_value` (never stored in the override itself), so — unlike the $65
+threshold — this can't drift out of sync if the global risk preset ever changes later.
+`account_sizing_overrides` shape changed again: `{"slide_start_pct": float,
+"slide_floor_notional": float}` replacing `{"below_equity", "fixed_dollars"}`. `auto_trader.py`'s
+`_trade_target` now always uses `SizingMode.PCT_EQUITY` under an override (never
+`FIXED_DOLLARS`), with `sliding_pct_equity()`'s output as the computed `sizing_value`. Dashboard
+UI (Auto Trading tab) updated to match — two inputs (start %, broker minimum $) plus a live
+caption showing the actual computed e_lo/e_hi equity thresholds for whatever's typed in, so the
+shape is visible before saving, not just implied.
+**Verified end to end**, not just the math function in isolation: built a fake `BrokerAccount`
+and ran the EXACT same `compute_qty_for_account(account, price, SizingMode.PCT_EQUITY,
+sliding_pct_equity(...))` call path `auto_trader.py` actually makes. $12.60 (today's real
+starting equity) → 26.95% → $3.40/trade; $100 → exactly 1.0% → $1.00 (right at the floor, as
+designed); $500/$5,000 → flat 1% global rate, scaling normally. AlpacaLive's real
+`account_sizing_overrides` entry in `control.json` migrated from the old shape to
+`{"slide_start_pct": 50.0, "slide_floor_notional": 1.0}`. Both the dashboard and `auto_trader.py`
+restarted fresh afterward (this changes `auto_trader.py`'s own sizing logic, not just config).
+
 **Real gotcha hit twice in a row while doing all this (2026-08-08) — worth a standing reminder.**
 Both the dashboard and `auto_trader.py` are long-running processes that import the `backtester`
 package once at startup; editing a shared module (`auto_trader_state.py`, `auto_trader.py`

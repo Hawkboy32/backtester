@@ -75,7 +75,13 @@ from backtester.auto_trader_state import (
 )
 from backtester.brokers.base import BrokerAccount, OrderSide
 from backtester.data import PolygonClient, PolygonError
-from backtester.execution import AccountOrder, SizingMode, compute_qty_for_account, execute_order_across_accounts
+from backtester.execution import (
+    AccountOrder,
+    SizingMode,
+    compute_qty_for_account,
+    execute_order_across_accounts,
+    sliding_pct_equity,
+)
 from backtester.execution_log import log_results
 from backtester.conviction import compute_conviction, compute_levels
 from backtester.oanda_data import OandaDataClient, OandaError
@@ -447,20 +453,29 @@ def _trade_target(
             effective_sizing_mode = sizing_mode
             effective_sizing_value = control.sizing_value
             if override is not None:
-                # Small-account override: fixed dollars ONLY while this
-                # account's own equity is still under the threshold - checked
-                # fresh against a live snapshot every entry, not decided once,
-                # so it auto-reverts to the same global sizing everything else
-                # uses the moment the account grows past it, no manual
-                # switch-over needed.
+                # Small-account override: slides the %-of-equity rate from
+                # slide_start_pct down toward the account's own global
+                # sizing_value as equity grows, rather than a hard threshold
+                # switch (the earlier design - found, after real backtesting,
+                # to not line up with when the target rate actually clears a
+                # real broker's minimum order size; see sliding_pct_equity's
+                # own docstring). Checked fresh against a live snapshot every
+                # entry, not decided once, so it naturally converges to plain
+                # global sizing as the account grows - no manual switch-over,
+                # and it can't drift out of sync with the global rate the way
+                # a hardcoded threshold could, since target_pct is read live.
                 try:
                     snapshot = broker_account.get_account_snapshot()
                 except Exception as e:  # noqa: BLE001
                     status.last_error = f"{broker_account.nickname}: equity check for sizing override failed: {e}"
                     continue
-                if snapshot.equity < override["below_equity"]:
-                    effective_sizing_mode = SizingMode.FIXED_DOLLARS
-                    effective_sizing_value = override["fixed_dollars"]
+                effective_sizing_mode = SizingMode.PCT_EQUITY
+                effective_sizing_value = sliding_pct_equity(
+                    snapshot.equity,
+                    start_pct=override["slide_start_pct"],
+                    target_pct=control.sizing_value,
+                    floor_notional=override.get("slide_floor_notional", 1.0),
+                )
             # Still scaled by size_multiplier either way, same as the global
             # path, so a GARCH storm-regime cut applies under the override too.
             effective_sizing_value *= size_multiplier
