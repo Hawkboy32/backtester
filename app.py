@@ -74,7 +74,7 @@ AUTO_TRADER_SCRIPT = PROJECT_ROOT / "auto_trader.py"
 SCAN_RUNNER_SCRIPT = PROJECT_ROOT / "scan_runner.py"
 LIVE_ARM_PHRASE = "I ARM LIVE AUTO-TRADING"
 
-st.set_page_config(page_title="Backtester Dashboard", layout="wide")
+st.set_page_config(page_title="Holotable", layout="wide")
 
 AUTH_CONFIG_PATH = Path(__file__).resolve().parent / "auth_config.yaml"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -259,7 +259,8 @@ def _render_totp_challenge(username: str) -> None:
     totp_verified_user flag in require_auth). Only ever reached for a user who
     has completed enrolment (two_factor.is_enrolled), so this can never lock
     out someone who hasn't set 2FA up."""
-    st.title("Trading Bot Backtester")
+    st.title("Holotable")
+    st.caption("Trading Bot Backtester")
     st.subheader("Two-factor authentication")
     st.caption("Enter the 6-digit code from your authenticator app.")
 
@@ -3391,7 +3392,8 @@ def main() -> None:
         st.write(f"Logged in as **{username}**")
         authenticator.logout("Log out", "sidebar")
 
-    st.title("Trading Bot Backtester")
+    st.title("Holotable")
+    st.caption("Trading Bot Backtester")
     page.run()
 
 
