@@ -113,8 +113,13 @@ class AutoTraderControl:
     block_event_days: bool = True  # skip NEW entries on known risk-event days (FOMC — see backtester.events).
     # Defaults ON, unlike the other opt-in filters: it's a pure step-out safety net ("don't sell
     # insurance during a flood warning") and only takes effect on a deliberate (re)start.
-    giveback_enabled: bool = False  # daily P&L giveback guard (see backtester.daily_pnl_guard)
+    giveback_enabled: bool = False  # daily P&L guard (see backtester.daily_pnl_guard)
     giveback_pct: float = 25.0  # % of TODAY's peak profit that can be given back before new entries block
+    risk_preset: str | None = None  # last-applied name from risk_presets.RISK_PRESETS ("Conservative"/
+    # "Moderate"/"Aggressive"), purely a label for display (dashboard + mobile app) - manually editing
+    # sizing_value/vol_target_ann/etc. after applying a preset does NOT clear this, so it can go stale
+    # relative to the actual values; shown as "last preset applied", not "current settings guaranteed
+    # to match a preset". None means no preset has ever been applied this way.
 
 
 @dataclass

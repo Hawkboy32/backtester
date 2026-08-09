@@ -3274,6 +3274,40 @@ inherit the same Streamlit theme automatically, but haven't been eyeballed direc
 See Mobile_App's own CLAUDE_NOTES.txt for the Flutter/widget/bubble side of this same change —
 same two colours, `ColorScheme.fromSeed` there instead of a theme.toml.
 
+=== RISK PRESETS EXTRACTED TO A SHARED MODULE (2026-08-09) ===
+User wanted mobile-app controls beyond start/stop — scoped explicitly to "just the live bot,
+no backtest, no account/API stuff." The risk dial (Conservative/Moderate/Aggressive) was the
+clear fit: self-contained, already proven on the dashboard, directly relevant to a phone-in-
+pocket use case.
+
+`RISK_PRESETS` and the apply logic used to live only in `app.py` (a Streamlit script, not
+importable by the mobile backend). Extracted to a new `src/backtester/risk_presets.py` —
+`RISK_PRESETS` dict (unchanged values) plus `apply_risk_preset(name) -> AutoTraderControl`
+(load-mutate-save control.json). `app.py`'s own `_apply_risk_preset` is now a thin wrapper: calls
+the shared function, then handles ONLY its own session_state pushes (Streamlit UI state has no
+business in a shared module). Single source of truth — the dashboard and the mobile app can no
+longer define "Moderate" differently by accident.
+
+Added `AutoTraderControl.risk_preset: str | None` — the last-applied preset NAME, persisted, so
+both surfaces can show "Moderate is active" without guessing from the raw sizing/vol-target
+values (which manual edits could make ambiguous anyway — documented as a label, not a guarantee,
+in the field's own docstring).
+
+Mobile side (`Mobile_App/backend/signal_api.py`): new `GET /risk-presets` (unauthenticated,
+returns the real `RISK_PRESETS` values — same trust level as `/health`'s enabled/killed, so the
+phone shows live numbers, never a hardcoded copy that could drift) and `POST /risk-preset`
+(login-gated + password-confirmed, same friction as `/kill`/`/rearm` — this changes real position
+sizing from the next trade onward). `/health` now also returns `risk_preset`.
+**Verified**: `apply_risk_preset()` unit-tested against an isolated temp control.json (Conservative
+→ sizing_value=0.5, vol_target_ann=10.0, max_drawdown_pct=7.0, giveback_enabled=True, all correct,
+round-tripped through save/load). Real endpoints hit against the actual running backend after
+restart — `/risk-presets` returns the exact live values, `/health` correctly returns
+`risk_preset: null` (honest — nothing's been applied through this mechanism yet, matches
+reality). Did NOT exercise the real `POST /risk-preset` against the live system — that would
+actually change the account's current sizing, not something to do without the user deliberately
+choosing to switch. See Mobile_App's own CLAUDE_NOTES.txt for the Flutter side (new Bot Control
+screen, password-confirm dialog extracted to a shared widget).
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,

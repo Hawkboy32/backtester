@@ -51,6 +51,7 @@ from backtester.metrics import (
     periods_per_year_for_calendar,
 )
 from backtester.ranking import aggregate_by_strategy, rank_combos
+from backtester.risk_presets import RISK_PRESETS, apply_risk_preset
 from backtester.saved_configs import delete_config, list_configs, load_config, save_config
 from backtester.scan_db import (
     clear_history,
@@ -2394,24 +2395,9 @@ def _render_adaptive_roster_section() -> None:
 # result, not a guess. All three enable vol-target sizing (the sweep only
 # ever tested it ON); Moderate matches today's status-quo defaults exactly,
 # so applying it is a no-op for an account already running the defaults.
-RISK_PRESETS = {
-    "Conservative": {
-        "sizing_value": 0.5, "vol_target_ann": 10.0,
-        "max_drawdown_pct": 7.0, "giveback_enabled": True, "giveback_pct": 15.0,
-    },
-    "Moderate": {
-        "sizing_value": 1.0, "vol_target_ann": 20.0,
-        "max_drawdown_pct": 10.0, "giveback_enabled": False, "giveback_pct": 25.0,
-    },
-    "Aggressive": {
-        "sizing_value": 2.0, "vol_target_ann": 30.0,
-        "max_drawdown_pct": 15.0, "giveback_enabled": False, "giveback_pct": 25.0,
-    },
-}
-
-
 def _apply_risk_preset(name: str) -> None:
-    """Load-mutate-save control.json (single source of truth) AND push the
+    """Applies the shared risk_presets.apply_risk_preset (single source of
+    truth also used by the mobile app's /risk-preset endpoint) AND pushes the
     same values into every affected widget's session_state key directly —
     those widgets already have a `key=`, so Streamlit ignores `value=` on
     later reruns once a key exists (same reasoning as the execution-cost
@@ -2420,16 +2406,7 @@ def _apply_risk_preset(name: str) -> None:
     across st.navigation pages, so this correctly updates Settings too, even
     though the button is here."""
     preset = RISK_PRESETS[name]
-    control = load_control()
-    control.sizing_mode = SizingMode.PCT_EQUITY.value
-    control.sizing_value = preset["sizing_value"]
-    control.vol_target_enabled = True
-    control.vol_target_ann = preset["vol_target_ann"]
-    control.max_drawdown_enabled = True
-    control.max_drawdown_pct = preset["max_drawdown_pct"]
-    control.giveback_enabled = preset["giveback_enabled"]
-    control.giveback_pct = preset["giveback_pct"]
-    save_control(control)
+    apply_risk_preset(name)
 
     st.session_state["auto_sizing_mode"] = "% of account equity"
     st.session_state["auto_sizing_value"] = preset["sizing_value"]
