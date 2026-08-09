@@ -2215,6 +2215,35 @@ CLAUDE_NOTES.txt) verifies against — same `auth_config.yaml` + same `two_facto
      here has been treated.
   Equities shorting was NOT re-tested here — the original sweep already showed it clearly
   underperforming (Sharpe collapsed, drawdown roughly doubled) and nothing here changes that read.
+- **`engine.py` gained `fixed_dollars_per_trade` (2026-08-09) — a real correctness gap found
+  while trying to answer "what would my £10 pilot account actually do."** User asked for a
+  long/short/long_short comparison at £10 on the live equity roster (DDOG/MPWR VWAP MR, SWK
+  Bollinger MR). First attempt used the engine's default sizing (`spend = cash * size_multiplier`,
+  i.e. all-in every entry) and produced absurd numbers — DDOG alone went $4.20 → $16.75 in ~3
+  months, 4x. That's not a real edge, it's all-in compounding across 400+ trades, which has
+  nothing to do with how this account is actually configured to trade: the auto-switch override
+  built the same day sizes it at a **fixed $2/trade**, never all-in. The backtest was answering a
+  completely different, much rosier question than the one asked.
+  Added `fixed_dollars_per_trade: float | None = None` to `BacktestEngine.__init__` — when set,
+  every entry spends `min(cash, fixed_dollars_per_trade)` instead of the default all-in fraction.
+  `None` (the default) preserves the exact original behavior — the `spend` computation was moved
+  once above the entry if/elif (previously duplicated identically in both branches) but is
+  byte-identical when the new param isn't used, zero regression risk for every existing caller.
+  **Verified** with a hand-checkable synthetic strategy (fixed BUY/SELL signals on flat-price
+  bars, so the correct share count is computable by hand): `None` reproduces the exact all-in
+  result (0.1 shares from $10 cash); `fixed_dollars_per_trade=2.0` correctly caps at $2 (0.02
+  shares from $10 cash); the same cap correctly falls back to whatever's actually left when cash
+  is below the target ($1.50 cash → 0.015 shares, not a doomed attempt to spend $2 that isn't there).
+  **Re-ran the £10 comparison with real sizing** ($4.20 starting cash per ticker — an approximation
+  of the $12.60 pool split 3 ways, not a true shared-cash simulation, since the engine still
+  backtests one ticker at a time — summed daily into one combined curve per mode, same 3-window
+  span 2026-04-16..2026-07-26 already used elsewhere). Results now sane: long_only $12.60→$18.17
+  (+44%), long_short →$17.23 (+37%), short_only →$15.92 (+26%) — same ordering as the original
+  54-item sweep's equities finding (long-only best, shorting drags it down), now consistent
+  across two independent checks. Delivered as an interactive HTML chart (dataviz skill palette,
+  validated categorical colors, hover tooltip) rather than a static image — no plotting library
+  in this venv, and didn't want to add one for a one-off. Same caveats as always apply: one
+  window, not held-out, real broker minimums (Alpaca's ~$1 fractional-order floor) not modeled.
 - **Trading 212's public API — worth checking back on, not actionable yet (2026-08-06, user's
   own flag).** Docs: https://docs.trading212.com/api (their docs site is JS-rendered, didn't
   fully load via fetch — pieced this together from search results instead). Currently: beta,

@@ -98,8 +98,20 @@ class BacktestEngine:
         regime_by_date: dict | None = None,
         blocked_dates: set | None = None,
         position_mode: PositionMode = PositionMode.LONG_ONLY,
+        fixed_dollars_per_trade: float | None = None,
     ):
-        """regime_by_date: optional {date: {"regime": "calm"/"normal"/"storm", "size_multiplier": float}},
+        """fixed_dollars_per_trade: when set, every entry spends
+        min(cash, fixed_dollars_per_trade) instead of the default all-in
+        cash * size_multiplier — matches how a live account configured with
+        auto_trader_state.py's account_sizing_overrides (a fixed $/trade,
+        not pct_equity) actually gets sized, which this engine had no way to
+        reproduce before (added 2026-08-09, found while backtesting a small
+        live-pilot account and getting all-in-compounded numbers that
+        overstated what a fixed-size account would really do by an order of
+        magnitude). None (default) preserves the exact original all-in
+        behavior — zero regression for every existing caller.
+
+        regime_by_date: optional {date: {"regime": "calm"/"normal"/"storm", "size_multiplier": float}},
         e.g. from backtester.volatility.regime_by_date(). When a bar's date has
         an entry: new entries (either direction — see position_mode) are
         blocked while regime == "storm", and the cash committed to a new
@@ -127,6 +139,7 @@ class BacktestEngine:
         self.regime_by_date = regime_by_date
         self.blocked_dates = blocked_dates
         self.position_mode = position_mode
+        self.fixed_dollars_per_trade = fixed_dollars_per_trade
 
     def run(self, bars: pd.DataFrame, strategy: Strategy) -> BacktestResult:
         if bars.empty:
@@ -198,9 +211,16 @@ class BacktestEngine:
             can_open_long = self.position_mode in (PositionMode.LONG_ONLY, PositionMode.LONG_SHORT)
             can_open_short = self.position_mode in (PositionMode.SHORT_ONLY, PositionMode.LONG_SHORT)
             allow_new_entry = regime != "storm" and not event_blocked
+            # fixed_dollars_per_trade (when set) overrides the default all-in
+            # cash * size_multiplier - capped at available cash so a nearly-
+            # exhausted account can't "spend" more than it has.
+            spend = (
+                min(cash, self.fixed_dollars_per_trade)
+                if self.fixed_dollars_per_trade is not None
+                else cash * size_multiplier
+            )
 
             if signal is Signal.BUY and shares == 0 and can_open_long and allow_new_entry:
-                spend = cash * size_multiplier
                 if spend > self.commission_per_trade:
                     shares = (spend - self.commission_per_trade) / buy_fill_price
                     cash -= shares * buy_fill_price + self.commission_per_trade
@@ -217,7 +237,6 @@ class BacktestEngine:
                 # same way a long entry is: the notional "spend" is the short's
                 # dollar exposure, not literal cash outlay (a short generates
                 # proceeds rather than consuming cash up front).
-                spend = cash * size_multiplier
                 if spend > self.commission_per_trade:
                     shares = -(spend - self.commission_per_trade) / sell_fill_price
                     cash += abs(shares) * sell_fill_price - self.commission_per_trade
