@@ -19,6 +19,7 @@ from backtester.strategies.rsi_divergence import RsiDivergenceStrategy
 from backtester.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
 from backtester.strategies.sma_crossover import SmaCrossoverStrategy
 from backtester.strategies.volume_spike_reversal import VolumeSpikeReversalStrategy
+from backtester.strategies.vwap_drift_pullback import VwapDriftPullbackStrategy
 from backtester.strategies.vwap_mean_reversion import VwapMeanReversionStrategy
 from backtester.strategies.vwap_trend import VwapTrendStrategy
 
@@ -90,6 +91,17 @@ STRATEGY_REGISTRY: dict[str, dict] = {
         "class": VwapMeanReversionStrategy,
         "default_params": {"min_bars": 5, "entry_deviation_pct": 0.3},
         "regime": "range",
+    },
+    "VWAP Drift Pullback": {
+        "class": VwapDriftPullbackStrategy,
+        "default_params": {
+            "min_bars": 5,
+            "vwap_slope_lookback_bars": 15,
+            "momentum_lookback_bars": 60,
+            "momentum_threshold_pct": 0.1,
+            "skip_opening_minutes": 60,
+        },
+        "regime": "trend",
     },
     "EMA Crossover Momentum": {
         "class": EmaCrossoverStrategy,

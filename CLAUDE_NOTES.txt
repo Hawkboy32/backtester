@@ -3308,6 +3308,64 @@ actually change the account's current sizing, not something to do without the us
 choosing to switch. See Mobile_App's own CLAUDE_NOTES.txt for the Flutter side (new Bot Control
 screen, password-confirm dialog extracted to a shared widget).
 
+=== SLIDING-SCALE SIZING GENUINELY BACKTESTED + VWAP DRIFT PULLBACK (built, then walk-forward
+REJECTED) (2026-08-10) ===
+Two pieces of work this session, both closing out threads from the day before.
+
+**1. `dynamic_size_fn` on `BacktestEngine`** — the sliding-scale small-account sizing
+(`execution.sliding_pct_equity`, built 2026-08-09) had only ever been approximated in a backtest
+via one fixed dollar amount, never actually exercised path-dependently. Added
+`dynamic_size_fn: Callable[[float], float] | None` alongside the existing
+`fixed_dollars_per_trade`/`size_multiplier` — recomputed fresh against current cash at every
+single entry, takes priority over both when set, `None` (default) is a zero-regression no-op for
+every existing caller. Verified against hand-computable synthetic cases before trusting it. Used
+it to run a real 2-year Aggressive-preset (50%→2%) slide test on the actual roster (DDOG/MPWR
+VWAP MR, SWK Bollinger MR, real equity split): $13.26 → $31.60 combined, max combined drawdown
+only -5.1%. Confirmed via direct `control.json` inspection that the slide's target rate really is
+read live from whichever risk preset is currently active — nothing about it is hardcoded to any
+specific starting dollar amount.
+
+**2. `VwapDriftPullbackStrategy`** (`src/backtester/strategies/vwap_drift_pullback.py`) — a new
+trend-continuation idea, my own re-derivation (not a copy) of a "VWAP direction + VWAP slope +
+momentum filter, enter on the first pullback candle" day-trading concept from a YouTube video the
+user asked me to review, adapted from the source's fixed-point futures/prop-firm-evaluation terms
+into percentage/bar terms for this project's equities engine (which has no per-trade stop/target
+order support, so exits are a VWAP-cross invalidation instead of the source's reward:risk
+bracket). Explicitly built and validated with the same discipline as everything else here — user
+confirmed ("yeah, definitely") before any of it went in.
+
+**Bug found and fixed before any real validation could mean anything**: the first smoke test (TSLA,
+2026-06-23 to 2026-07-26) came back implausibly bad (13.1% win rate, -$5552 on $10k) — treated as
+a suspected bug rather than a verdict, per this project's own standing discipline. Root cause:
+Polygon's minute bars for equities include pre/after-market by default (~953 bars/day vs ~391 for
+regular NYSE hours), and the strategy's original `skip_opening_bars` (a bar-COUNT based "skip the
+first N bars of the session" filter, meant to skip the first hour of REGULAR trading) was actually
+landing well before regular trading even started, so the strategy spent most of each session
+trading through illiquid pre-market conditions. Confirmed via direct volume/VWAP comparison that
+this does NOT implicate the already-live `VwapMeanReversionStrategy`/`VwapTrendStrategy` (neither
+does bar-count session filtering; the VWAP *level* itself is only ~0.07% different full-session vs
+regular-hours-only — negligible). Fixed by replacing the bar-count skip with a proper DST-aware
+wall-clock filter: bar timestamps (UTC-indexed, confirmed in `data.PolygonClient.get_aggregates`)
+converted via `ZoneInfo("America/New_York")` and compared against a 09:30–16:00 window plus
+`skip_opening_minutes` (renamed from `skip_opening_bars`) — same `ZoneInfo`-based approach as the
+existing `brokers.ibkr._us_equity_clock_heuristic`, just no reusable *historical-timestamp* checker
+existed anywhere in the codebase to import directly (`get_market_clock()` implementations are all
+live-clock-only, not usable against a bar's own timestamp).
+
+**Walk-forward verdict: REJECTED, does not go near live trading.** After the fix, the single-window
+TSLA smoke test flipped to slightly positive (+$235.94 on $10k, 251 trades, 18.3% win rate) — but
+that one window/one ticker result was exactly the kind of fluke this project's 3-window walk-forward
+discipline exists to catch, and it was. Ran the real `run_walkforward_scan`/`aggregate_walkforward`
+across the standard 3 windows (2026-04-16/05-19, 2026-05-19/06-21, 2026-06-21/07-26) on TSLA+AAPL,
+`LONG_SHORT`: mean Sharpe per fold -0.88 / -1.76 / -1.05, **0% of folds profitable**, drawdowns up
+to -25.67% (TSLA, fold 2). No sign of a real edge in any fold on either ticker — this is a clean
+rejection, not a marginal one. Strategy code + registry entry left in the codebase (documents a
+real, honestly-tested idea that didn't pan out, same as this project keeps other disproven
+concepts on record rather than deleting the evidence) but is NOT enabled on the roster and should
+not be treated as validated. If revisited, it would need a different entry/exit mechanism or
+instrument set, not just re-tuned thresholds on the same shape — the rejection was broad-based
+(losing on both tickers, most folds), not a single bad parameter.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,
