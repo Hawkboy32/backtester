@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Callable
 
 import pandas as pd
 
@@ -99,6 +100,7 @@ class BacktestEngine:
         blocked_dates: set | None = None,
         position_mode: PositionMode = PositionMode.LONG_ONLY,
         fixed_dollars_per_trade: float | None = None,
+        dynamic_size_fn: Callable[[float], float] | None = None,
     ):
         """fixed_dollars_per_trade: when set, every entry spends
         min(cash, fixed_dollars_per_trade) instead of the default all-in
@@ -110,6 +112,18 @@ class BacktestEngine:
         overstated what a fixed-size account would really do by an order of
         magnitude). None (default) preserves the exact original all-in
         behavior — zero regression for every existing caller.
+
+        dynamic_size_fn: optional callable(current_cash) -> fraction of cash
+        to spend on THIS entry (same units as size_multiplier, e.g. 0.02 for
+        2%) — recomputed fresh at every single entry against whatever cash
+        actually is at that moment, unlike fixed_dollars_per_trade (a fixed
+        dollar amount) or size_multiplier (a fixed fraction for the whole
+        backtest). Added 2026-08-10 to genuinely backtest
+        execution.sliding_pct_equity's real behavior — a small-account
+        override whose own rate changes as equity grows — rather than
+        approximate it with a single static number. Takes priority over
+        both fixed_dollars_per_trade and size_multiplier when set. None
+        (default) preserves existing behavior exactly.
 
         regime_by_date: optional {date: {"regime": "calm"/"normal"/"storm", "size_multiplier": float}},
         e.g. from backtester.volatility.regime_by_date(). When a bar's date has
@@ -140,6 +154,7 @@ class BacktestEngine:
         self.blocked_dates = blocked_dates
         self.position_mode = position_mode
         self.fixed_dollars_per_trade = fixed_dollars_per_trade
+        self.dynamic_size_fn = dynamic_size_fn
 
     def run(self, bars: pd.DataFrame, strategy: Strategy) -> BacktestResult:
         if bars.empty:
@@ -213,12 +228,15 @@ class BacktestEngine:
             allow_new_entry = regime != "storm" and not event_blocked
             # fixed_dollars_per_trade (when set) overrides the default all-in
             # cash * size_multiplier - capped at available cash so a nearly-
-            # exhausted account can't "spend" more than it has.
-            spend = (
-                min(cash, self.fixed_dollars_per_trade)
-                if self.fixed_dollars_per_trade is not None
-                else cash * size_multiplier
-            )
+            # exhausted account can't "spend" more than it has. dynamic_size_fn
+            # takes priority (recomputed fresh against THIS bar's cash), then
+            # fixed_dollars_per_trade, then the plain size_multiplier default.
+            if self.dynamic_size_fn is not None:
+                spend = cash * self.dynamic_size_fn(cash)
+            elif self.fixed_dollars_per_trade is not None:
+                spend = min(cash, self.fixed_dollars_per_trade)
+            else:
+                spend = cash * size_multiplier
 
             if signal is Signal.BUY and shares == 0 and can_open_long and allow_new_entry:
                 if spend > self.commission_per_trade:
