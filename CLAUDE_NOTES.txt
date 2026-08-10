@@ -3366,6 +3366,62 @@ not be treated as validated. If revisited, it would need a different entry/exit 
 instrument set, not just re-tuned thresholds on the same shape — the rejection was broad-based
 (losing on both tickers, most folds), not a single bad parameter.
 
+=== TWO REAL LIVE FOREX SIZING BUGS FOUND + FIXED (2026-08-10) ===
+User reported two rejected live orders on C:USDJPY (real notifications, both same instant): OANDA
+BUY failed with "The units specified contain more precision than is allowed for the Order's
+instrument"; IG BUY failed with just "UNKNOWN" (checked the trading_ig SDK — that's IG's own
+literal documented reason-code enum value for an unspecific rejection, not something our code was
+hiding — nothing more to extract from that response).
+
+**Bug 1 — OANDA precision rejection, root-caused and fixed.** `OandaBroker` never overrode
+`supports_fractional_shares` (base.py's default is `True`), so `compute_qty_for_account`'s
+existing "floor to a whole share for brokers that can't do fractional" step (already built for
+IBKR equities) never applied to it — a %-equity sizing calc produced something like `139.4728`,
+and `submit_market_order`'s old `f"{units:.0f}" if is_integer() else str(units)` shipped that raw
+float precision straight to OANDA, which rejected it. Fixed at both layers:
+`brokers/oanda.py`'s `OandaBroker.supports_fractional_shares` now returns `False` (mirrors
+`ibkr.py`'s own per-broker override, opposite instrument), and `submit_market_order` itself now
+always does `f"{round(units):.0f}"` rather than trusting the caller — defense in depth, since a
+close-order's qty comes from a previously-recorded position that could still carry old float
+noise. Verified by hand: `139.4728 → 139`, `0.30000000000000004 → 0`, and confirmed
+`compute_qty_for_account` now floors an OANDA order to a whole unit end-to-end before it ever
+reaches the broker call.
+
+**Bug 2 — found while verifying bug 1's fix, a real separate issue: forex sizing was silently
+WRONG for USD-base pairs, not just imprecise.** `compute_qty_for_account` computed every forex
+qty as `dollars / reference_price` — correct for pairs quoted *in* USD (GBPUSD, EURUSD, AUDUSD:
+1 unit of the base currency = `price` USD, so units = dollars/price, same math as a stock share)
+but WRONG for pairs where USD is the *base* currency instead (USDJPY, USDCAD — both configured on
+the real OANDA target): for those, 1 unit IS 1 USD of exposure directly, independent of price, so
+dividing by price silently undersized by a factor of roughly the price itself. Concretely: a 2%
+of $100k equity target ($2000) on USDJPY was computing to ~13 units (~$13 notional) instead of
+2000 — about 150x too small, though never producing an error since the OLD floor logic (bug 1)
+wasn't even active yet to catch it, and 13 units doesn't trip OANDA's precision check either.
+
+Fixed with a new `execution._forex_usd_divisor(ticker, price)`: returns `price` when the ticker's
+quote currency is USD (unchanged behavior for GBPUSD/EURUSD/AUDUSD), `1.0` when the BASE currency
+is USD (USDJPY/USDCAD — dollars themselves are now the units, no division), and raises a clear
+`ValueError` for a cross pair involving neither currency (e.g. EURGBP — not convertible to USD
+notional from its own price alone, no such ticker configured today but better to fail loudly than
+silently guess if one ever is). `compute_qty_for_account` gained a required `ticker` parameter
+(both real call sites — `auto_trader.py`'s live trade loop and `app.py`'s Trade Execution tab
+preview — updated to pass it; grepped the whole repo first to confirm no other caller exists,
+including tests). Equity/crypto tickers are completely unaffected (still plain dollars/price).
+
+**Verified by hand**, not just read: mocked an OandaBroker with $100k equity, confirmed C:USDJPY
+and C:USDCAD at 2% now compute to exactly 2000.0 (was ~13 before), C:GBPUSD still computes to the
+same 1481 (2000/1.35, floored per bug 1's fix), a fabricated C:EURGBP cross pair raises the clear
+ValueError instead of silently guessing, and a plain equity ticker (AAPL) through a
+fractional-capable mock broker is completely unchanged (10.0 shares). `ast.parse` + real import
+of both `app.py` and `auto_trader.py` clean after the edit. Restarted `auto_trader.py` twice
+(once per bug) to pick up each fix — confirmed alive via a fresh heartbeat each time, not just
+"process exists."
+
+Not yet observed live with a real subsequent USDJPY/USDCAD trade post-fix — the two bugs were
+diagnosed and fixed from a static report (screenshot of past notifications) and hand-verification,
+not by reproducing a live order. Worth confirming the next real USDJPY/USDCAD fill actually sizes
+correctly (~2% of equity, not ~0.01%) once one fires.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,

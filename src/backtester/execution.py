@@ -23,6 +23,34 @@ class SizingMode(Enum):
     FIXED_DOLLARS = "fixed_dollars"
 
 
+def _forex_usd_divisor(ticker: str, price: float) -> float:
+    """What to divide a USD notional target by to get OANDA/IG-style
+    base-currency units, for a Polygon-style forex ticker ("C:XXXYYY").
+
+    When USD is the QUOTE currency (XXXUSD — GBPUSD, EURUSD, AUDUSD), 1 unit
+    of the base currency is worth `price` USD, so units = dollars / price —
+    the same share-count math as a stock. When USD is the BASE currency
+    instead (USDXXX — USDJPY, USDCAD), 1 unit IS 1 USD of exposure directly,
+    independent of price — dividing by price silently undersizes by a factor
+    of roughly the price itself (confirmed live 2026-08-10: a ~$2000 target
+    on USDJPY was sized to ~13 units / ~$13 notional instead, ~150x off — see
+    CLAUDE_NOTES.txt). A pair involving neither currency (a cross pair, e.g.
+    EURGBP) can't be converted to USD notional from its own price alone —
+    raises rather than silently guessing.
+    """
+    pair = ticker[2:] if ticker.startswith("C:") else ticker
+    base, quote = pair[:3], pair[3:]
+    if quote == "USD":
+        return price
+    if base == "USD":
+        return 1.0
+    raise ValueError(
+        f"{ticker}: neither currency is USD — dollar-based sizing (%-equity or fixed-dollar) "
+        "can't convert this cross pair to USD notional from its own price alone. Use "
+        "SizingMode.FIXED_SHARES (literal units) for this ticker instead."
+    )
+
+
 def sliding_pct_equity(equity: float, start_pct: float, target_pct: float, floor_notional: float = 1.0) -> float:
     """The %-of-equity sizing rate for a small account that's sliding from an
     aggressive starting rate down toward the account's real target rate as it
@@ -74,18 +102,28 @@ def compute_qty_for_account(
     reference_price: float,
     sizing_mode: SizingMode,
     sizing_value: float,
+    ticker: str,
 ) -> float:
-    """Translate a sizing rule into a share quantity for one account.
+    """Translate a sizing rule into a share/unit quantity for one account.
 
     reference_price is a price hint you supply (e.g. the last quote you saw)
     used only to convert a %-of-equity or fixed-dollar target into a share
     count — it is not used for execution, which remains a market order at
     whatever price actually fills.
 
-    Floors to a whole share for any account whose broker doesn't accept
+    ticker is required (not just for logging) — a forex ticker ("C:XXXYYY")
+    needs currency-pair-aware division to convert a USD notional target into
+    OANDA/IG-style base-currency units correctly (see _forex_usd_divisor's
+    own docstring for the real bug this fixes: dividing by price
+    unconditionally silently undersized USD-base pairs like USDJPY by
+    ~150x). Equities/crypto tickers are unaffected — same dollars/price
+    share-count math as before.
+
+    Floors to a whole share/unit for any account whose broker doesn't accept
     fractional-sized orders (account.supports_fractional_shares == False,
-    e.g. IBKR equities) — otherwise %-of-equity/fixed-dollar sizing routinely
-    produces a fractional quantity that broker's API rejects outright.
+    e.g. IBKR equities, OANDA forex) — otherwise %-of-equity/fixed-dollar
+    sizing routinely produces a fractional quantity that broker's API
+    rejects outright.
     """
     if sizing_mode is SizingMode.FIXED_SHARES:
         qty = sizing_value
@@ -101,7 +139,9 @@ def compute_qty_for_account(
         else:
             raise ValueError(f"Unknown sizing mode: {sizing_mode}")
 
-        qty = round(dollars / reference_price, 4)
+        divisor = _forex_usd_divisor(ticker, reference_price) if ticker.startswith("C:") else reference_price
+
+        qty = round(dollars / divisor, 4)
 
     if not account.supports_fractional_shares and qty != math.floor(qty):
         qty = float(math.floor(qty))

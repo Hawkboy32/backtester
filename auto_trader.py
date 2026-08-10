@@ -480,7 +480,7 @@ def _trade_target(
             # path, so a GARCH storm-regime cut applies under the override too.
             effective_sizing_value *= size_multiplier
             try:
-                qty = compute_qty_for_account(broker_account, current.close, effective_sizing_mode, effective_sizing_value)
+                qty = compute_qty_for_account(broker_account, current.close, effective_sizing_mode, effective_sizing_value, ticker)
             except Exception as e:  # noqa: BLE001
                 status.last_error = f"{broker_account.nickname}: sizing failed: {e}"
                 continue

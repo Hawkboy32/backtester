@@ -1985,7 +1985,7 @@ def render_execution_tab() -> None:
         account_orders: list[AccountOrder] = []
         for broker_account in broker_accounts:
             try:
-                qty = compute_qty_for_account(broker_account, reference_price or 0.0, sizing_mode, sizing_value)
+                qty = compute_qty_for_account(broker_account, reference_price or 0.0, sizing_mode, sizing_value, ticker)
             except Exception as e:  # noqa: BLE001
                 preview_lines.append(f"  - {broker_account.nickname}: FAILED TO SIZE ({e})")
                 continue

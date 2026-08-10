@@ -51,6 +51,20 @@ class OandaBroker(BrokerAccount):
         self.base_url = PRACTICE_BASE_URL if is_paper else LIVE_BASE_URL
         self.session = requests.Session()
 
+    @property
+    def supports_fractional_shares(self) -> bool:
+        """OANDA's v20 API rejects orders with too much precision for the
+        instrument — confirmed live 2026-08-10: "The units specified contain
+        more precision than is allowed for the Order's instrument" — standard
+        forex pairs trade in whole units, not fractional ones. Without this
+        override, compute_qty_for_account's floor-to-whole-shares step never
+        ran (base.py's default is True), so a %-equity/fixed-dollar sizing
+        target sailed through with 4-decimal-place precision straight into a
+        rejected order. Same pattern as ibkr.py's per-broker override, just
+        the opposite conclusion — IBKR's forex (CASH) leg allows fractional
+        units, OANDA's standard order path here doesn't."""
+        return False
+
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
 
@@ -147,7 +161,13 @@ class OandaBroker(BrokerAccount):
         order: dict = {
             "type": "MARKET",
             "instrument": instrument,
-            "units": f"{units:.0f}" if float(units).is_integer() else str(units),
+            # Always whole units, never str(units)'s raw float precision —
+            # supports_fractional_shares=False makes compute_qty_for_account
+            # floor to a whole number for NEW orders, but a close-order's qty
+            # comes from a previously-recorded position (get_positions()),
+            # which predates this fix or could still carry float noise, so
+            # round here too rather than trusting every caller.
+            "units": f"{round(units):.0f}",
             "timeInForce": "FOK",  # fill-or-kill — matches "market order" semantics, no partial-fill surprise
             "positionFill": "DEFAULT",  # nets against any existing opposite position automatically
         }
