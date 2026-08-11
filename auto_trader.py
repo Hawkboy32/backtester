@@ -347,11 +347,15 @@ def _trade_target(
         any(a.account_id not in market_closed_account_ids for a in trading_accounts)
         if trading_accounts else None
     )
+    recent_bars = bars.tail(RECENT_CLOSES_COUNT)
     current_signals.record_signal(
         ticker=ticker, strategy_name=strategy_name, signal=signal.value,
         price=float(current.close), conviction=snapshot_conviction,
         bar_timestamp=current.timestamp.isoformat(), source=source_label,
-        recent_closes=[float(c) for c in bars["close"].tail(RECENT_CLOSES_COUNT)],
+        recent_closes=[float(c) for c in recent_bars["close"]],
+        recent_opens=[float(o) for o in recent_bars["open"]],
+        recent_highs=[float(h) for h in recent_bars["high"]],
+        recent_lows=[float(l) for l in recent_bars["low"]],
         levels=snapshot_levels,
         market_open=market_open,
         trading_accounts=[a.nickname for a in trading_accounts],

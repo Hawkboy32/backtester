@@ -35,6 +35,9 @@ def record_signal(
     bar_timestamp: str,
     source: str | None = None,
     recent_closes: list[float] | None = None,
+    recent_opens: list[float] | None = None,
+    recent_highs: list[float] | None = None,
+    recent_lows: list[float] | None = None,
     levels: dict[str, float] | None = None,
     market_open: bool | None = None,
     trading_accounts: list[str] | None = None,
@@ -48,6 +51,11 @@ def record_signal(
     nickname for live data, or "Polygon"), recent_closes is a short trailing
     close-price series for a sparkline, levels is the strategy's own
     Strategy.levels() output (see backtester.conviction.compute_levels).
+    recent_opens/highs/lows are the matching per-bar OHLC series (same
+    trailing window as recent_closes) so the mobile app can draw real
+    candlesticks instead of a closes-only line - optional/None for any
+    caller that hasn't been updated to pass them, same "older snapshot
+    missing a key" tolerance as every other field here.
 
     market_open/trading_accounts let the mobile app group signals by whether
     the market is actually open for the account(s) that trade them, without
@@ -67,6 +75,9 @@ def record_signal(
             "bar_timestamp": bar_timestamp,
             "source": source,
             "recent_closes": recent_closes,
+            "recent_opens": recent_opens,
+            "recent_highs": recent_highs,
+            "recent_lows": recent_lows,
             "levels": levels,
             "market_open": market_open,
             "trading_accounts": trading_accounts,
