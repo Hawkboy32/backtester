@@ -1992,6 +1992,18 @@ This is the foundation the mobile login + remote stop/re-arm feature (see Mobile
 CLAUDE_NOTES.txt) verifies against — same `auth_config.yaml` + same `two_factor.verify_code()`.
 
 === PENDING IDEAS — flagged but NOT yet built (running list, add to as they come up) ===
+- **A "thesis invalidated" stop-loss for the mean-reversion strategies (2026-08-11, user's own
+  question, flagged as a future thought only — not agreed to build yet).** Prompted by a real SWK
+  Bollinger Mean Reversion loss (-$134.68 combined across 2 paper trades on 2026-08-10 — see the
+  live-trade check that same session) where price kept falling well past the entry band before
+  the exit signal ever fired. Discussed the real tension explicitly: mean reversion's whole thesis
+  is "overextended, will revert," so a TIGHT stop tends to cut losses exactly at the point of
+  maximum extension — often right before the reversion happens, turning would-be winners into
+  realized losses. If this ever gets built, it should be a wide "thesis invalidated" stop (e.g.
+  price breaks meaningfully past the band, not just touches it), not a tight risk-management stop,
+  and needs real walk-forward validation before being trusted — same discipline as every other
+  strategy change here. Explicitly NOT reacting to this one trade — n=2 live trades on SWK is
+  normal noise, not evidence the strategy needs fixing.
 - **OANDA paper account as a real execution venue, not just live data (2026-08-07, user's own
   ask).** Today `oanda_data.py` is GET-only (candles), OANDA isn't in `accounts.py`'s
   `BROKER_META`/`SUPPORTED_BROKERS`, so it can't be linked as an account at all — IG remains the
