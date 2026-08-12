@@ -68,7 +68,7 @@ from backtester.strategies import STRATEGY_REGISTRY, build_strategy, strategy_re
 from backtester.strategies.sma_crossover import SmaCrossoverStrategy
 from backtester.universe import UNIVERSE_REGISTRY, load_universe, sample_universe, sector_for_ticker
 from backtester.walkforward import aggregate_walkforward, run_walkforward_scan
-from backtester import account_risk, app_settings, daily_pnl_guard, heartbeat, live_trades, notifications, playlist, position_attribution, roster, volatility
+from backtester import account_risk, app_settings, daily_pnl_guard, deposits, heartbeat, live_trades, notifications, playlist, position_attribution, roster, volatility
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 AUTO_TRADER_SCRIPT = PROJECT_ROOT / "auto_trader.py"
@@ -1499,6 +1499,7 @@ def _fetch_account_balances(account_ids: tuple[str, ...], history_period: str) -
             snapshot = broker_account.get_account_snapshot()
             result["rows"].append(
                 {
+                    "account_id": broker_account.account_id,
                     "account": broker_account.nickname,
                     "mode": "Paper" if broker_account.is_paper else "LIVE",
                     "equity": snapshot.equity,
@@ -1671,7 +1672,14 @@ def render_accounts_tab() -> None:
 
             balance_rows = fetched["rows"]
             if balance_rows:
-                display_df = pd.DataFrame(balance_rows).rename(columns={"realized_pnl": "Realized P&L"})
+                for row in balance_rows:
+                    row["Total Deposited"] = deposits.total_deposited(row["account_id"])
+                    row["True P&L"] = row["equity"] - row["Total Deposited"]
+                display_df = (
+                    pd.DataFrame(balance_rows)
+                    .drop(columns=["account_id"])
+                    .rename(columns={"realized_pnl": "Realized P&L"})
+                )
                 st.dataframe(display_df, use_container_width=True)
                 total_pnl = sum(r["realized_pnl"] for r in balance_rows)
                 sign = "-" if total_pnl < 0 else "+"
@@ -1682,7 +1690,10 @@ def render_accounts_tab() -> None:
                 )
                 st.caption(
                     "Realized P&L = closed round trips only (from live_trades.db), not unrealized "
-                    "P&L on currently open positions — see the Trade Execution tab for those."
+                    "P&L on currently open positions — see the Trade Execution tab for those. "
+                    "**True P&L** = equity minus total deposited — your own money in vs. out, "
+                    "not inflated by the deposit itself. Only as accurate as the deposits you've "
+                    "recorded below; no broker here exposes transfer history to read automatically."
                 )
 
             history_fig = go.Figure()
@@ -1705,6 +1716,48 @@ def render_accounts_tab() -> None:
 
     if linked:
         st.caption("Live positions with colour-coded P&L are now on the **Overview** page.")
+
+    if linked:
+        st.divider()
+        st.subheader("Deposits")
+        st.caption(
+            "A manual log of what you've actually put into each account — used above for "
+            "**True P&L** (equity minus total deposited). Nothing here is read from the broker; "
+            "record a deposit whenever you make one."
+        )
+        dep_account_options = {a["nickname"]: a["id"] for a in linked}
+        dcol1, dcol2, dcol3 = st.columns([2, 1, 1])
+        with dcol1:
+            dep_account_name = st.selectbox(
+                "Account", options=list(dep_account_options.keys()), key="deposit_account"
+            )
+        with dcol2:
+            dep_amount = st.number_input(
+                "Amount ($)", min_value=0.01, step=10.0, key="deposit_amount"
+            )
+        with dcol3:
+            dep_date = st.date_input("Date", value=date.today(), key="deposit_date")
+        dep_note = st.text_input("Note (optional)", key="deposit_note")
+        if st.button("Record deposit"):
+            deposits.record_deposit(
+                dep_account_options[dep_account_name], float(dep_amount), dep_date.isoformat(), dep_note
+            )
+            st.success(f"Recorded ${dep_amount:,.2f} deposited to {dep_account_name}.")
+            st.rerun()
+
+        with st.expander("Deposit history"):
+            for nickname, account_id in dep_account_options.items():
+                entries = deposits.deposits_for(account_id)
+                if not entries:
+                    continue
+                st.markdown(f"**{nickname}** — total ${deposits.total_deposited(account_id):,.2f}")
+                for i, entry in enumerate(entries):
+                    ecol1, ecol2 = st.columns([5, 1])
+                    note_suffix = f" — {entry.note}" if entry.note else ""
+                    ecol1.write(f"{entry.date}: ${entry.amount:,.2f}{note_suffix}")
+                    if ecol2.button("Remove", key=f"remove_deposit_{account_id}_{i}"):
+                        deposits.remove_deposit(account_id, i)
+                        st.rerun()
 
     st.divider()
     st.subheader("Link a new account")
