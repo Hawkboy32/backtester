@@ -148,3 +148,15 @@ def notify_kill_switch_engaged(source: str) -> bool:
         f"Kill switch engaged from {source}. Bot will not open or manage new trades until re-armed.",
         priority="urgent",
     )
+
+
+def notify_roster_recommendation_ready(summary: list[str]) -> bool:
+    """Fired once when auto_trader.py's once-daily post-close roster check
+    computes a real (non-empty) recommendation — see roster.compute_recommendation.
+    Nothing has actually changed yet; this just tells the user a change is
+    ready to review and approve/dismiss in the mobile app or dashboard."""
+    return notify(
+        "Roster change ready to review",
+        "Nothing applied yet — approve or dismiss in the app.\n" + "\n".join(summary),
+        priority="default",
+    )

@@ -131,6 +131,10 @@ class AutoTraderStatus:
     trades_date: str | None = None  # YYYY-MM-DD the trades_today counter applies to
     last_signal: str | None = None
     last_error: str | None = None
+    # YYYY-MM-DD the once-daily post-close roster gap check last ran on (see
+    # roster.compute_recommendation) - same "only once per calendar day"
+    # pattern as trades_date above, just gating a different daily action.
+    last_roster_check_date: str | None = None
 
 
 def _ensure_dir() -> None:

@@ -74,6 +74,16 @@ class RosterConfig:
     # unknown are never blocked by the sector cap.
     max_per_strategy: int = 2
     max_per_sector: int = 2
+    # What the overnight auto-rescan (auto_trader.py, after market close) scans
+    # when it finds a roster gap — explicit and user-set, NOT inferred from
+    # scan_history.db's own "most recent run", which isn't reliable for this:
+    # confirmed live that the literal most-recent row can be a small ad-hoc
+    # scan from unrelated dev/debug work (found one recorded as "S&P 500" with
+    # only 6 tickers), which would silently replay the wrong universe. Defaults
+    # match what actually built the real roster (DDOG/MPWR/SWK).
+    rescan_universes: list = field(default_factory=lambda: ["S&P 500", "Nasdaq-100 (US Tech 100)"])
+    rescan_strategy_names: list = field(default_factory=lambda: ["VWAP Mean Reversion", "Bollinger Mean Reversion"])
+    rescan_window_days: int = 30
 
 
 @dataclass
@@ -181,6 +191,7 @@ def evaluate_roster(
     current_roster: RosterState,
     config: RosterConfig | None = None,
     score_fn: ScoreFn = ranking.rank_combos,
+    dry_run: bool = False,
 ) -> RosterState:
     """Expensive path: re-rank via score_fn (default ranking.rank_combos,
     reused unmodified) then walk the ranked list best-to-worst, promoting up
@@ -197,8 +208,16 @@ def evaluate_roster(
 
     Call manually (a dashboard button) or right after a Scanner run — never
     from inside auto_trader.py's poll loop; scanning is expensive.
+
+    dry_run: when True, computes the proposed RosterState WITHOUT writing any
+    append_event() audit entries — used by compute_recommendation() to preview
+    what evaluate_roster WOULD do without misleadingly recording "promoted"/
+    "paused"/"demoted" events for a change nobody has actually approved yet.
+    The returned RosterState is identical either way; only the audit-log side
+    effect is suppressed.
     """
     config = config or current_roster.config
+    _log_event = (lambda *a, **kw: None) if dry_run else append_event
     params_lookup = {(r.ticker, r.strategy_name): r.params for r in scan_rows}
     existing_by_key = {(e.ticker, e.strategy_name): e for e in current_roster.entries}
 
@@ -239,7 +258,7 @@ def evaluate_roster(
                     backtest_score=score, efficiency_ratio=er,
                 )
                 if was_active:
-                    append_event(
+                    _log_event(
                         ticker, strategy_name, "demoted",
                         f"regime mismatch: {strategy_name} is a {strat_regime} strategy but "
                         f"{ticker} measured {ticker_regime} (ER {er:.2f}) over the scan window",
@@ -262,7 +281,7 @@ def evaluate_roster(
                 backtest_score=score, live_stats=asdict(stats), efficiency_ratio=er,
             )
             if was_active:
-                append_event(ticker, strategy_name, "paused", reason)
+                _log_event(ticker, strategy_name, "paused", reason)
             new_entries.append(entry)
             seen_keys.add(key)
             continue
@@ -291,7 +310,7 @@ def evaluate_roster(
                 backtest_score=score, live_stats=asdict(stats), efficiency_ratio=er,
             )
             if was_active:
-                append_event(ticker, strategy_name, "demoted", cap_reason)
+                _log_event(ticker, strategy_name, "demoted", cap_reason)
             new_entries.append(entry)
             seen_keys.add(key)
             continue
@@ -303,7 +322,7 @@ def evaluate_roster(
             backtest_score=score, live_stats=asdict(stats), efficiency_ratio=er,
         )
         if not was_active:
-            append_event(ticker, strategy_name, "promoted", f"backtest score {score:.3f}")
+            _log_event(ticker, strategy_name, "promoted", f"backtest score {score:.3f}")
         new_entries.append(entry)
         claimed_tickers.add(ticker)
         active_count += 1
@@ -320,3 +339,96 @@ def evaluate_roster(
             new_entries.append(existing)
 
     return RosterState(entries=new_entries, config=config)
+
+
+RECOMMENDATION_PATH = STATE_DIR / "roster_recommendation.json"
+
+
+@dataclass
+class PendingRecommendation:
+    """A computed-but-not-yet-applied evaluate_roster() result — the roster
+    stays exactly as apply_demotion_checks left it until a human explicitly
+    approves this (dashboard or mobile), same "nothing changes silently"
+    principle the roster has always followed, just detected and computed
+    automatically instead of requiring someone to remember to check."""
+    computed_at: str
+    scan_run_id: int
+    num_scan_results: int
+    summary: list[str]  # human-readable per-combo diff lines, e.g. "MPWR/VWAP Mean Reversion: paused -> active"
+    proposed_state: RosterState
+
+
+def load_pending() -> PendingRecommendation | None:
+    if not RECOMMENDATION_PATH.exists():
+        return None
+    try:
+        data = json.loads(RECOMMENDATION_PATH.read_text(encoding="utf-8"))
+        proposed = data["proposed_state"]
+        entries = [RosterEntry(**e) for e in proposed.get("entries", [])]
+        config = RosterConfig(**proposed.get("config", {}))
+        return PendingRecommendation(
+            computed_at=data["computed_at"],
+            scan_run_id=data["scan_run_id"],
+            num_scan_results=data["num_scan_results"],
+            summary=data["summary"],
+            proposed_state=RosterState(entries=entries, config=config),
+        )
+    except Exception:
+        return None
+
+
+def save_pending(rec: PendingRecommendation) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    data = {
+        "computed_at": rec.computed_at,
+        "scan_run_id": rec.scan_run_id,
+        "num_scan_results": rec.num_scan_results,
+        "summary": rec.summary,
+        "proposed_state": {
+            "entries": [asdict(e) for e in rec.proposed_state.entries],
+            "config": asdict(rec.proposed_state.config),
+        },
+    }
+    atomic_write_text(RECOMMENDATION_PATH, json.dumps(data, indent=2))
+
+
+def clear_pending() -> None:
+    if RECOMMENDATION_PATH.exists():
+        RECOMMENDATION_PATH.unlink()
+
+
+def compute_recommendation(
+    current_roster: RosterState,
+    scan_rows: list[ScanResultRow],
+    run_id: int,
+    live_perf_fn: Callable[[str, str], object],
+) -> PendingRecommendation | None:
+    """Preview what evaluate_roster WOULD do against fresh scan_rows, without
+    saving it as the live roster or recording audit events for a change
+    nobody has approved yet (see evaluate_roster's dry_run param). Returns
+    None if the proposed state is identical to the current one — no point
+    surfacing a no-op recommendation.
+    """
+    proposed = evaluate_roster(scan_rows, live_perf_fn, current_roster, dry_run=True)
+
+    current_by_key = {(e.ticker, e.strategy_name): e.status for e in current_roster.entries}
+    proposed_by_key = {(e.ticker, e.strategy_name): e.status for e in proposed.entries}
+
+    summary: list[str] = []
+    for key in sorted(set(current_by_key) | set(proposed_by_key)):
+        old_status = current_by_key.get(key, "candidate")
+        new_status = proposed_by_key.get(key, "candidate")
+        if old_status != new_status:
+            ticker, strategy_name = key
+            summary.append(f"{ticker}/{strategy_name}: {old_status} -> {new_status}")
+
+    if not summary:
+        return None
+
+    return PendingRecommendation(
+        computed_at=datetime.now(timezone.utc).isoformat(),
+        scan_run_id=run_id,
+        num_scan_results=len(scan_rows),
+        summary=summary,
+        proposed_state=proposed,
+    )

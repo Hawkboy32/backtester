@@ -2229,6 +2229,29 @@ def _render_adaptive_roster_section() -> None:
 
     state = roster.load_roster()
 
+    pending = roster.load_pending()
+    if pending is not None:
+        computed_age = datetime.now(timezone.utc) - datetime.fromisoformat(pending.computed_at)
+        st.markdown("#### 🔔 Roster change ready to review")
+        st.info(
+            f"Computed {_format_age(computed_age.total_seconds())} against scan run "
+            f"#{pending.scan_run_id} ({pending.num_scan_results} results). Nothing has been "
+            "applied yet.\n\n" + "\n".join(f"- {line}" for line in pending.summary)
+        )
+        pcol1, pcol2 = st.columns(2)
+        with pcol1:
+            if st.button("✅ Apply this recommendation", type="primary", key="apply_roster_rec"):
+                roster.save_roster(pending.proposed_state)
+                roster.clear_pending()
+                st.success("Applied — roster updated.")
+                st.rerun()
+        with pcol2:
+            if st.button("Dismiss", key="dismiss_roster_rec"):
+                roster.clear_pending()
+                st.info("Dismissed — roster left unchanged.")
+                st.rerun()
+        st.divider()
+
     st.markdown("#### Roster settings")
     rc1, rc2, rc3 = st.columns(3)
     with rc1:
@@ -2293,6 +2316,11 @@ def _render_adaptive_roster_section() -> None:
         regime_match_only=regime_match_only,
         max_per_strategy=int(max_per_strategy),
         max_per_sector=int(max_per_sector),
+        # No dedicated UI for these yet — carry forward so saving the settings
+        # above never silently resets what the overnight auto-rescan targets.
+        rescan_universes=state.config.rescan_universes,
+        rescan_strategy_names=state.config.rescan_strategy_names,
+        rescan_window_days=state.config.rescan_window_days,
     )
 
     bcol1, bcol2 = st.columns(2)
@@ -2311,6 +2339,10 @@ def _render_adaptive_roster_section() -> None:
                 scan_rows = query_run_results(run_id)
                 new_state = roster.evaluate_roster(scan_rows, live_trades.recent_performance, state, new_config)
                 roster.save_roster(new_state)
+                # A manual re-evaluation supersedes whatever the overnight
+                # auto-check may have computed - don't leave a stale
+                # recommendation sitting around for a state that's now gone.
+                roster.clear_pending()
                 st.success(f"Roster re-evaluated against scan run #{run_id} ({len(scan_rows)} results).")
                 st.rerun()
 

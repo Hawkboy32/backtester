@@ -65,6 +65,7 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -75,6 +76,7 @@ from backtester.auto_trader_state import (
 )
 from backtester.brokers.base import BrokerAccount, OrderSide
 from backtester.data import PolygonClient, PolygonError
+from backtester.engine import ENGINE_VERSION
 from backtester.execution import (
     AccountOrder,
     SizingMode,
@@ -85,8 +87,11 @@ from backtester.execution import (
 from backtester.execution_log import log_results
 from backtester.conviction import compute_conviction, compute_levels
 from backtester.oanda_data import OandaDataClient, OandaError
+from backtester.scan_db import record_scan
+from backtester.scanner import run_scan
 from backtester.strategies import STRATEGY_REGISTRY, build_strategy
 from backtester.strategy import Bar
+from backtester.universe import load_universe
 
 LOOKBACK_DAYS = 90  # enough history for any strategy's default window, even on daily bars
 RECENT_CLOSES_COUNT = 30  # trailing closes published for the mobile app's sparkline (see current_signals.py)
@@ -198,6 +203,92 @@ def _resolve_targets(control) -> list[tuple[str, str, dict, bool]]:
         for ticker in group.get("tickers", [])
     ]
     return primary + extra
+
+
+# 17:00 ET — an hour past NYSE close (16:00), a safety buffer against a scan
+# firing during the last few minutes of trading if this check happens to run
+# right at the boundary. Checked in America/New_York wall-clock time (DST-aware
+# via ZoneInfo, same approach as VwapDriftPullbackStrategy's session filter)
+# so the cutoff means the same real-world time year-round.
+_ROSTER_CHECK_CUTOFF_HOUR = 17
+
+
+def _maybe_check_roster_gap(status: AutoTraderStatus, control) -> None:
+    """Once per calendar day, after market close: if the adaptive roster has
+    a gap (something paused, or fewer active entries than roster_size), run a
+    REAL fresh scan and compute what evaluate_roster would recommend — see
+    roster.compute_recommendation. This is the one place in this file that
+    deliberately runs an expensive scan; it's safe here specifically because
+    it only ever fires after hours, never competing with intraday trading
+    (evaluate_roster's own docstring says never to call it from inside the
+    live poll loop during the day — this respects that by construction, not
+    by working around it).
+
+    NEVER applies anything. A real recommendation is saved via
+    roster.save_pending() and pushed via one notification; the actual roster
+    (what auto_trader.py trades) is untouched until a human approves it from
+    the dashboard or mobile app. A failure anywhere in here is caught and
+    logged to status.last_error — it must never be able to affect trading.
+    """
+    if not control.use_roster:
+        return
+
+    et_now = datetime.now(ZoneInfo("America/New_York"))
+    today = et_now.date().isoformat()
+    if status.last_roster_check_date == today:
+        return
+    if et_now.weekday() >= 5 or et_now.hour < _ROSTER_CHECK_CUTOFF_HOUR:
+        return
+
+    # Set this BEFORE attempting the scan, unconditionally — so a failure
+    # below still counts as "checked today" and doesn't retry (and refail)
+    # every poll cycle for the rest of the day.
+    status.last_roster_check_date = today
+
+    try:
+        state = roster.load_roster()
+        active_count = sum(1 for e in state.entries if e.status == "active")
+        has_gap = active_count < state.config.roster_size or any(e.status == "paused" for e in state.entries)
+        if not has_gap:
+            return
+
+        cfg = state.config
+        tickers = sorted({
+            t for universe_name in cfg.rescan_universes
+            for t in load_universe(universe_name)["ticker"].tolist()
+        })
+        to_date = et_now.date()
+        from_date = to_date - timedelta(days=cfg.rescan_window_days)
+
+        scan_rows = run_scan(
+            tickers=tickers,
+            strategy_names=cfg.rescan_strategy_names,
+            from_date=from_date.isoformat(),
+            to_date=to_date.isoformat(),
+            client=PolygonClient(),
+            market_calendar="equity",
+        )
+        run_id = record_scan(
+            {
+                "run_at": datetime.now(timezone.utc).isoformat(),
+                "universe": " + ".join(cfg.rescan_universes),
+                "num_tickers": len(tickers),
+                "from_date": from_date.isoformat(),
+                "to_date": to_date.isoformat(),
+                "multiplier": 1,
+                "timespan": "minute",
+                "strategy_names": cfg.rescan_strategy_names,
+                "engine_version": ENGINE_VERSION,
+            },
+            scan_rows,
+        )
+
+        rec = roster.compute_recommendation(state, scan_rows, run_id, live_trades.recent_performance)
+        if rec is not None:
+            roster.save_pending(rec)
+            notifications.notify_roster_recommendation_ready(rec.summary)
+    except Exception as e:  # noqa: BLE001
+        status.last_error = f"overnight roster check failed: {e}"
 
 
 _oanda_client: OandaDataClient | None | bool = False  # False = not checked yet, None = checked, unavailable
@@ -567,6 +658,12 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
         status.last_signal = "disabled — not trading"
         save_status(status)
         return status
+
+    # Not a trade, so deliberately not gated on trades_today's cap below — a
+    # once-daily, after-hours check for whether the roster has a gap. See
+    # _maybe_check_roster_gap's own docstring for why running a real scan here
+    # is safe (only ever fires after market close).
+    _maybe_check_roster_gap(status, control)
 
     if status.trades_today >= control.max_trades_per_day:
         status.last_signal = f"max trades/day ({control.max_trades_per_day}) reached — not trading"
