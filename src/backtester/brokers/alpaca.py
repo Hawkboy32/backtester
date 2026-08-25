@@ -6,7 +6,10 @@ orders if is_paper=False was explicitly set when it was linked.
 
 from __future__ import annotations
 
+import time
+
 import pandas as pd
+import requests
 from datetime import datetime, timedelta, timezone
 
 from alpaca.data.enums import DataFeed
@@ -25,7 +28,16 @@ from alpaca.trading.requests import (
     TakeProfitRequest,
 )
 
-from backtester.brokers.base import AccountSnapshot, BrokerAccount, EquityPoint, OrderResult, OrderSide, Position
+from backtester.brokers.base import (
+    AccountSnapshot, BrokerAccount, BrokerFee, EquityPoint, OrderResult, OrderSide, Position,
+)
+
+# How long to wait for a real fill price after submitting (see
+# submit_market_order). ~3s total: long enough for a market order in a live
+# session, short enough not to stall a 120s poll loop when the market is shut
+# and the order is simply queued.
+_FILL_POLL_ATTEMPTS = 6
+_FILL_POLL_SECONDS = 0.5
 
 _TIMESPAN_TO_UNIT = {
     "minute": TimeFrameUnit.Minute,
@@ -56,6 +68,48 @@ class AlpacaBroker(BrokerAccount):
             is_paper=self.is_paper,
         )
 
+    def get_fees(self, limit: int = 100) -> list[BrokerFee]:
+        """Every FEE activity Alpaca has charged, newest first.
+
+        Hits /v2/account/activities directly with requests rather than through
+        alpaca-py: the installed SDK has no GetAccountActivitiesRequest, and
+        this is a plain authenticated GET.
+
+        Two very different things both arrive as FEE and both matter:
+          - REG / TAF / CAT — per-sell regulatory fees, ~$0.01 each
+          - "Funding Wallet incoming alpaca conversion fee" — the GBP->USD
+            charge on a DEPOSIT, which is far larger (~1.5%) and has nothing
+            to do with trading at all
+        Kept as separate line items so the app can show which is which.
+        """
+        base = "https://paper-api.alpaca.markets" if self.is_paper else "https://api.alpaca.markets"
+        headers = {
+            "APCA-API-KEY-ID": self._client._api_key,
+            "APCA-API-SECRET-KEY": self._client._secret_key,
+        }
+        resp = requests.get(
+            f"{base}/v2/account/activities",
+            headers=headers, params={"page_size": min(limit, 100)}, timeout=30,
+        )
+        resp.raise_for_status()
+        fees = []
+        for a in resp.json():
+            if a.get("activity_type") != "FEE":
+                continue
+            try:
+                amount = float(a.get("net_amount", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            desc = a.get("description", "") or ""
+            # Alpaca doesn't label the conversion charge with a code, so
+            # classify off its own description rather than inventing one.
+            kind = "CONVERSION" if "conversion" in desc.lower() else desc.split()[0] if desc else "FEE"
+            fees.append(BrokerFee(
+                date=str(a.get("date") or a.get("transaction_time") or "")[:10],
+                kind=kind, amount=amount, description=desc,
+            ))
+        return fees
+
     def get_positions(self) -> list[Position]:
         positions = self._client.get_all_positions()
         return [
@@ -73,7 +127,14 @@ class AlpacaBroker(BrokerAccount):
 
     def get_market_clock(self) -> dict | None:
         clock = self._client.get_clock()
-        return {"is_open": clock.is_open, "next_open": clock.next_open}
+        # next_close is what an end-of-session flatten needs; without it the
+        # caller can only tell whether the market is open, not how long it has
+        # left. Added alongside the protective exits (2026-08-14).
+        return {
+            "is_open": clock.is_open,
+            "next_open": clock.next_open,
+            "next_close": getattr(clock, "next_close", None),
+        }
 
     def get_open_order_tickers(self) -> set[str]:
         orders = self._client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN))
@@ -152,6 +213,30 @@ class AlpacaBroker(BrokerAccount):
 
             request = MarketOrderRequest(**order_kwargs)
             order = self._client.submit_order(order_data=request)
+
+            # submit_order returns IMMEDIATELY, before the fill — filled_qty=0
+            # and filled_avg_price=None on essentially every Alpaca order.
+            # Callers that recorded the trade from that response fell back to
+            # the current BAR CLOSE as the fill price, which is not the price
+            # actually paid. Measured on AlpacaLive 2026-08-14: that inflated
+            # recorded realised P&L to +$0.22 against a true +$0.06, a 3.5x
+            # overstatement (one Q trade alone was booked at 142.59 when it
+            # actually filled at 141.81). Poll briefly for the real fill so
+            # the recorded price is the price that happened.
+            #
+            # Bounded and best-effort: a market order normally fills in well
+            # under a second during a session, and outside one it legitimately
+            # stays queued — that returns unfilled, which the caller already
+            # treats as "queued for the open" rather than an error.
+            for _ in range(_FILL_POLL_ATTEMPTS):
+                if order.filled_avg_price is not None and float(order.filled_qty or 0) > 0:
+                    break
+                time.sleep(_FILL_POLL_SECONDS)
+                try:
+                    order = self._client.get_order_by_id(order.id)
+                except Exception:  # noqa: BLE001 — keep whatever we already have
+                    break
+
             return OrderResult(
                 account_nickname=self.nickname,
                 success=True,

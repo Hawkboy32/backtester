@@ -12,10 +12,10 @@ accurate as what actually gets recorded.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 
-from backtester.auto_trader_state import STATE_DIR, atomic_write_text
+from backtester.auto_trader_state import STATE_DIR, atomic_write_text, read_state_json
 
 DEPOSITS_PATH = STATE_DIR / "deposits.json"
 
@@ -29,13 +29,21 @@ class Deposit:
 
 
 def load_all() -> dict[str, list[Deposit]]:
-    if not DEPOSITS_PATH.exists():
-        return {}
-    try:
-        data = json.loads(DEPOSITS_PATH.read_text(encoding="utf-8"))
-        return {account_id: [Deposit(**d) for d in entries] for account_id, entries in data.items()}
-    except Exception:
-        return {}
+    """Raises StateFileUnreadable if the file exists but can't be parsed —
+    NEVER returns {} on failure. This log is the only record of money paid in
+    (no broker exposes transfer history), and every writer below is a
+    read-modify-write, so a silent empty return here would let the next
+    recorded deposit erase the entire history. Demonstrated live 2026-08-12:
+    $53.76 of real deposits vanished in a test when an unknown field made the
+    old `except Exception: return {}` fire. Unknown keys are ignored rather
+    than fatal so a NEWER writer's extra field can't lock an older reader out
+    (the exact shape that destroyed roster.json the same day)."""
+    data = read_state_json(DEPOSITS_PATH, default={})
+    known = {f.name for f in fields(Deposit)}
+    return {
+        account_id: [Deposit(**{k: v for k, v in d.items() if k in known}) for d in entries]
+        for account_id, entries in data.items()
+    }
 
 
 def _save_all(data: dict[str, list[Deposit]]) -> None:

@@ -15,9 +15,15 @@ note=this is a periodic snapshot of a hand-picked list, not a live feed - re-rev
   the list occasionally (market-cap rankings shift) rather than treating it as
   permanent. No refresh script exists for this one (nothing to scrape); editing the
   CSV directly is the "refresh" for this universe.
-note2=SYMBOL MAPPING GAP: these tickers are in POLYGON's data format (X:BTCUSD).
-  Coinbase's execution API uses product-id format (BTC-USD) and Kraken uses its own
-  asset codes (XBT/ZUSD-derived pairs, see brokers/kraken.py's own caveat about this).
-  This universe is for SCANNING/BACKTESTING only right now - a symbol-mapping layer
-  between Polygon tickers and each broker's own trading-pair format is still needed
-  before any of this can be wired into actual crypto order execution.
+note2=SYMBOL MAPPING — RESOLVED 2026-08-19. These tickers are in POLYGON's data
+  format (X:BTCUSD). Coinbase's execution API uses product-id format (BTC-USD) -
+  brokers/coinbase.py's _product_id() already handled this via strip+rejoin, no
+  changes needed. Kraken uses its own altname pair codes - brokers/kraken.py's
+  new _pair() does the same strip+rejoin, with two confirmed exceptions (Kraken
+  uses "XBT" for Bitcoin and "XDG" for Dogecoin, not "BTC"/"DOGE" - "DOGEUSD" IS
+  a real Kraken pair but a DIFFERENT, unrelated one). All 15 tickers' mappings for
+  both brokers were verified against each broker's own live API before trusting
+  this note (Kraken's public AssetPairs endpoint; Coinbase's mapping was already
+  live-tested via its own account calls). Both submit_market_order() paths now
+  accept either ticker format directly - no separate mapping layer needed at the
+  call site.

@@ -21,18 +21,18 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from backtester.auto_trader_state import STATE_DIR, atomic_write_text
+from backtester.auto_trader_state import STATE_DIR, atomic_write_text, read_state_json
 
 PATH = STATE_DIR / "account_risk.json"
 
 
 def load_state() -> dict:
-    if not PATH.exists():
-        return {}
-    try:
-        return json.loads(PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    """Raises StateFileUnreadable rather than returning {} on a read failure.
+    check_and_update below is a read-modify-write, so a silent empty return
+    would reset every account's peak_equity AND forget blocked=True — an
+    account halted by the drawdown circuit breaker would quietly un-block
+    itself. Failing loud keeps the breaker latched. See read_state_json."""
+    return read_state_json(PATH, default={})
 
 
 def save_state(state: dict) -> None:

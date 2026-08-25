@@ -37,7 +37,7 @@ from backtester.accounts import (
     remove_account,
 )
 from backtester.auto_trader_state import AutoTraderControl, load_control, load_status, save_control, trigger_kill_switch
-from backtester.brokers.base import OrderSide
+from backtester.brokers.base import OrderSide, summarize_fees
 from backtester.brokers.ibkr import check_gateway_reachable
 from backtester.data import DEFAULT_CACHE_DIR, PolygonClient, PolygonError, cache_stats, prune_cache
 from backtester.engine import ENGINE_VERSION, BacktestEngine
@@ -68,7 +68,7 @@ from backtester.strategies import STRATEGY_REGISTRY, build_strategy, strategy_re
 from backtester.strategies.sma_crossover import SmaCrossoverStrategy
 from backtester.universe import UNIVERSE_REGISTRY, load_universe, sample_universe, sector_for_ticker
 from backtester.walkforward import aggregate_walkforward, run_walkforward_scan
-from backtester import account_risk, app_settings, daily_pnl_guard, deposits, heartbeat, live_trades, notifications, playlist, position_attribution, roster, volatility
+from backtester import account_risk, app_settings, daily_pnl_guard, deposits, heartbeat, live_trades, notifications, playlist, position_attribution, roster, source_stamp, tax, version, volatility
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 AUTO_TRADER_SCRIPT = PROJECT_ROOT / "auto_trader.py"
@@ -76,6 +76,19 @@ SCAN_RUNNER_SCRIPT = PROJECT_ROOT / "scan_runner.py"
 LIVE_ARM_PHRASE = "I ARM LIVE AUTO-TRADING"
 
 st.set_page_config(page_title="Holotable", layout="wide")
+
+
+@st.cache_resource
+def _stamp_dashboard_start() -> bool:
+    """Records the source revision this dashboard process loaded. Wrapped in
+    cache_resource so it runs ONCE per process, not on every Streamlit rerun
+    (this module re-executes top-to-bottom on every widget interaction) —
+    otherwise the stamp would keep refreshing and never look stale."""
+    source_stamp.record_start("dashboard")
+    return True
+
+
+_stamp_dashboard_start()
 
 AUTH_CONFIG_PATH = Path(__file__).resolve().parent / "auth_config.yaml"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -583,6 +596,72 @@ no way to say "I'm off on purpose".
             st.warning(f"{account['nickname']}: giveback-blocked today — {gb_status['reason']}")
     if watched_ids and not giveback_blocked_any:
         st.caption("No target accounts are currently giveback-blocked today.")
+
+    st.divider()
+    st.markdown("### Protective exits (stop-loss / take-profit)")
+    st.caption(
+        "Attached to the **opening** order as broker-side bracket prices, so they keep working "
+        "even if the bot process is down — unlike anything the poll loop has to be alive to do. "
+        "Until these existed a position could only be closed by the strategy's own exit signal, "
+        "which is why one live DDOG position was held 43h to -3.6%."
+    )
+    with st.expander("What the backtests actually showed (read before changing these)"):
+        st.markdown(
+            "Swept over 6 active roster combos, selecting on June 2026 and testing on July and "
+            "August — `sweep_protective_exits.py` and `sweep_tail_risk.py`.\n\n"
+            "- **Take-profit 1.5%** — the only setting that improved P&L out-of-sample "
+            "(2/2 windows, +$62 and +$22 on $1,000 positions). But the best *value* moved "
+            "between windows (1.5% Jun, 0.5% Jul, 0.75% Aug) — trust the direction, not the number.\n"
+            "- **Stop-loss 1%** — costs roughly 15% of expected return and cuts the worst single "
+            "trade by 60-90% ($-128 -> $-24 in July). A risk preference, not an optimisation. "
+            "Wider stops (2%, 3%) tested worse on *both* P&L and tail.\n"
+            "- **A stop is not a guaranteed cap.** An overnight gap fills straight through it at "
+            "the open — a 1% stop still produced a -$32.55 fill against a -$10.20 level.\n"
+            "- **Session-end flatten LOST money in all three windows** (-$282/-$273/-$73). It is "
+            "here as a control because not holding overnight is a legitimate preference, *not* "
+            "because the evidence supports it. Off by default."
+        )
+
+    pe_stop_on = st.checkbox(
+        "Enable stop-loss on new positions", value=control.stop_loss_pct is not None,
+        key="settings_stop_enabled",
+    )
+    pe_stop_pct = st.number_input(
+        "Stop distance (% adverse to entry)", min_value=0.1, max_value=20.0,
+        value=(control.stop_loss_pct * 100) if control.stop_loss_pct else 1.0,
+        step=0.25, key="settings_stop_pct", disabled=not pe_stop_on,
+    )
+    pe_tp_on = st.checkbox(
+        "Enable take-profit on new positions", value=control.take_profit_pct is not None,
+        key="settings_tp_enabled",
+    )
+    pe_tp_pct = st.number_input(
+        "Take-profit distance (% in favour of entry)", min_value=0.1, max_value=20.0,
+        value=(control.take_profit_pct * 100) if control.take_profit_pct else 1.5,
+        step=0.25, key="settings_tp_pct", disabled=not pe_tp_on,
+    )
+    pe_flat_on = st.checkbox(
+        "Flatten open positions before the session close (tested WORSE — off by default)",
+        value=control.flatten_before_close_minutes is not None, key="settings_flatten_enabled",
+    )
+    pe_flat_min = st.number_input(
+        "Minutes before close to flatten", min_value=1, max_value=180,
+        value=control.flatten_before_close_minutes or 10, step=5,
+        key="settings_flatten_minutes", disabled=not pe_flat_on,
+    )
+    if st.button("Save protective exits", key="settings_save_protective"):
+        fresh = load_control()
+        # Stored as fractions (0.01), shown as percentages (1.0) — the engine,
+        # the sweeps and _bracket_prices all speak fractions.
+        fresh.stop_loss_pct = (pe_stop_pct / 100) if pe_stop_on else None
+        fresh.take_profit_pct = (pe_tp_pct / 100) if pe_tp_on else None
+        fresh.flatten_before_close_minutes = int(pe_flat_min) if pe_flat_on else None
+        save_control(fresh)
+        st.success(
+            "Protective exits saved. These apply to positions opened FROM NOW ON — anything "
+            "already open was submitted without a bracket and is unaffected."
+        )
+        st.rerun()
 
     st.divider()
     st.markdown("### Data cache")
@@ -1473,6 +1552,46 @@ def _market_status_label(status: dict) -> str:
     return "⚪ Status unavailable"
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_account_fees(account_ids: tuple[str, ...]) -> dict:
+    """Broker-charged fees per account, split into trading vs funding.
+
+    Separate from _fetch_account_balances (and on a longer TTL) because fees
+    only change when a trade closes or a deposit lands, and because a broker
+    with no fee endpoint must degrade to "can't tell you" rather than "$0.00" —
+    reporting zero fees for IG/OANDA/IBKR would understate their real cost.
+
+    Returns JSON-safe data so st.cache_data can store it. Amounts stay NEGATIVE
+    throughout, matching BrokerFee.
+    """
+    result: dict = {}
+    try:
+        broker_accounts = build_broker_accounts(list(account_ids))
+    except Exception:  # noqa: BLE001 — the balances section already surfaces connect errors
+        return result
+
+    for broker_account in broker_accounts:
+        entry: dict = {"supported": True, "error": None, "lines": [], "totals": None}
+        try:
+            fees = broker_account.get_fees()
+            entry["totals"] = summarize_fees(fees)
+            entry["lines"] = [
+                {
+                    "Date": f.date, "Kind": f.kind, "Amount": f.amount,
+                    "Charged on": "Deposit" if f.is_funding else "Trading",
+                    "Description": f.description,
+                }
+                for f in fees
+            ]
+        except NotImplementedError:
+            entry["supported"] = False
+        except Exception as e:  # noqa: BLE001
+            entry["supported"] = False
+            entry["error"] = _friendly_account_error(e)
+        result[broker_account.nickname] = entry
+    return result
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _fetch_account_balances(account_ids: tuple[str, ...], history_period: str) -> dict:
     """Cached so the Accounts tab's balance/history section only actually hits
@@ -1497,6 +1616,10 @@ def _fetch_account_balances(account_ids: tuple[str, ...], history_period: str) -
     for broker_account in broker_accounts:
         try:
             snapshot = broker_account.get_account_snapshot()
+            try:
+                unrealized_pnl = sum(p.unrealized_pl for p in broker_account.get_positions())
+            except Exception:  # noqa: BLE001
+                unrealized_pnl = 0.0
             result["rows"].append(
                 {
                     "account_id": broker_account.account_id,
@@ -1509,6 +1632,7 @@ def _fetch_account_balances(account_ids: tuple[str, ...], history_period: str) -
                     # not unrealized/open-position P&L, which _render_live_positions
                     # already shows separately per open position.
                     "realized_pnl": pnl_by_account.get(broker_account.account_id, 0.0),
+                    "unrealized_pnl": unrealized_pnl,
                 }
             )
         except Exception as e:  # noqa: BLE001
@@ -1677,7 +1801,7 @@ def render_accounts_tab() -> None:
                     row["True P&L"] = row["equity"] - row["Total Deposited"]
                 display_df = (
                     pd.DataFrame(balance_rows)
-                    .drop(columns=["account_id"])
+                    .drop(columns=["account_id", "unrealized_pnl"])
                     .rename(columns={"realized_pnl": "Realized P&L"})
                 )
                 st.dataframe(display_df, use_container_width=True)
@@ -1719,12 +1843,102 @@ def render_accounts_tab() -> None:
 
     if linked:
         st.divider()
+        st.subheader("Costs")
+        st.caption(
+            "Broker fees never touch live_trades.db, so **Realized P&L above is GROSS of costs**. "
+            "This is where the gap between it and True P&L comes from."
+        )
+        # Own toggle rather than riding on 'Refresh balances': this hits each
+        # broker's activities endpoint, and fees only move when a trade closes
+        # or a deposit lands, so it doesn't need the 60s balance cadence.
+        if st.checkbox("Show broker fees", key="show_fees"):
+            fee_data = _fetch_account_fees(tuple(a["id"] for a in linked))
+            gross_by_account = live_trades.realized_pnl_by_account()
+            id_by_nickname = {a["nickname"]: a["id"] for a in linked}
+
+            any_supported = False
+            for nickname, entry in fee_data.items():
+                if not entry["supported"]:
+                    reason = entry["error"] or "this broker exposes no fee endpoint"
+                    st.caption(f"**{nickname}** — fees unavailable ({reason}).")
+                    continue
+                any_supported = True
+                totals = entry["totals"]
+                gross = gross_by_account.get(id_by_nickname.get(nickname, ""), 0.0)
+                st.markdown(f"**{nickname}**")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Gross realized P&L", f"${gross:,.2f}")
+                c2.metric("Trading fees", f"${totals['trading']:,.2f}")
+                c3.metric("Funding fees", f"${totals['funding']:,.2f}")
+                c4.metric("Net of all fees", f"${gross + totals['total']:,.2f}")
+                if entry["lines"]:
+                    with st.expander(f"{nickname} — every fee charged"):
+                        st.dataframe(
+                            pd.DataFrame(entry["lines"]), use_container_width=True, hide_index=True
+                        )
+
+            if any_supported:
+                st.caption(
+                    "**Trading fees** (REG/TAF/CAT) are charged per selling day and each rounds up "
+                    "to a $0.01 minimum, so they behave as a near-fixed daily toll rather than a "
+                    "percentage — measured on AlpacaLive 11–13 Aug, sell proceeds tripled "
+                    "($5.69 → $17.46) while the fee stayed $0.03/day. Below roughly $360 per sell "
+                    "the true regulatory fee is smaller than the floor, so it is billed at the "
+                    "floor. **Funding fees** are the GBP→USD conversion charged on each deposit "
+                    "(~1.5%); those stay proportional to what you pay in. Figures as reported by "
+                    "the broker — not a projection, and not advice about deposits or trade sizing."
+                )
+        else:
+            st.caption("Not fetched — tick to pull each broker's own fee records.")
+
+    if linked:
+        st.divider()
         st.subheader("Deposits")
         st.caption(
             "A manual log of what you've actually put into each account — used above for "
             "**True P&L** (equity minus total deposited). Nothing here is read from the broker; "
             "record a deposit whenever you make one."
         )
+
+        week_start = date.today() - timedelta(days=7)
+        week_start_iso = week_start.isoformat()
+        week_end_iso = (date.today() + timedelta(days=1)).isoformat()
+        realized_this_week = live_trades.realized_pnl_by_account_between(week_start_iso, week_end_iso)
+        unrealized_by_account = (
+            {r["account_id"]: r["unrealized_pnl"] for r in fetched.get("rows", [])}
+            if st.session_state.get("show_balances")
+            else None
+        )
+
+        weekly_rows = []
+        for a in linked:
+            deposited_this_week = sum(
+                e.amount for e in deposits.deposits_for(a["id"]) if e.date >= week_start_iso
+            )
+            row = {
+                "Account": a["nickname"],
+                "Deposited this week": deposited_this_week,
+                "Realized P&L this week": realized_this_week.get(a["id"], 0.0),
+                "Unrealized P&L (open)": (
+                    unrealized_by_account.get(a["id"], 0.0) if unrealized_by_account is not None else None
+                ),
+            }
+            weekly_rows.append(row)
+        if any(r["Deposited this week"] or r["Realized P&L this week"] for r in weekly_rows):
+            st.markdown(f"**This week** ({week_start_iso} to {date.today().isoformat()})")
+            st.dataframe(pd.DataFrame(weekly_rows).set_index("Account"), use_container_width=True)
+            if unrealized_by_account is None:
+                st.caption(
+                    "Unrealized P&L needs 'Refresh balances' above to be toggled on. Deposited vs. "
+                    "realized P&L is not advice about whether or how much to deposit — just the raw "
+                    "numbers side by side."
+                )
+            else:
+                st.caption(
+                    "Deposited vs. realized/unrealized P&L this week, side by side — not advice about "
+                    "whether or how much to deposit, just the raw numbers."
+                )
+
         dep_account_options = {a["nickname"]: a["id"] for a in linked}
         dcol1, dcol2, dcol3 = st.columns([2, 1, 1])
         with dcol1:
@@ -1758,6 +1972,84 @@ def render_accounts_tab() -> None:
                     if ecol2.button("Remove", key=f"remove_deposit_{account_id}_{i}"):
                         deposits.remove_deposit(account_id, i)
                         st.rerun()
+
+    if linked:
+        st.divider()
+        st.subheader("Tax (GBP estimate)")
+        st.caption(
+            "A running estimate only — NOT a substitute for an actual Self Assessment. Sums each "
+            "LIVE (real-money) account's REALIZED P&L (closed trades, live_trades.db) for the "
+            "current UK tax year (6 Apr – 5 Apr) and applies a flat allowance/rate. Paper accounts "
+            "are excluded entirely (2026-08-17) — no real tax exposure, so they'd just add noise to "
+            "a figure meant for real tracking. This is the SIMPLE method, not full HMRC Section 104 "
+            "share pooling — same-ticker trades aren't cost-averaged the way a real CGT computation "
+            "would, so for an account trading one ticker repeatedly this can diverge from the real "
+            "figure. Allowance, rate, and the GBP/USD rate are entered below rather than assumed, "
+            "since none of them are things this assistant can reliably know are current — they "
+            "default to 0 until you set real values."
+        )
+
+        live_linked = [a for a in linked if not a["is_paper"]]
+        settings = tax.load_tax_settings()
+        tcol1, tcol2, tcol3 = st.columns(3)
+        with tcol1:
+            new_allowance = st.number_input(
+                "Annual CGT allowance (£)", min_value=0.0, value=settings.cgt_allowance_gbp, step=100.0,
+                key="tax_allowance",
+            )
+        with tcol2:
+            new_rate = st.number_input(
+                "CGT rate (%)", min_value=0.0, max_value=100.0, value=settings.cgt_rate_pct, step=1.0,
+                key="tax_rate",
+            )
+        with tcol3:
+            new_fx = st.number_input(
+                "GBP/USD rate (USD per £1)", min_value=0.0, value=settings.gbp_usd_rate, step=0.01,
+                key="tax_fx",
+            )
+
+        with st.expander("Per-account currency (default: IBKR Live = GBP, everything else USD)"):
+            if not live_linked:
+                st.caption("No live accounts linked.")
+            new_currencies = dict(settings.account_currencies)
+            for acct in live_linked:
+                current = settings.currency_for(acct["id"])
+                choice = st.radio(
+                    acct["nickname"], ["GBP", "USD"],
+                    index=0 if current == "GBP" else 1,
+                    horizontal=True, key=f"tax_currency_{acct['id']}",
+                )
+                new_currencies[acct["id"]] = choice
+
+        if st.button("Save tax settings"):
+            tax.save_tax_settings(tax.TaxSettings(
+                cgt_allowance_gbp=float(new_allowance), cgt_rate_pct=float(new_rate),
+                gbp_usd_rate=float(new_fx), account_currencies=new_currencies,
+            ))
+            st.success("Saved.")
+            st.rerun()
+
+        summary = tax.compute_tax_summary(linked)
+        st.markdown(f"**Tax year {summary.tax_year_start.isoformat()} to {summary.tax_year_end.isoformat()}**")
+        tax_rows = [
+            {
+                "Account": line.nickname, "Currency": line.currency,
+                f"Realized ({line.currency})": line.realized_gain_native,
+                "Realized (£)": line.realized_gain_gbp if line.realized_gain_gbp is not None else "no FX rate set",
+            }
+            for line in summary.lines
+        ]
+        st.dataframe(pd.DataFrame(tax_rows).set_index("Account"), use_container_width=True)
+        if summary.missing_fx_accounts:
+            st.warning(
+                f"Excluded from the total below (no GBP/USD rate set): {', '.join(summary.missing_fx_accounts)}."
+            )
+
+        mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+        mcol1.metric("Total realized gain (£)", f"£{summary.total_gain_gbp:,.2f}")
+        mcol2.metric("Allowance (£)", f"£{summary.allowance_gbp:,.2f}")
+        mcol3.metric("Taxable gain (£)", f"£{summary.taxable_gain_gbp:,.2f}")
+        mcol4.metric("Estimated tax (£)", f"£{summary.estimated_tax_gbp:,.2f}")
 
     st.divider()
     st.subheader("Link a new account")
@@ -2208,10 +2500,17 @@ def render_execution_tab() -> None:
                             f"{pending_close['nickname']}: close order accepted "
                             f"(order id {result.broker_order_id})."
                         )
+                        # Record even without attribution — see
+                        # live_trades.UNATTRIBUTED_STRATEGY for why dropping
+                        # these silently understated realised P&L.
                         attribution = position_attribution.pop_open(
                             pending_close["account_id"], pending_close["ticker"]
-                        )
-                        if attribution and result.filled_avg_price:
+                        ) or {
+                            "strategy_name": live_trades.UNATTRIBUTED_STRATEGY,
+                            "opened_at": "",
+                            "conviction": None,
+                        }
+                        if result.filled_avg_price:
                             live_trades.record_realized_trade(
                                 account_id=pending_close["account_id"],
                                 ticker=pending_close["ticker"],
@@ -2374,6 +2673,8 @@ def _render_adaptive_roster_section() -> None:
         rescan_universes=state.config.rescan_universes,
         rescan_strategy_names=state.config.rescan_strategy_names,
         rescan_window_days=state.config.rescan_window_days,
+        review_cadence_days=state.config.review_cadence_days,
+        pause_release_days=state.config.pause_release_days,
     )
 
     bcol1, bcol2 = st.columns(2)
@@ -2477,9 +2778,11 @@ def _render_adaptive_roster_section() -> None:
 # straight from the real overnight sweep's tested grid ([10, 15, 20, 25, 30]),
 # not interpolated — Conservative/Moderate/Aggressive map to the sweep's own
 # low/default/high points so each preset is backed by an actual measured
-# result, not a guess. All three enable vol-target sizing (the sweep only
-# ever tested it ON); Moderate matches today's status-quo defaults exactly,
-# so applying it is a no-op for an account already running the defaults.
+# result, not a guess. sizing_value (5%/15%/50%, updated 2026-08-15) is a
+# risk-tolerance choice, not a backtest optimum — risk_dial_sizing_sweep.py
+# found Sharpe flat across the whole 1-100% range, so no preset is a "no-op"
+# relative to any particular account's current sizing; applying one always
+# changes real position sizing on an already-armed account.
 def _apply_risk_preset(name: str) -> None:
     """Applies the shared risk_presets.apply_risk_preset (single source of
     truth also used by the mobile app's /risk-preset endpoint) AND pushes the
@@ -2566,12 +2869,19 @@ def render_auto_trading_tab() -> None:
         "Sets position sizing (% of equity), the GARCH vol-target, the account-level max-"
         "drawdown breaker, and the daily P&L giveback guard together — the sizing/risk-LIMIT "
         "knobs only, never the strategies' own entry logic (that's already tuned separately, "
-        "see CLAUDE_NOTES.txt). vol-target values come straight from the real overnight sweep "
-        "(2026-08-07/08): across every strategy with a genuine edge, higher sizing never hurt "
-        "risk-adjusted returns within the 10-30% range tested — it only ever helped or was "
-        "neutral. **Moderate matches today's defaults exactly** — applying it is a safe no-op on "
-        "an account already running as-is. Also updates the Settings page's account-risk and "
-        "giveback sections."
+        "see CLAUDE_NOTES.txt). vol-target values come from the overnight sweep (2026-08-07/08): "
+        "across every strategy with a genuine edge, higher sizing never hurt risk-adjusted "
+        "returns within the 10-30% range tested. The sizing_value % itself comes from a separate "
+        "1-100% walk-forward sweep (2026-08-15) that found Sharpe flat across the whole range — "
+        "sizing doesn't create edge, it only scales return and drawdown together, so these three "
+        "values (5% / 15% / 50%) are a risk-tolerance choice, not an optimum. **Applying any "
+        "preset changes real position sizing on an already-armed account** — none of them is a "
+        "no-op. Also updates the Settings page's account-risk and giveback sections. Six roster "
+        "tickers also carry their own liquidity-aware ceiling on top of whichever value above "
+        "applies (2026-08-16 sweep found the roster isn't uniformly liquid — PSKY loses most of "
+        "its return to slippage well before 100% sizing, several others barely lose any) — see "
+        "CLAUDE_NOTES.txt or the position-sizing line now shown on the mobile app's open "
+        "positions for what actually applied on a given trade."
     )
     applied_preset = st.session_state.pop("risk_preset_applied", None)
     if applied_preset is not None:
@@ -2664,6 +2974,7 @@ def render_auto_trading_tab() -> None:
     )
     selected_ids = []
     sizing_overrides: dict[str, dict] = {}
+    position_modes: dict[str, str] = {}
     for section_label, asset_class in [("Equities", "equity"), ("Forex & CFDs", "forex"), ("Crypto", "crypto")]:
         group = [a for a in linked if account_asset_class(a) == asset_class]
         if not group:
@@ -2679,6 +2990,24 @@ def render_auto_trading_tab() -> None:
             )
             if checked:
                 selected_ids.append(a["id"])
+                mode_options = ["long_only", "short_only", "long_short"]
+                mode_display = {"long_only": "Long only", "short_only": "Short only", "long_short": "Long/short (both directions)"}
+                current_mode = control.account_position_modes.get(a["id"], "long_only")
+                position_mode = st.selectbox(
+                    f"↳ {a['nickname']}: position mode",
+                    options=mode_options,
+                    index=mode_options.index(current_mode) if current_mode in mode_options else 0,
+                    format_func=lambda m: mode_display[m],
+                    key=f"auto_position_mode_{a['id']}",
+                    help="Long only (default) reproduces every existing account's exact behavior — "
+                         "a SELL signal only ever closes a held long, never opens a short. Short/"
+                         "long-short let a SELL open a new short position too (and a BUY cover it) — "
+                         "only meaningful on a broker that actually supports shorting (IG/OANDA CFDs "
+                         "and forex do; a plain equities cash account like Alpaca would just have the "
+                         "short-open order rejected by the broker itself).",
+                )
+                if position_mode != "long_only":
+                    position_modes[a["id"]] = position_mode
                 existing_override = control.account_sizing_overrides.get(a["id"], {})
                 ocol1, ocol2 = st.columns(2)
                 with ocol1:
@@ -2747,6 +3076,7 @@ def render_auto_trading_tab() -> None:
             sizing_mode=sizing_mode.value,
             sizing_value=sizing_value,
             account_sizing_overrides=sizing_overrides,
+            account_position_modes=position_modes,
             vol_target_enabled=vol_target_enabled,
             vol_target_ann=vol_target_ann,
             block_event_days=block_event_days,
@@ -2762,6 +3092,14 @@ def render_auto_trading_tab() -> None:
             # forward so saving ordinary settings here never wipes it.
             manual_strategy_params=control.manual_strategy_params,
             extra_targets=control.extra_targets,
+            # Protective exits are Settings-owned too. Same reasoning again, and
+            # the consequence of forgetting is worse here than for the others:
+            # silently dropping these would REMOVE the stop from every position
+            # opened afterwards, without any visible change on this page.
+            stop_loss_pct=control.stop_loss_pct,
+            take_profit_pct=control.take_profit_pct,
+            flatten_before_close_minutes=control.flatten_before_close_minutes,
+            risk_preset=control.risk_preset,
         )
         save_control(new_control)
         st.success("Configuration saved.")
@@ -3460,7 +3798,31 @@ def main() -> None:
         authenticator.logout("Log out", "sidebar")
 
     st.title("Holotable")
-    st.caption("Trading Bot Backtester")
+    st.caption(f"Trading Bot Backtester · v{version.VERSION}")
+
+    # Stale-code warning. A process that started before the current source was
+    # written is still executing the OLD code in memory — editing a file does
+    # nothing to an already-running process. That mismatch caused two real
+    # outages (roster wipe 2026-08-12, dashboard reporting a healthy bot as
+    # STOPPED 2026-08-13); from_dict now stops it crashing, but an old process
+    # silently using DEFAULTS for fields it can't see is exactly what this
+    # surfaces. See backtester/source_stamp.py.
+    try:
+        stale = source_stamp.stale_processes()
+    except Exception:  # noqa: BLE001 — a diagnostic must never break the dashboard
+        stale = []
+    if stale:
+        lines = "\n".join(
+            f"- **{s['process']}** (pid {s['pid']}), started {_format_age((datetime.now(timezone.utc) - datetime.fromisoformat(s['started_at'])).total_seconds())} ago"
+            for s in stale
+        )
+        st.warning(
+            "⚠️ **Running stale code** — the source on disk has changed since "
+            f"these processes started, so they're still using the old version:\n\n{lines}\n\n"
+            "Restart them (`python restart_all.py`) so they pick up the current code. "
+            "Until then they may show defaults instead of what's actually saved."
+        )
+
     page.run()
 
 

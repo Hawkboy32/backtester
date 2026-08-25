@@ -165,6 +165,16 @@ class PolygonClient:
             )
             df["timestamp"] = pd.to_datetime(df["timestamp_ms"], unit="ms", utc=True)
             df = df.set_index("timestamp").sort_index()
+            # Index tickers (I:NDX, I:SPX, ...) have no volume/vwap/transaction-
+            # count fields at all - an index isn't a traded security, so there's
+            # nothing there to report, not a data gap. Confirmed live 2026-08-23
+            # (I:NDX's raw response has only o/h/l/c/t, no v/vw/n keys at all).
+            # Filled with 0 rather than raising - honest ("this index genuinely
+            # has no volume"), not a guess, and lets index bars flow through
+            # every existing strategy/backtest code path unchanged.
+            for col in ("volume", "vwap", "transactions"):
+                if col not in df.columns:
+                    df[col] = 0.0
             df = df[["open", "high", "low", "close", "volume", "vwap", "transactions"]]
 
         if self.use_cache and self.cache_dir:

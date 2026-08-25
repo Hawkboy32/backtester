@@ -35,7 +35,7 @@ from backtester.strategy import Bar, Signal, Strategy
 # both BUY and SELL fills, making a round trip's real transaction cost
 # silently near-zero regardless of the slippage_bps setting — every scan run
 # before this tag existed was computed under that bug.
-ENGINE_VERSION = "2026-08-08-position-mode-shorting"
+ENGINE_VERSION = "2026-08-14-protective-exits"
 
 
 class PositionMode(Enum):
@@ -75,6 +75,13 @@ class Trade:
     # convention is what makes .pnl below correct for both without a branch).
     shares: float = 0.0
     conviction: float | None = None  # [0,1] entry-signal strength (#25); logged only, never sizes
+    # What actually closed the trade: None/"signal" = the strategy's own exit
+    # signal (the only possibility before protective exits existed), else
+    # "stop_loss" / "take_profit" / "max_hold" / "session_end" / "end_of_data".
+    # Recorded so a sweep can see WHICH exit did the work rather than only the
+    # net result — a stop that never fires and a stop that fires constantly
+    # produce very different equity curves for the same parameter.
+    exit_reason: str | None = None
 
     @property
     def pnl(self) -> float | None:
@@ -101,6 +108,13 @@ class BacktestEngine:
         position_mode: PositionMode = PositionMode.LONG_ONLY,
         fixed_dollars_per_trade: float | None = None,
         dynamic_size_fn: Callable[[float], float] | None = None,
+        stop_loss_pct: float | None = None,
+        take_profit_pct: float | None = None,
+        max_hold_bars: int | None = None,
+        close_at_session_end: bool = False,
+        deposits: dict | None = None,
+        variable_slippage_fn: Callable[[float, float], float] | None = None,
+        regular_hours_only: bool = False,
     ):
         """fixed_dollars_per_trade: when set, every entry spends
         min(cash, fixed_dollars_per_trade) instead of the default all-in
@@ -146,7 +160,95 @@ class BacktestEngine:
         open at a time, never both directions simultaneously). See the
         module docstring for why this needed no change to the P&L/equity
         math itself, only to which signal is allowed to open/close when.
+
+        PROTECTIVE EXITS (2026-08-14). All four default to off, so every
+        existing caller and every previously recorded result is unchanged.
+        Until these existed a position could ONLY be closed by the strategy's
+        own exit signal, so a thesis that never came good was held
+        indefinitely — the live account held DDOG for 43h (-3.6%) and AEP for
+        7 days (-6.1%) for exactly that reason.
+
+        stop_loss_pct / take_profit_pct: fraction of the ENTRY price, e.g.
+        0.01 = 1%. Checked INTRABAR against each bar's low/high (not its
+        close): a resting broker-side stop triggers the moment price touches
+        it, and testing against the close alone would silently miss most stop
+        hits and overstate results.
+
+        max_hold_bars: force an exit at the close of the Nth bar after entry,
+        whatever the price is doing.
+
+        close_at_session_end: flatten at the close of each session's last bar
+        rather than carrying a position overnight.
+
+        Two deliberately CONSERVATIVE modelling choices, because both are
+        places a backtest can flatter itself:
+          - If a bar's range contains BOTH the stop and the target, OHLC data
+            cannot say which was touched first. This assumes the STOP — the
+            worse outcome. Assuming the target would inflate every result and
+            is the classic way stop/target backtests lie.
+          - A bar that GAPS through a level fills at that bar's OPEN, not at
+            the level. A stop gapped through fills worse than the stop price,
+            which is what actually happens; pretending otherwise would hide
+            precisely the overnight gap risk close_at_session_end exists to
+            avoid.
+        Slippage still applies on top of both, in the same direction as any
+        other exit of that side.
+
+        deposits: optional {datetime.date: dollar_amount} - added to cash once,
+        on the FIRST bar processed for that date, before that bar's sizing is
+        computed (so a deposit is available to size that same day's entries,
+        not just the next day's). None (default) is a zero-regression no-op
+        for every existing caller. Added 2026-08-15 to replay "what if I kept
+        contributing" scenarios; equity_curve/Trade accounting is otherwise
+        untouched, but note that total_return derived from equity_curve[0]
+        and equity_curve[-1] STOPS being a pure trading-performance number
+        once deposits are non-empty - it now also reflects the contributions
+        themselves. Callers who need trading performance alone should track
+        ending equity minus total deposited, not compute_report's percentage.
+
+        variable_slippage_fn: optional callable(shares, bar_volume) -> slippage
+        in bps, called separately for every fill (entries AND exits) with the
+        shares actually being traded on that fill and that bar's volume.
+        Overrides the flat slippage_bps for that one fill when set; None
+        (default) is a zero-regression no-op - every fill uses slippage_bps
+        exactly as before. Added 2026-08-16 to answer a specific question a
+        flat bps rate cannot: whether a position that has compounded large
+        would face real market-impact costs a constant-bps model is blind to.
+        For a BUY/SELL that OPENS a new position, the share count used to
+        call this is an ESTIMATE (spend / bar close, ignoring slippage
+        itself) since the real share count depends circularly on the fill
+        price this function is computing - a standard, small approximation
+        (slippage is normally a small fraction of price, so estimating share
+        count without it first is negligible error). Exits use the real,
+        already-known share count directly, no approximation needed.
+
+        regular_hours_only: when True, blocks NEW entries (exits still fire)
+        on bars outside 09:30-16:00 America/New_York - the proactive
+        complement to blocked_dates/storm-regime blocking, just by
+        time-of-day instead of by date. Added 2026-08-16 after the liquidity
+        model above showed the worst modeled impact spikes weren't from
+        genuinely large orders - they clustered in bars with near-zero
+        volume, and cross-checking against trade timestamps showed a large
+        fraction of a price-only mean-reversion strategy's entries firing in
+        thin pre/after-market bars where almost nobody else is trading.
+        NYSE-hours-hardcoded and equity-specific by construction - do not
+        set this True for a crypto or forex backtest, both trade on
+        different calendars this flag knows nothing about. False (default)
+        is a zero-regression no-op. Bar timestamps are assumed UTC-indexed,
+        same assumption strategies.vwap_drift_pullback's own wall-clock
+        filter already relies on elsewhere in this codebase.
         """
+        if stop_loss_pct is not None and stop_loss_pct <= 0:
+            raise ValueError("stop_loss_pct must be a positive fraction of entry price (e.g. 0.01 for 1%)")
+        if take_profit_pct is not None and take_profit_pct <= 0:
+            raise ValueError("take_profit_pct must be a positive fraction of entry price")
+        if max_hold_bars is not None and max_hold_bars < 1:
+            raise ValueError("max_hold_bars must be >= 1")
+
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
+        self.max_hold_bars = max_hold_bars
+        self.close_at_session_end = close_at_session_end
         self.starting_cash = starting_cash
         self.commission_per_trade = commission_per_trade
         self.slippage_bps = slippage_bps
@@ -155,6 +257,55 @@ class BacktestEngine:
         self.position_mode = position_mode
         self.fixed_dollars_per_trade = fixed_dollars_per_trade
         self.dynamic_size_fn = dynamic_size_fn
+        self.deposits = deposits
+        self.variable_slippage_fn = variable_slippage_fn
+        self.regular_hours_only = regular_hours_only
+
+    def _slip_bps(self, shares: float, bar_volume: float) -> float:
+        """Slippage (in bps) for a fill of this size on this bar. Falls back
+        to the flat self.slippage_bps when variable_slippage_fn is None -
+        every existing caller's math is untouched."""
+        if self.variable_slippage_fn is None:
+            return self.slippage_bps
+        return self.variable_slippage_fn(abs(shares), bar_volume)
+
+    def _protective_exit(
+        self, entry_price: float, shares: float, current: Bar, bars_held: int, is_session_end: bool,
+    ) -> tuple[float, str] | None:
+        """The raw fill price and reason if a protective exit fires on this bar,
+        else None. Price is PRE-slippage; the caller applies it directionally.
+
+        Precedence is deliberate: intrabar price levels are checked before the
+        end-of-bar time rules, because a resting stop or target triggers the
+        instant price touches it — necessarily at or before this bar's close.
+        And the stop is checked before the target so that a bar spanning both
+        resolves to the stop (see __init__ for why that conservatism matters).
+        """
+        is_long = shares > 0
+
+        stop_price = target_price = None
+        if self.stop_loss_pct is not None:
+            stop_price = entry_price * ((1 - self.stop_loss_pct) if is_long else (1 + self.stop_loss_pct))
+        if self.take_profit_pct is not None:
+            target_price = entry_price * ((1 + self.take_profit_pct) if is_long else (1 - self.take_profit_pct))
+
+        if stop_price is not None:
+            if (current.low <= stop_price) if is_long else (current.high >= stop_price):
+                # A bar that opened beyond the stop gapped through it overnight;
+                # the order fills at the open, which is WORSE than the stop.
+                gapped = (current.open <= stop_price) if is_long else (current.open >= stop_price)
+                return (current.open if gapped else stop_price), "stop_loss"
+
+        if target_price is not None:
+            if (current.high >= target_price) if is_long else (current.low <= target_price):
+                gapped = (current.open >= target_price) if is_long else (current.open <= target_price)
+                return (current.open if gapped else target_price), "take_profit"
+
+        if self.max_hold_bars is not None and bars_held >= self.max_hold_bars:
+            return current.close, "max_hold"
+        if self.close_at_session_end and is_session_end:
+            return current.close, "session_end"
+        return None
 
     def run(self, bars: pd.DataFrame, strategy: Strategy) -> BacktestResult:
         if bars.empty:
@@ -170,12 +321,33 @@ class BacktestEngine:
         if lookback.sessions is not None:
             session_starts = _session_window_starts(bars.index, lookback.sessions)
 
+        # True on each bar that is the LAST of its session. The final bar of
+        # the data counts (shift(-1) is NaN there, so ne() is True), which is
+        # correct: an open position there is liquidated anyway.
+        session_end_flags = None
+        if self.close_at_session_end:
+            from backtester.strategies.indicators import session_dates
+
+            dates = session_dates(bars.index)
+            session_end_flags = dates.ne(dates.shift(-1)).to_numpy()
+
+        # True on each bar that falls inside 09:30-16:00 America/New_York -
+        # precomputed once (vectorized) rather than converting a timezone on
+        # every single bar in the loop below, same reasoning as session_end_flags.
+        regular_hours_flags = None
+        if self.regular_hours_only:
+            et_index = bars.index.tz_convert("America/New_York")
+            minutes_of_day = et_index.hour * 60 + et_index.minute
+            regular_hours_flags = (minutes_of_day >= 9 * 60 + 30) & (minutes_of_day < 16 * 60)
+
         cash = self.starting_cash
         shares = 0.0
+        entry_index: int | None = None
         open_trade: Trade | None = None
         trades: list[Trade] = []
         equity_values: list[float] = []
         regime_values: list[str | None] = [] if self.regime_by_date is not None else None
+        last_deposit_date = None
 
         for i in range(len(bars)):
             if lookback.bars is not None:
@@ -195,6 +367,12 @@ class BacktestEngine:
                 volume=row["volume"],
             )
 
+            if self.deposits is not None:
+                current_date = pd.Timestamp(current.timestamp).date()
+                if current_date != last_deposit_date:
+                    cash += self.deposits.get(current_date, 0.0)
+                    last_deposit_date = current_date
+
             signal = strategy.on_bar(history, current)
             # Slippage must be DIRECTIONAL — it costs the trader on both sides of a
             # round trip, never nets to ~zero. A BUY fills at a WORSE (higher) price;
@@ -205,9 +383,10 @@ class BacktestEngine:
             # repro showing a literal $0.00 slippage cost on a 1% slippage round trip.
             # This silently understated every backtest's real transaction costs since
             # this engine was first written.)
-            slip = self.slippage_bps / 10_000
-            buy_fill_price = current.close * (1 + slip)
-            sell_fill_price = current.close * (1 - slip)
+            #
+            # Computed lazily per fill, not once per bar, since variable_slippage_fn
+            # (added 2026-08-16) needs the actual share count of THIS fill, which
+            # differs between an entry, an exit, and a protective exit.
 
             regime = None
             size_multiplier = 1.0
@@ -222,10 +401,11 @@ class BacktestEngine:
                 self.blocked_dates is not None
                 and pd.Timestamp(current.timestamp).date() in self.blocked_dates
             )
+            hours_blocked = regular_hours_flags is not None and not regular_hours_flags[i]
 
             can_open_long = self.position_mode in (PositionMode.LONG_ONLY, PositionMode.LONG_SHORT)
             can_open_short = self.position_mode in (PositionMode.SHORT_ONLY, PositionMode.LONG_SHORT)
-            allow_new_entry = regime != "storm" and not event_blocked
+            allow_new_entry = regime != "storm" and not event_blocked and not hours_blocked
             # fixed_dollars_per_trade (when set) overrides the default all-in
             # cash * size_multiplier - capped at available cash so a nearly-
             # exhausted account can't "spend" more than it has. dynamic_size_fn
@@ -238,8 +418,43 @@ class BacktestEngine:
             else:
                 spend = cash * size_multiplier
 
-            if signal is Signal.BUY and shares == 0 and can_open_long and allow_new_entry:
+            protective = None
+            if shares != 0 and open_trade is not None and entry_index is not None:
+                protective = self._protective_exit(
+                    open_trade.entry_price,
+                    shares,
+                    current,
+                    i - entry_index,
+                    bool(session_end_flags[i]) if session_end_flags is not None else False,
+                )
+
+            if protective is not None:
+                # Pre-empts the strategy's own signal for this bar. Note the
+                # position is NOT reopened on the same bar even if the signal
+                # says to: a real resting stop fills intrabar and could not be
+                # followed by a fresh entry at that same bar's close, and
+                # allowing it would let a stop sweep manufacture extra round
+                # trips that never existed.
+                raw_price, reason = protective
+                exit_slip = self._slip_bps(shares, current.volume) / 10_000
+                if shares > 0:
+                    fill = raw_price * (1 - exit_slip)
+                    cash += shares * fill - self.commission_per_trade
+                else:
+                    fill = raw_price * (1 + exit_slip)
+                    cash -= abs(shares) * fill + self.commission_per_trade
+                open_trade.exit_time = current.timestamp
+                open_trade.exit_price = fill
+                open_trade.exit_reason = reason
+                trades.append(open_trade)
+                open_trade = None
+                entry_index = None
+                shares = 0.0
+            elif signal is Signal.BUY and shares == 0 and can_open_long and allow_new_entry:
                 if spend > self.commission_per_trade:
+                    approx_shares = spend / current.close  # ignores slippage - see variable_slippage_fn docstring
+                    entry_slip = self._slip_bps(approx_shares, current.volume) / 10_000
+                    buy_fill_price = current.close * (1 + entry_slip)
                     shares = (spend - self.commission_per_trade) / buy_fill_price
                     cash -= shares * buy_fill_price + self.commission_per_trade
                     # Conviction is scored at the entry bar and stored for later learning
@@ -249,6 +464,7 @@ class BacktestEngine:
                         entry_time=current.timestamp, entry_price=buy_fill_price,
                         shares=shares, conviction=conviction,
                     )
+                    entry_index = i
             elif signal is Signal.SELL and shares == 0 and can_open_short and allow_new_entry:
                 # Opens a SHORT — shares goes negative (see module docstring for
                 # why equity/pnl need no special-casing for this). Sized the
@@ -256,6 +472,9 @@ class BacktestEngine:
                 # dollar exposure, not literal cash outlay (a short generates
                 # proceeds rather than consuming cash up front).
                 if spend > self.commission_per_trade:
+                    approx_shares = spend / current.close
+                    entry_slip = self._slip_bps(approx_shares, current.volume) / 10_000
+                    sell_fill_price = current.close * (1 - entry_slip)
                     shares = -(spend - self.commission_per_trade) / sell_fill_price
                     cash += abs(shares) * sell_fill_price - self.commission_per_trade
                     conviction = compute_conviction(strategy, history, current)
@@ -263,23 +482,32 @@ class BacktestEngine:
                         entry_time=current.timestamp, entry_price=sell_fill_price,
                         shares=shares, conviction=conviction,
                     )
+                    entry_index = i
             elif signal is Signal.SELL and shares > 0:
                 # Closes an existing LONG (unchanged from before position_mode existed).
+                exit_slip = self._slip_bps(shares, current.volume) / 10_000
+                sell_fill_price = current.close * (1 - exit_slip)
                 cash += shares * sell_fill_price - self.commission_per_trade
                 if open_trade is not None:
                     open_trade.exit_time = current.timestamp
                     open_trade.exit_price = sell_fill_price
+                    open_trade.exit_reason = "signal"
                     trades.append(open_trade)
                     open_trade = None
+                entry_index = None
                 shares = 0.0
             elif signal is Signal.BUY and shares < 0:
                 # Closes an existing SHORT — buying back to cover costs cash.
+                exit_slip = self._slip_bps(shares, current.volume) / 10_000
+                buy_fill_price = current.close * (1 + exit_slip)
                 cash -= abs(shares) * buy_fill_price + self.commission_per_trade
                 if open_trade is not None:
                     open_trade.exit_time = current.timestamp
                     open_trade.exit_price = buy_fill_price
+                    open_trade.exit_reason = "signal"
                     trades.append(open_trade)
                     open_trade = None
+                entry_index = None
                 shares = 0.0
 
             equity = cash + shares * current.close
@@ -315,10 +543,12 @@ class BacktestEngine:
             # (slips up) — get this backwards and a short's final exit would
             # silently look more profitable than a real cover ever would.
             open_trade.exit_time = bars.index[-1]
+            final_slip = self._slip_bps(shares, last_row["volume"]) / 10_000
             if shares > 0:
-                open_trade.exit_price = last_row["close"] * (1 - self.slippage_bps / 10_000)
+                open_trade.exit_price = last_row["close"] * (1 - final_slip)
             else:
-                open_trade.exit_price = last_row["close"] * (1 + self.slippage_bps / 10_000)
+                open_trade.exit_price = last_row["close"] * (1 + final_slip)
+            open_trade.exit_reason = "end_of_data"
             trades.append(open_trade)
 
         equity_curve = pd.Series(equity_values, index=bars.index, name="equity")

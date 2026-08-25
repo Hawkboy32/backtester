@@ -18,6 +18,7 @@ from typing import Callable
 import pandas as pd
 
 from backtester import events, volatility
+from backtester.auto_trader_state import from_dict
 from backtester.data import PolygonClient, PolygonError
 from backtester.engine import BacktestEngine, PositionMode
 from backtester.metrics import (
@@ -63,7 +64,7 @@ def _load_checkpoint(checkpoint_path: Path) -> tuple[list[ScanResultRow], dict[s
             if not line:
                 continue
             data = json.loads(line)
-            rows.append(ScanResultRow(**data))
+            rows.append(from_dict(ScanResultRow, data))
 
     tickers_seen: dict[str, set[str]] = {}
     for row in rows:

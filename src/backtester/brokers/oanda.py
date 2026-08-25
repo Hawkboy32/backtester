@@ -18,10 +18,14 @@ ID) rather than needing a third credential field.
 
 Order model: OANDA nets orders per-instrument automatically, so opening and
 closing both go through the SAME POST /orders call — a BUY sends positive
-units (opens/adds to a long), a SELL sends negative units (closes an existing
-long, since this project is long-only and always sizes a SELL to the exact
-held quantity — see auto_trader.py's _trade_target). No separate close-
-position endpoint needed, unlike ig.py's IG integration.
+units, a SELL sends negative units. While flat, a BUY opens a long and a SELL
+opens a short (both real order paths here — see account_position_modes in
+auto_trader_state.py for which accounts are actually allowed to). While
+holding a position, the OPPOSITE side closes it — a SELL closes an existing
+long, a BUY closes (covers) an existing short — always sized to the exact
+held quantity, never freshly computed (see auto_trader.py's close-side
+handling). No separate close-position endpoint needed, unlike ig.py's IG
+integration.
 """
 
 from __future__ import annotations
@@ -99,10 +103,10 @@ class OandaBroker(BrokerAccount):
             ticker = "C:" + instrument.replace("_", "")
             long_units = _num(row.get("long", {}).get("units"))
             short_units = _num(row.get("short", {}).get("units"))
-            # This project is long-only (see module docstring) — short_units
-            # should always be 0 here, but reported defensively rather than
-            # silently dropped if OANDA ever shows one (e.g. a position opened
-            # outside this app, directly in OANDA's own platform).
+            # Most accounts here are still long-only by config
+            # (account_position_modes), but short_units is a real, expected
+            # value now for one explicitly opted into short_only/long_short
+            # — reported either way, not assumed zero.
             side_data = row.get("long", {}) if long_units != 0 else row.get("short", {})
             qty = long_units if long_units != 0 else abs(short_units)
             if qty == 0:

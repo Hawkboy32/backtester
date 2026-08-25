@@ -16,7 +16,9 @@ account, so passing those raises a clear error instead of guessing.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
+import pandas as pd
 from coinbase.rest import RESTClient
 
 from backtester.brokers.base import AccountSnapshot, BrokerAccount, EquityPoint, OrderResult, OrderSide, Position
@@ -116,6 +118,113 @@ class CoinbaseBroker(BrokerAccount):
             "Coinbase's Advanced Trade API doesn't expose a historical portfolio-equity time "
             "series through this SDK — only current balances (see get_account_snapshot)."
         )
+
+    # (multiplier, timespan) -> Coinbase's own granularity constant, same
+    # shape as alpaca.py's _TIMESPAN_TO_UNIT. Only the pairs this app's
+    # get_live_bars callers actually use are mapped - an unmapped combo
+    # raises clearly (see below) rather than guessing at a granularity
+    # string, same "never guess" discipline as the rest of this file.
+    _GRANULARITY = {
+        (1, "minute"): "ONE_MINUTE",
+        (5, "minute"): "FIVE_MINUTE",
+        (15, "minute"): "FIFTEEN_MINUTE",
+        (30, "minute"): "THIRTY_MINUTE",
+        (1, "hour"): "ONE_HOUR",
+        (1, "day"): "ONE_DAY",
+    }
+
+    # Coinbase's own hard cap (confirmed live 2026-08-20 via a real 400
+    # INVALID_ARGUMENT response: "number of candles requested should be less
+    # than 350") - 300 leaves a safety margin rather than riding the exact
+    # documented limit.
+    _MAX_CANDLES_PER_REQUEST = 300
+    # Real ceiling on how many paginated requests one get_live_bars call will
+    # make. auto_trader.py's LOOKBACK_DAYS=90 asks for far more than this can
+    # ever cover at 1-minute granularity (90 days would need ~430 requests) -
+    # deliberately NOT trying to serve that in full. The only strategy live
+    # on crypto as of 2026-08-20 (VWAP Mean Reversion) needs 2 SESSIONS
+    # (required_lookback(), vwap_mean_reversion.py) = 2 days at this
+    # granularity - 15 requests * 300 candles = 4500 minutes = ~3.1 days,
+    # comfortable margin over that real need without an unbounded loop.
+    _MAX_PAGES = 15
+
+    def get_live_bars(
+        self, ticker: str, from_date: str, to_date: str, multiplier: int = 1, timespan: str = "minute",
+    ) -> pd.DataFrame:
+        """Live alternative to PolygonClient.get_aggregates() for the live
+        trading loop specifically (see CLAUDE_NOTES.txt 2026-08-20: Polygon
+        is being pulled out of the live path entirely, kept only for
+        backtesting - Polygon's crypto data was found to run up to ~21h
+        stale in practice, contradicting the earlier 2026-07-26 assumption
+        that it had no gap). Shaped identically to Polygon/Alpaca's bars
+        (columns: open/high/low/close/volume/vwap/transactions, indexed by
+        UTC timestamp) so strategy code needs no changes.
+
+        PAGINATES BACKWARD from `to_date`, in `_MAX_CANDLES_PER_REQUEST`-size
+        chunks, up to `_MAX_PAGES` requests - NOT a general-purpose
+        historical backfill (Polygon still owns that job for backtesting).
+        If the requested (from_date, to_date) range needs more than
+        _MAX_PAGES pages to fully cover, this returns whatever the most
+        RECENT `_MAX_PAGES` pages contain rather than raising - a live
+        decision should always prefer "some real recent data, missing the
+        oldest requested days" over "no live data at all, silent fallback to
+        a potentially stale Polygon read."
+
+        Coinbase's candle response has no vwap or transactions field (unlike
+        Polygon/Alpaca) - vwap is filled with close (a documented, honest
+        approximation, not a guess at a real VWAP) and transactions with 0,
+        since nothing in strategies/*.py's crypto-eligible strategies reads
+        either field (VWAP Mean Reversion computes its own running VWAP from
+        open/high/low/close/volume, never reads this column - confirmed by
+        reading vwap_mean_reversion.py before relying on this).
+        """
+        granularity = self._GRANULARITY.get((multiplier, timespan))
+        if granularity is None:
+            raise ValueError(f"Unsupported (multiplier, timespan) for Coinbase live bars: ({multiplier}, {timespan})")
+        seconds_per_candle = {"ONE_MINUTE": 60, "FIVE_MINUTE": 300, "FIFTEEN_MINUTE": 900,
+                               "THIRTY_MINUTE": 1800, "ONE_HOUR": 3600, "ONE_DAY": 86400}[granularity]
+        chunk_span = seconds_per_candle * self._MAX_CANDLES_PER_REQUEST
+
+        range_start = int(datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc).timestamp())
+        # +86400 makes to_date inclusive of its whole calendar day (matching
+        # Polygon/Alpaca's own get_aggregates semantics) - but when to_date is
+        # "today", midnight-today + 86400 = midnight-TOMORROW, which is in the
+        # future relative to actual wall-clock time. Confirmed live 2026-08-21:
+        # Coinbase's API validates start against its own server clock and
+        # rejects it ("start must not be in the future") - capping at the real
+        # current time fixes this without losing the inclusive-of-today
+        # behavior for a genuinely past to_date.
+        range_end = min(
+            int(datetime.fromisoformat(to_date).replace(tzinfo=timezone.utc).timestamp()) + 86400,
+            int(datetime.now(timezone.utc).timestamp()),
+        )
+        product_id = self._product_id(ticker)
+        columns = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
+
+        all_rows: list[dict] = []
+        chunk_end = range_end
+        for _ in range(self._MAX_PAGES):
+            chunk_start = max(range_start, chunk_end - chunk_span)
+            if chunk_start >= chunk_end:
+                break
+            response = self._client.get_candles(
+                product_id=product_id, start=str(chunk_start), end=str(chunk_end), granularity=granularity,
+            )
+            for c in response.candles or []:
+                close = float(c.close)
+                all_rows.append({
+                    "timestamp": pd.to_datetime(int(c.start), unit="s", utc=True),
+                    "open": float(c.open), "high": float(c.high), "low": float(c.low),
+                    "close": close, "volume": float(c.volume), "vwap": close, "transactions": 0,
+                })
+            if chunk_start <= range_start:
+                break
+            chunk_end = chunk_start
+
+        if not all_rows:
+            return pd.DataFrame(columns=columns)
+        df = pd.DataFrame(all_rows).drop_duplicates(subset="timestamp").set_index("timestamp").sort_index()
+        return df[columns]
 
     def submit_market_order(
         self,

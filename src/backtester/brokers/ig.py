@@ -46,6 +46,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import pandas as pd
 from trading_ig import IGService
 from trading_ig.rest import IGException
 
@@ -75,6 +76,19 @@ _LIVE_BASE_URL = "https://api.ig.com/gateway/deal"
 _TRANSIENT_AUTH_ERROR = "service.security.authentication.failure-invalid-client-security-token"
 _MIN_SECONDS_BETWEEN_IG_CALLS = 20.0
 _IG_THROTTLE_LOCK = threading.Lock()
+
+# Bars requested per get_live_bars() call. Every point billed against the
+# 10,000/week allowance (see get_live_bars' own docstring), so this is
+# deliberately the SMALLEST window that still covers what the only current
+# caller needs: Opening Spike Fade reads from the session open through its
+# reversal window, ~25 minutes, and 45 leaves headroom for a late start or a
+# missing bar without paying for a whole session's history every cycle.
+_IG_BARS_NUMPOINTS = 45
+# IG returns tz-naive timestamps in the ACCOUNT's local time - UK for this
+# account. Verified live 2026-08-25 against a known UTC clock; see
+# get_live_bars for the arithmetic. Named here so the assumption is
+# reviewable in one place rather than buried in the conversion.
+_IG_BARS_TZ = "Europe/London"
 _last_ig_call_at = 0.0
 
 
@@ -250,22 +264,45 @@ class IGBroker(BrokerAccount):
         typed real epic still works, and no API call is wasted on it. Results
         are cached per-instance since an epic doesn't change.
         """
-        if ticker.startswith("CS.D.") or ".CFD." in ticker or ".MINI." in ticker:
+        if ticker.startswith("CS.D.") or ticker.startswith("IX.D.") or ".CFD." in ticker or ".MINI." in ticker:
             return ticker
         if ticker in self._epic_cache:
             return self._epic_cache[ticker]
 
-        pair = ticker[2:] if ticker.startswith("C:") else ticker
+        # Index tickers (Polygon-style "I:NDX") don't share forex's clean
+        # "strip the prefix, search the raw pair" mapping - "NDX" alone
+        # doesn't reliably find IG's "US Tech 100" product via search_markets.
+        # An explicit table, confirmed live 2026-08-23/24 against a real
+        # search_markets("US Tech 100") call (epic IX.D.NASDAQ.IFD.IP,
+        # instrumentType INDICES) rather than guessed - only I:NDX is mapped
+        # since that's the only index this app trades so far; add entries
+        # here as more come up, same spirit as kraken.py's
+        # _KRAKEN_SYMBOL_OVERRIDES for the same kind of naming mismatch.
+        index_map = {"I:NDX": "US Tech 100", "I:SPX": "US 500"}
+        pair = index_map.get(ticker, ticker[2:] if ticker.startswith("C:") else ticker)
         svc = self._session()
         results = svc.search_markets(pair)
         if results is None or results.empty:
             raise IGException(f"IG search_markets found no instrument matching {pair!r} (from ticker {ticker!r}).")
 
-        # Prefer a plain currency CFD match (IG's instrumentType for forex
-        # pairs) — fall back to the first result if that filter finds
-        # nothing, rather than failing outright on an unexpected type value.
-        currency_rows = results[results["instrumentType"] == "CURRENCIES"] if "instrumentType" in results else results
-        row = (currency_rows if not currency_rows.empty else results).iloc[0]
+        # Prefer a plain currency or index CFD match (IG's instrumentType for
+        # forex pairs / indices respectively) — fall back to the first result
+        # if that filter finds nothing, rather than failing outright on an
+        # unexpected type value.
+        preferred_types = {"CURRENCIES", "INDICES"}
+        typed_rows = results[results["instrumentType"].isin(preferred_types)] if "instrumentType" in results else results
+        candidates = typed_rows if not typed_rows.empty else results
+        if ticker in index_map:
+            # Prefer the plain "Cash" product over futures/weekend variants
+            # that also match the same name search (confirmed live
+            # 2026-08-24: a "US Tech 100" search returns Cash, futures
+            # (FWS2/FWM2 epics), AND a "Weekend US Tech 100" row all at
+            # once - "Cash" in the instrument name is the reliable filter,
+            # the row ORDER alone isn't a safe assumption to rely on).
+            cash_rows = candidates[candidates["instrumentName"].str.contains("Cash", na=False)]
+            if not cash_rows.empty:
+                candidates = cash_rows
+        row = candidates.iloc[0]
         epic = str(row["epic"])
         self._epic_cache[ticker] = epic
         return epic
@@ -343,6 +380,89 @@ class IGBroker(BrokerAccount):
             "history, which hasn't been verified as reconstructible into an equity curve yet."
         )
 
+    def get_live_bars(
+        self, ticker: str, from_date: str, to_date: str, multiplier: int = 1, timespan: str = "minute",
+    ) -> pd.DataFrame:
+        """Live bars from IG's historical-price endpoint, shaped identically
+        to Polygon/Alpaca/Coinbase's (open/high/low/close/volume/vwap/
+        transactions, indexed by UTC timestamp) so strategy code needs no
+        changes. Added 2026-08-25 specifically to get INDEX tickers (I:NDX)
+        off Polygon, which Alpaca rejects outright ("invalid symbol: I:NDX")
+        and which therefore silently fell back to Polygon - the one live
+        target still doing so after the 2026-08-20 Polygon-is-backtesting-
+        only migration.
+
+        *** READ THIS BEFORE CALLING IT ANYWHERE NEW ***
+        IG's historical-price endpoint has a hard 10,000-data-points-per-WEEK
+        allowance (confirmed live 2026-08-25: totalAllowance 10000, a rolling
+        604799s expiry). That is far too scarce for an unconditional 120s
+        polling loop - ~195 cycles a session at even 60 points each is
+        ~11,700 points in ONE DAY - which is exactly why forex uses OANDA
+        rather than IG for data (see auto_trader._live_data_account_for's own
+        docstring, where an early test pull exhausted the allowance outright).
+        Callers MUST therefore bound how often they call this; see
+        auto_trader._index_bars_window_open() for the time-window gate that
+        makes the NDX case fit (~1,800 points/week).
+
+        Deliberately NO caching/retry here: the allowance is consumed by the
+        REQUEST, so a silent retry doubles the cost of a bad day.
+        """
+        if timespan != "minute":
+            raise ValueError(f"IG live bars only support minute bars here, got {timespan!r}")
+        epic = self._resolve_epic(ticker)
+        # numpoints rather than a date range: the endpoint bills per point
+        # returned, so asking for exactly what's needed is the difference
+        # between fitting the weekly allowance and blowing it in a morning.
+        resolution = f"{multiplier}min"
+        numpoints = _IG_BARS_NUMPOINTS
+        resp = self._session().fetch_historical_prices_by_epic_and_num_points(
+            epic, resolution, numpoints
+        )
+        frame = resp["prices"]
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+
+        # IG quotes an index as bid/ask; the mid is the honest single price
+        # (Polygon's I:NDX is the index level itself, which sits between the
+        # two), and using bid alone would bias every level a spread low.
+        def _mid(field: str) -> pd.Series:
+            return (frame[("bid", field)] + frame[("ask", field)]) / 2.0
+
+        out = pd.DataFrame(
+            {
+                "open": _mid("Open"),
+                "high": _mid("High"),
+                "low": _mid("Low"),
+                "close": _mid("Close"),
+            }
+        )
+        # ("last", "Volume") is IG's traded-contract count for the bar. Index
+        # epics do report it; it is NOT a share volume and nothing here
+        # treats it as one - it only feeds the liquidity/slippage model's
+        # relative sizing, same as every other source's volume column.
+        try:
+            out["volume"] = frame[("last", "Volume")].astype(float)
+        except KeyError:
+            out["volume"] = 0.0
+        out["volume"] = out["volume"].fillna(0.0)
+        # No vwap/transactions from IG - filled to match the shared column
+        # contract, exactly as data.py does for Polygon's own index tickers.
+        out["vwap"] = 0.0
+        out["transactions"] = 0.0
+
+        # IG returns tz-NAIVE timestamps in the account's local time, which is
+        # UK for this account - verified live 2026-08-25 by arithmetic against
+        # a known UTC clock (IG bar 08:37 vs 07:37Z = +1, i.e. Europe/London
+        # in BST). Localising through the zone rather than a fixed +1 keeps it
+        # correct across the GMT/BST switch.
+        idx = pd.to_datetime(out.index)
+        if idx.tz is None:
+            idx = idx.tz_localize(_IG_BARS_TZ, ambiguous="infer", nonexistent="shift_forward")
+        out.index = idx.tz_convert("UTC")
+        out = out.sort_index()
+        out = out[~out.index.duplicated(keep="last")]
+        return out.dropna(subset=["open", "high", "low", "close"])
+
     def get_market_clock(self) -> dict | None:
         # No IG account exists yet to verify a real per-epic market-status
         # lookup (fetch_market_by_epic's marketStatus field is the documented
@@ -376,13 +496,13 @@ class IGBroker(BrokerAccount):
     ) -> OrderResult:
         """`ticker` accepts either this app's usual Polygon-style ticker
         ("C:EURUSD"), a plain pair name, or a real IG epic directly —
-        _resolve_epic() translates as needed. Opens a new position if none
-        exists on the resolved epic; closes the existing one otherwise —
-        mirrors how the rest of this app's auto-trading logic already
-        decides BUY-to-open vs SELL-to-close (long-only everywhere, no
-        shorting), just made explicit here since IG's API has separate
-        open/close endpoints instead of one order call the broker nets
-        automatically.
+        _resolve_epic() translates as needed. Opens a new position (long via
+        BUY, short via SELL — see account_position_modes) if none exists on
+        the resolved epic; closes the existing one otherwise, in whichever
+        direction actually closes it (opposite of the held direction, not
+        tied to the `side` argument — see the close branch below). Made
+        explicit here since IG's API has separate open/close endpoints
+        instead of one order call the broker nets automatically.
         """
         svc = self._session()
         try:
@@ -412,13 +532,17 @@ class IGBroker(BrokerAccount):
 
             try:
                 if existing_row is None:
-                    if side is not OrderSide.BUY:
-                        return OrderResult(
-                            account_nickname=self.nickname, success=False,
-                            error=f"No open position on {ticker} to sell — long-only, nothing to close.",
-                        )
+                    # A BUY opens a long, a SELL opens a short — the caller
+                    # (auto_trader.py) only ever sends SELL here for an
+                    # account explicitly configured short_only/long_short
+                    # (account_position_modes); every other account stays
+                    # long-only via that gating, not this method rejecting
+                    # anything itself. IG's own API treats both identically
+                    # (create_open_position with direction=BUY or SELL), so
+                    # there's nothing IG-specific blocking a short here.
+                    direction = "BUY" if side is OrderSide.BUY else "SELL"
                     confirm = svc.create_open_position(
-                        currency_code="USD", direction="BUY", epic=ticker, expiry="-",
+                        currency_code="USD", direction=direction, epic=ticker, expiry="-",
                         force_open=True, guaranteed_stop=False, level=None,
                         limit_distance=None,
                         limit_level=(take_profit_price if take_profit_price is not None else None),

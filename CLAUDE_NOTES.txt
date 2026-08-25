@@ -3434,6 +3434,698 @@ diagnosed and fixed from a static report (screenshot of past notifications) and 
 not by reproducing a live order. Worth confirming the next real USDJPY/USDCAD fill actually sizes
 correctly (~2% of equity, not ~0.01%) once one fires.
 
+=== COSTS MADE VISIBLE + live_trades.db RECONCILED AGAINST REAL FILLS (2026-08-14) ===
+
+TWO KINDS OF FEE, AND WHY THE DIFFERENCE MATTERS
+Fees never touch live_trades.db, so its realised P&L is GROSS. Both surfaces were
+reporting that gross number as if it were the result. Splitting the costs showed they
+behave completely differently:
+
+  TRADING fees (REG/TAF/CAT) - charged per SELLING DAY, each rounded UP to a $0.01
+    minimum. Measured on AlpacaLive 11-13 Aug: sell proceeds TRIPLED ($5.69 -> $17.46)
+    and the fee did not move - $0.03 every day. Below ~$360 per sell the true SEC fee is
+    smaller than the floor, so you are billed the floor. This is a FIXED DAILY TOLL, not
+    a percentage, and it shrinks as a proportion as trade size grows.
+  FUNDING fees (GBP->USD conversion) - ~1.5% of every DEPOSIT. Proportional forever;
+    never outgrown. This was $0.81 of the $0.90 total - i.e. most of the "loss" on
+    AlpacaLive was the cost of putting money IN, not the cost of trading.
+
+Classification lives in ONE place - BrokerFee.is_funding + summarize_fees() in
+brokers/base.py - so dashboard, mobile backend and Flutter app can never disagree about
+what a cost was. Dashboard: new "Costs" section (own toggle, 300s cache; brokers with no
+fee endpoint show "unavailable", never $0.00). Mobile: fees split in the P&L card plus a
+per-day figure in the Fees card.
+
+live_trades.db DID NOT MATCH THE BROKER - NOW IT DOES
+New tool: reconcile_fills.py. Rebuilds round trips from Alpaca's own FILL activity feed
+(authoritative - it is what happened to the money) and compares to the local DB.
+
+  AlpacaLive : recorded +0.2238 vs actually filled +0.0637  (3.5x overstatement)
+  MyAlpaca   : recorded +28.95  vs actually filled -394.89   (recorded a PROFIT on an
+                                                              account that lost $395)
+
+Two independent causes:
+  1. Wrong prices (26 rows). submit_order returns BEFORE the fill, so the recorder fell
+     back to the bar close. Fixed going forward by the fill-polling loop in
+     alpaca.py::submit_market_order; these rows predate that fix.
+  2. Missing round trips (13). Closes with no attribution were silently dropped - mostly
+     July's large losses on MyAlpaca, which is why its history looked profitable.
+
+THIS WAS NOT COSMETIC: recent_performance() filters by ticker+strategy with NO account
+filter, so paper and live are POOLED and this data drives roster demotion decisions
+directly. The roster was being managed on numbers that did not happen.
+
+TWO TRAPS THE TOOL ITSELF FELL INTO (both caught before applying)
+  - Partial fills. One order routinely fills in several pieces (a 106-share PSKY order
+    filled as 43+16+12+35+0.0211). Matching raw fills against the DB reported 64 phantom
+    "missing" round trips and 13 phantom "orphans". Fixed by aggregate_by_order(), which
+    collapses fills per order_id at the QUANTITY-WEIGHTED average price before matching.
+  - Split closes. A position opened once can be closed over several days; the recorder
+    wrote ONE row for the whole quantity. Inserting the real pieces then double-counted
+    it (+$2.6225 residual). find_superseded() removes the old aggregate only when the
+    pieces share its ticker, entry price AND entry time and sum exactly to its quantity -
+    anything less is reported for a human, never deleted.
+
+Both accounts now reconcile to the cent. AlpacaLive's unexplained equity gap went from
+-$0.19 to -$0.028, and that remainder is simply the current day's trading fee, which
+Alpaca posts after the close.
+
+restart_all.py --only <names>
+Added so the two read/UI layers can be brought up to date DURING market hours while
+auto_trader keeps running. Use only for additive changes that cannot alter what the
+trader does or what a shared state file MEANS - otherwise restart everything together,
+or you recreate exactly the disagreement that script exists to prevent. Deliberately
+skipped processes are reported as a standing reminder, not silently passed.
+
+=== PROTECTIVE EXITS: BUILT, BACKTESTED, AND TWO OF THREE IDEAS REFUTED (2026-08-14) ===
+
+THE THING THAT WAS MISSING
+auto_trader could only ever close a position when the strategy emitted a SELL. No stop,
+no target, no time limit. A thesis that never came good was held indefinitely - DDOG for
+43h (-3.6%) on the live account, AEP for 7 days (-6.1%) on paper. engine.py could not
+model any of it either, so there was no way to even ASK whether a stop would help.
+
+WHAT THE LIVE DATA SUGGESTED (and why it was wrong)
+Corrected live trades showed a clean monotonic pattern - under 1h: +0.96% avg; overnight:
+-1.38%; multi-day: -4.75%, 0% win rate. That argued for closing at the bell.
+
+IT WAS A CONFOUND. These are MEAN-REVERSION strategies whose exit condition IS "price
+reverted", so a trade that went against you is BY CONSTRUCTION the one still open.
+"Held longer" and "lost money" are the same event described twice. The confound was
+flagged before acting on it, and the backtest then confirmed the confound was the whole
+story:
+
+  SESSION-END FLATTEN, isolated:   Jun -$281.50   Jul -$272.58   Aug -$72.56
+  It LOST money in every window tested. Built as a control, defaulted OFF.
+
+  STOPS: every stop config underperformed baseline on P&L. Best (2%) ranked 10th of 60.
+  Mechanically sensible: mean reversion enters ON a deviation, and a stop exits exactly
+  when the deviation widens - i.e. when the thesis is most likely to pay.
+
+  TAKE-PROFIT: the option rated WEAKEST on intuition was the only one that improved P&L
+  out-of-sample (2/2 windows, +$62 Jul, +$22 Aug). Its best VALUE was unstable though
+  (1.5% Jun, 0.5% Jul, 0.75% Aug) - trust the direction, not the number.
+
+THE TAIL IS A SEPARATE QUESTION FROM P&L
+"Which config earns most" and "which config loses least when wrong" have different
+answers, so sweep_tail_risk.py reports both:
+                        total P&L (3 windows)   worst single trade (Jun/Jul/Aug)
+  baseline                    $1,647            -$66 / -$128 / -$120
+  stop 1.0%                   $1,396            -$33 /  -$24 /  -$13
+~15% of expected return buys a 60-90% smaller worst case. That is a RISK PREFERENCE, not
+an optimisation, and was presented as such rather than decided unilaterally.
+A STOP IS NOT A CAP: a 1% stop still produced a -$32.55 fill against a -$10.20 level,
+because an overnight gap fills THROUGH the stop at the open. The engine models that
+honestly. Wider stops (2%, 3%) were worse on BOTH dimensions than 1%.
+
+ENGINE CHANGES (ENGINE_VERSION -> 2026-08-14-protective-exits)
+stop_loss_pct / take_profit_pct / max_hold_bars / close_at_session_end, all defaulting
+off - verified INERT (a default run is byte-identical to one with the hook disabled
+entirely), which matters because every previously recorded scan predates this.
+Trade.exit_reason records which exit fired. Two deliberately CONSERVATIVE choices, both
+places a stop/target backtest normally flatters itself:
+  - a bar containing BOTH stop and target resolves to the STOP (OHLC cannot say which
+    came first; assuming the target is how these backtests lie)
+  - a bar that GAPS through a level fills at the OPEN, not the level
+verify_protective_exits.py covers 16 cases incl. intrabar triggering, gap-through,
+the ambiguous bar, no same-bar re-entry after a stop, and the short-side mirror.
+
+METHOD NOTE THAT MADE THE SWEEP AFFORDABLE
+Signals are a pure function of price history (no position state), so they are computed
+ONCE per (ticker, window) and replayed across the grid - 18x faster. Validated rather
+than assumed: the replay must reproduce the recorded run exactly or that combo is
+skipped.
+
+LIVE WIRING
+_bracket_prices() mirrors the engine, attached to the OPENING order only (a closing order
+IS the exit; a stop on it would rest against a position that no longer exists). Long and
+short flip correctly - getting that backwards submits a "stop" that is really a target,
+which most brokers accept without complaint. Broker-side, so they survive the bot being
+down. Set live: stop 1%, take-profit 1.5%, flatten OFF.
+Controls on dashboard (Settings) and mobile (Bot Control), password-confirmed, with the
+evidence above stated ON the control itself - including that flatten tested worse.
+
+TWO BUGS FOUND IN PASSING
+  - app.py's "Save configuration" rebuilt AutoTraderControl field by field and omitted
+    risk_preset, silently resetting it to None on every save. Same class of bug as the
+    RosterConfig one. The new protective fields are carried forward there too - dropping
+    them would REMOVE the stop from every subsequent position with no visible UI change.
+  - alpaca.get_market_clock() now returns next_close; without it a session-end flatten
+    can only tell whether the market is open, not how long it has left.
+
+=== PROTECTIVE EXITS: FULLY REFUTED ON COMPARABLE DATA (2026-08-14/15) ===
+
+FOLLOW-UP TO THE ENTRY ABOVE. The first walk-forward (3 windows: train Jun, test Jul/Aug)
+showed take-profit ~1.5% beating baseline 2/2. Two much larger runs then reversed that.
+
+RUN 2 - 24 monthly windows, 6 combos, but ticker coverage was WILDLY unequal (SPCX in
+3/24 windows, Q in 10/24, PSKY in 13/24, SNDK in 19/24 - only BEN/WTW had all 24).
+Walk-forward: 9/23 windows beat baseline (39%), mean edge -$25.90, std dev $76.04 (3x the
+mean = noise). BUT the aggregate was confounded: baseline itself rose from $28/window to
+$1,200/window across the run, mostly from MORE TICKERS ENTERING coverage, not from
+anything about the exit setting. A "stability" check in the sweep script also mislabeled
+take-profit's 8-distinct-values-across-23-windows as "reasonably stable" - the threshold
+(distinct > half the windows) was miscalibrated; it should measure whether one value
+actually dominates, not just count how many distinct values appear.
+
+RUN 3 - the clean test: BEN and WTW ONLY (the two tickers with full 24-window coverage,
+so every window measures the same thing), same 24 windows, same 128-config grid.
+Fixed the stability check first (now reports MODE SHARE - how often the single most
+common pick was chosen - not a distinct-value count).
+
+RESULT: refuted across the board.
+  - Walk-forward: 7/23 (30%), mean edge +$1.18 vs std dev $24.75 (edge is 5% of the
+    noise - indistinguishable from zero).
+  - Selection-free grid (128 configs, no cherry-picking): EVERY SINGLE CONFIG
+    underperforms baseline except one at essentially zero (-$0.07). Every stop level,
+    every take-profit level, every combination - all negative.
+  - Take-profit's own stability check: mode share 48% (picked 0.5% through 2% depending
+    on the month) - explicitly UNSTABLE by the corrected check. The "positive" result
+    from run 2 does not survive equal ticker coverage.
+
+VERDICT: stop-loss, take-profit, and session-end flatten are ALL refuted now, twice each
+(session-end and stop lost money in every run from the start; take-profit initially
+looked positive on unequal data and that effect disappeared under equal coverage).
+Correctly left dormant (control.json: stop_loss_pct=None, take_profit_pct=None,
+flatten_before_close_minutes=None) - do not re-enable from the run-1 result, it does not
+hold up. sweep_rolling_walkforward.py now takes --tickers to restrict the pinned COMBOS
+list for exactly this kind of equal-coverage comparison.
+
+The engine capability (stop_loss_pct/take_profit_pct/max_hold_bars/close_at_session_end
+on BacktestEngine, ENGINE_VERSION 2026-08-14-protective-exits) and the live wiring
+(_bracket_prices in auto_trader.py, dashboard + mobile controls) all still exist and are
+tested - this is a "the data says no" outcome, not a "the feature doesn't work" outcome.
+If the roster's ticker set changes meaningfully (different edge, different volatility
+profile), it may be worth re-testing rather than assuming this verdict is permanent.
+
+=== FIXED: recent_performance() COUNTED ONE DECISION AS ONE PER CONNECTED ACCOUNT (2026-08-15) ===
+
+THE BUG. auto_trader loops over every target account each cycle and submits to
+each — one real trading DECISION on a combo connected to 3 accounts writes 3
+rows to live_trades.db, all within about a second of each other. recent_
+performance() (live_trades.py) queried by ticker+strategy with no account
+filter and no grouping, so it counted rows directly: a losing_streak_
+threshold=3 rule was really a 1-strike rule with 3 accounts connected, the
+20-trade lookback window was really ~7 decisions, and min_live_trades=5 was
+satisfied after ~2 decisions.
+
+CAUGHT LIVE: Q/VWAP Mean Reversion paused 2026-08-14 16:21 on "3 consecutive
+live losses" that was, decision-wise, ONE loss. Same story on MPWR, paused 4
+times on the identical pattern — every one of its "3-4 consecutive losses"
+pauses re-checked at streak=1 under the fix. This explains an earlier note
+("MPWR sat permanently benched on a 3-loss streak despite +$22 net and a 70%
+win rate") that had no explanation at the time.
+
+THE FIX (live_trades.py): _group_into_decisions() collapses rows within
+DECISION_GROUP_SECONDS=10 of a group's FIRST row (anchored, not a sliding
+window off the previous row — prevents chain-drift merging a slow sequence
+into one false decision; 10s has wide margin under the 60s default poll
+cadence). Within a group:
+  pnl      - SUM of dollar pnl (real money on every account; not double-
+             counting, the correct total for what the decision made)
+  pnl_pct  - MEAN pnl_pct, and THIS decides win/loss, not the dollar sum.
+             Real case: Q's 13:42 decision, IBKR Paper +$19.59 / MyAlpaca
+             -$5.54 / AlpacaLive +$0.05, mean +0.091% -> correctly a WIN,
+             where the un-grouped dollar-sum-dominated-by-the-biggest-account
+             read would have been ambiguous or size-dependent.
+recent_performance() now widens its raw-row fetch (capped at 500) until it has
+lookback_n DECISIONS, not lookback_n rows, then walks streak/win-rate/drawdown
+over decisions exactly as it did over rows before.
+
+VERIFIED (verify_decision_grouping.py, 11/11): mixed-sign classification,
+two decisions 90s apart staying separate, chain-drift resistance, an exact-
+boundary case, breakeven, AND a replay against Q's real history showing
+streak 3 -> 1, num_trades 14 raw rows -> 5 real decisions - run BEFORE
+touching anything live, per the standing rule of showing findings first.
+
+DEPLOYED: market was closed, so all three processes (dashboard, mobile_
+backend, auto_trader) restarted together via restart_all.py rather than
+split with --only - this changes what recent_performance() MEANS, which is
+exactly the "restart everything together" case that flag's own docstring
+warns about, not the additive-only case --only is for.
+
+NOT DONE: Q and MPWR were not automatically re-activated. The user handles Q
+manually via the mobile app; whether/when to release MPWR is their call, now
+backed by real corrected numbers rather than the misleading pre-fix streak.
+
+RE-CHECKED LIVE (2026-08-15, later same day): both are already "active" in
+roster.json (auto-released via pause_release_days before this fix even
+landed), but the CACHED live_stats on disk still showed the stale streak=3.
+Called the fixed recent_performance() directly, read-only, against the real
+live_trades.db: Q now correctly reads num_trades=5 decisions (was 14 raw
+rows), win_rate 80% (was 64.3%), streak=1 (was 3). MPWR: 6 decisions (was 9
+rows), win_rate 83.3% (was 66.7%), streak=1 (was 3). Total P&L unchanged on
+both ($21.16 / $18.33), as expected since SUM is unaffected by grouping.
+Neither is at risk of re-pausing on the next poll cycle (1 is well under the
+threshold of 3) — the stale cached numbers in roster.json will self-correct
+the next time apply_demotion_checks runs, which happens every live poll
+cycle; nothing was written here, this was a read-only check.
+
+MINOR, NOT FIXED: roster_events.jsonl has 4 phantom "OK0"-"OK3" paused-events
+from an earlier verification run in this session that wrote to the real event
+log instead of a temp one. They aren't real roster entries and the log is
+append-only / never read for gating, so this is cosmetic - noted here so a
+future session doesn't mistake them for real history.
+
+=== RISK DIAL, PER-TRADE SIZING AXIS SWEPT 1%-100% — CLEAN LINEAR TRADEOFF, NO PEAK (2026-08-15) ===
+
+WHAT THIS CLOSES OUT. risk_dial_vol_sweep.py (2026-08-07/08) swept target_vol_ann
+but never actually tested the dial's real live axis — sizing_value (0.5%/1%/2% of
+equity per trade in RISK_PRESETS) — because the engine had no way to model "spend
+X% of current equity" until dynamic_size_fn was added 2026-08-10 for the sliding-
+scale sizing work. risk_dial_sizing_sweep.py (new, repo root) is the first real
+test of that axis: constant fraction-of-equity sizing (1/2/5/10/15/20/30/50/75/
+100%), signals computed once per (ticker,strategy,window) and replayed across the
+grid (same shortcut as the protective-exits sweeps), 3 windows, only the 3 groups
+with a real edge from the vol-target sweep (equities VWAP MR, equities Bollinger
+MR, forex Bollinger MR — sizing amplifies an edge, it doesn't create one, so the
+3 structurally weak groups weren't worth re-testing). Isolated from target_vol_ann
+(regime_by_date=None) so this measures the sizing axis alone. Results:
+risk_dial_sizing_sweep_results.jsonl, full summary table in
+risk_dial_sizing_sweep_log.txt.
+
+THE FINDING: Sharpe is FLAT across the entire 1%-100% range, in all three groups
+(equities VWAP MR 1.05 at every fraction; equities Bollinger MR 1.99 at every
+fraction; forex Bollinger MR 3.04-3.05). Return% and drawdown% both scale up
+almost exactly linearly with the fraction instead. This is not a null result —
+it is the mathematically expected shape for constant-fraction sizing on a
+sequence of flat, non-overlapping trades: scaling every trade's stake by the same
+constant scales the whole return series by that constant, and Sharpe (mean/std)
+is invariant to a uniform scale factor. Compare against the target_vol_ann sweep,
+which DID move Sharpe non-monotonically (it changes size timing via regime, not
+just a constant multiplier) — the two axes are genuinely different in kind, not
+a contradiction.
+
+PRACTICAL CONSEQUENCE: there is no backtest-derived "optimal" sizing_value on
+this axis — no fraction in the tested range makes the risk-adjusted return
+better or worse, only the absolute dollar return and absolute dollar drawdown
+bigger or smaller, together, in lockstep. Picking sizing_value is therefore
+purely a risk-tolerance decision (how much drawdown $ the account can stand),
+not something further sizing-only backtesting can resolve — same conclusion
+shape as the stop-loss tail-risk framing from 2026-08-14 ("a risk preference,
+not an optimisation").
+
+THE ACTUAL NUMBERS, worst single-window drawdown observed per group:
+  Equities VWAP MR:        1% -> -0.25%  ...  100% -> -22.79%  (67% folds positive)
+  Equities Bollinger MR:   1% -> -0.06%  ...  100% ->  -5.69%  (100% folds positive)
+  Forex Bollinger MR:      1% -> -0.00%  ...  100% ->  -0.31%  (100% folds positive,
+                                                          but only ~36 trades total —
+                                                          small sample, per the earlier
+                                                          vol-target sweep's own caveat)
+Today's live default (Moderate, sizing_value=1.0 -> the "1%" row above) sits at the
+extreme conservative end of every group's range — worst observed drawdown under
+0.25% in any of the three groups, matching the very small live $ P&L already seen
+in practice (e.g. the ~$1.86 DDOG round-trip noted 2026-08-11).
+
+CAVEAT NOT COVERED BY THIS SWEEP: single-ticker-per-bucket in isolation, like the
+vol-target sweep before it — the real live roster runs several tickers/strategies
+concurrently across multiple accounts, which provides a diversification benefit
+this sweep can't see (a bad month on one roster ticker doesn't necessarily
+coincide with a bad month on another). The worst-case numbers above are a single
+instrument's worst month, not the whole roster's.
+
+NOT YET DECIDED: whether this changes RISK_PRESETS' current sizing_value range
+(Conservative 0.5% / Moderate 1% / Aggressive 2%) — that's a risk-preference call
+for the user, not something this sweep resolves on its own, consistent with
+[[trading-bot-goals-and-risk-posture]]. The data above is what a change would be
+weighed against.
+
+=== RISK DIAL APPLIED LIVE (0.5/1/2% -> 5/15/50%) + AlpacaLive REPLAY SERIES
+(2026-08-15/16) ===
+
+Following the sizing sweep above, the user picked new live RISK_PRESETS values:
+Conservative 5%, Moderate 15%, Aggressive 50% (was 0.5/1/2%). risk_presets.py
+updated, app.py's stale "Moderate is a safe no-op" caption fixed (no longer
+true at these values — EVERY preset now changes real sizing on an armed
+account). Applied Moderate (15%) to the live control.json with explicit
+confirmation given the real-money stakes (AlpacaLive is armed, allow_live=True)
+— later the user independently switched it to Aggressive (50%) through the
+dashboard or mobile app, confirmed by re-reading control.json/`/health` and
+finding it already changed, not something this session did.
+
+Added a matching mobile control: backend `POST /custom-sizing` (password-
+confirmed like /risk-preset, 1-100% range) plus `/health` now returns
+sizing_mode/sizing_value; Flutter `_CustomSizingCard` on the Bot Control
+screen. Deployed via `restart_all.py --only mobile_backend` (its own watchdog
+relaunches it — starting it directly here would race the watchdog, the exact
+2026-08-13 incident that pattern exists to avoid). Release APK rebuilt and
+verified served at /download/app-release.apk.
+
+FOLLOW-UP SERIES, all starting from AlpacaLive's REAL fetched equity ($53.20),
+each a script kept at the repo root:
+- alpaca_live_3month_sizing_test.py / alpaca_3month_equity_chart.html — the 6
+  active roster combos, 3 months, at the (then-current) 50% rate. All 6
+  profitable; equities VWAP MR the most volatile (worst single-window
+  drawdown -22.8% at 100% in the earlier sizing sweep, for reference).
+- alpaca_live_3month_deposits_test.py / alpaca_3month_deposits_chart.html —
+  added a $40/month deposit (BacktestEngine gained a new `deposits` param for
+  this, see below) across 5%/20%/100%. Confirmed the deposit-mechanics gotcha
+  up front: 2026-08-01 is a Saturday, so deposit dates are snapped to the next
+  REAL trading session from a reference ticker's own bars, never a raw
+  calendar date (a raw date with no bar silently never fires).
+- A chat-only follow-up (no script) projected — from just the two deposit-free
+  ~1-month windows inside that 3-month test — how long until a $40 deposit is
+  under 5%/1% of balance ($800/$4000). Flagged HARD as a 2-data-point
+  extrapolation, not a forecast. This caveat was the right call: see below.
+- alpaca_live_2year_test.py / alpaca_2year_chart.html — MPWR/Q/PSKY (the 3
+  strong VWAP MR combos) over 2 years, same deposit mechanism, to check the
+  extrapolation against a real longer backtest. **Real bugs caught before
+  trusting the numbers, both worth remembering:**
+  1. PSKY and Q are NOT 2-year histories — first real bar 2025-08-07 (PSKY,
+     ~1yr) and 2025-11-03 (Q, ~9mo), both recently-listed tickers. The
+     script's first version compared their end balance against the FULL
+     24-deposit total regardless, making both look like losses when they
+     were actually positive once compared against what actually landed in
+     THEIR shorter window (12 and 10 deposits respectively). Fixed by
+     computing contributed-$ per combo from its own first bar date forward,
+     not one shared total.
+  2. `TARGET_TICKERS = {"MPWR","Q","PSKY"}` is a set — Python's per-process
+     hash randomization means iteration order (and so which ticker's
+     calendar gets used to build deposit dates via `combos[0]`) is NOT
+     stable across runs. Silently shortchanged MPWR/PSKY's deposit count
+     whenever a shorter-history ticker happened to sort first. Fixed in both
+     2-year scripts: pick the ticker with the EARLIEST first bar explicitly
+     (`min(bars_by_ticker, key=lambda t: bars_by_ticker[t].index[0])`), not
+     an arbitrary element.
+  With both fixed: all three profitable at every fraction tested (5/20/100%),
+  e.g. MPWR $1,013.20 contributed -> $1,137/$1,620/$12,203. The 100% MPWR
+  figure is exactly the kind of number the extrapolation earlier couldn't
+  have known to distrust on its own grounds — flagged as unrealistic
+  sustained compounding, verified below.
+- **BacktestEngine gained `deposits: dict[date, float]` (2026-08-15)** —
+  cash injected once on the first bar of a given date, before that day's
+  sizing. Optional, None by default, zero regression (verified with a
+  synthetic zero-trade test: deposits land on the right dates, nothing else
+  moves) — same pattern as every other engine addition. NOTE:
+  total_return computed from equity_curve[0]/[-1] stops being a pure trading
+  number once deposits are non-empty; track ending equity minus total
+  deposited instead, not compute_report's percentage.
+
+=== LIQUIDITY / MARKET-IMPACT MODELED + 2-YEAR RESCAN (2026-08-16) ===
+
+Direct follow-up to the 2-year run's own caveat ("a position compounding into
+the thousands would face real liquidity effects no backtest here can see") —
+asked to actually simulate it rather than just repeat the caveat.
+
+**BacktestEngine gained `variable_slippage_fn: Callable[[shares, bar_volume],
+bps] | None`** — called separately for every fill (entries AND exits) with
+the real shares being traded and that bar's volume; overrides the flat
+slippage_bps for that one fill. None (default) is zero-regression: verified
+byte-identical entry/exit prices against the old flat-slippage path on a
+synthetic trade, PLUS the existing 16-check verify_protective_exits.py suite
+still 16/16 after the change. For an ENTRY (share count not known yet — it's
+circular with the fill price this function computes) the shares passed in are
+an ESTIMATE (spend / bar close, ignoring slippage itself — a standard, small
+approximation). EXITS use the real, already-known share count directly.
+
+Model used (alpaca_live_2year_liquidity_test.py): `bps = min(2.0 +
+participation% * 8.0, 500.0)`, participation against THAT MINUTE BAR's own
+volume. Explicitly labeled conservative, not professionally calibrated — a
+real execution algo slices a large order across many bars rather than one
+minute, so single-bar-volume impact overstates the true cost of anything a
+real desk would actually split up. Answers "how bad could it look," not
+"what would happen."
+
+**Real bug caught before trusting this comparison, same root cause as the
+2-year script's bug above**: the liquidity script ALSO used `combos[0][0]`
+as the deposit-calendar reference ticker, and this run's random set-iteration
+order picked Q (short history) instead of MPWR — silently cut MPWR/PSKY's
+deposit count from 24 down to 10, making the "liquidity impact" look far
+worse than it really was (a $645 gap that was mostly missing deposits, not
+slippage). Fixed identically (earliest-first-bar ticker, not combos[0]) and
+re-run before reporting anything.
+
+RESULT, once correct: liquidity impact is small at low sizing and severe at
+high sizing — exactly the shape you'd expect, but now measured rather than
+assumed.
+  5%:   -0-2% difference across all three combos (avg slip ~2-4bps, barely
+        above the flat 2bps baseline — trade sizes are small enough relative
+        to bar volume that impact barely registers).
+  20%:  MPWR/Q still small (-2/-3%), but PSKY -30% ($849 -> $597, avg slip
+        10bps, max 118bps) — PSKY is meaningfully less liquid than MPWR/Q at
+        the same sizing.
+  100%: MPWR -80% ($12,203 -> $2,426), Q -60% ($3,545 -> $1,406), PSKY -98%
+        ($8,031 -> $168, barely above its own contributed capital). The
+        eye-watering 100% MPWR number from the flat-slippage run was
+        substantially an artifact of unrealistic execution costs, not a real
+        edge — confirms the caveat given at the time was the right call, with
+        a number attached now instead of just a warning.
+Chart: alpaca_2year_liquidity_chart.html (solid = flat, dashed = liquidity-
+aware, same color per combo, fraction tabs, legend-toggle).
+
+=== REGULAR-HOURS ENTRY GATE + PER-TICKER LIQUIDITY SWEEP + POSITION SIZING
+SHOWN ON MOBILE (2026-08-16, same day as the liquidity model above) ===
+
+**BacktestEngine gained `regular_hours_only: bool`** — blocks NEW entries
+(exits unaffected) outside 09:30-16:00 America/New_York, precomputed once
+per run like session_end_flags. NYSE-hardcoded, equity-only by construction -
+never set True for crypto/forex. Verified: byte-identical to before when
+False/default; a 3-bar synthetic test confirmed exactly the 09:35 ET bar
+opened a position while the 22:00 and 16:05 ET bars were blocked;
+verify_protective_exits.py still 16/16.
+
+**MOTIVATION, and why the obvious fix didn't just work**: cross-checking
+PSKY's trade timestamps against the liquidity model showed 43% of its fills
+(1204/2772) happen OUTSIDE regular hours, and the worst modeled slippage
+bars all had bar_volume=100 (Polygon's thin-bar floor) against a median of
+7061 - looked like a clean fix. Tested it (rerun of the MPWR/Q/PSKY 2-year
+liquidity comparison, `hours` arg) and the result was MIXED, not a clean
+win: helped PSKY at 100% sizing (its worst case, $168->$438) but made EVERY
+OTHER case worse (MPWR -$108, Q -$530 at 100%; all three worse at 5%/20%
+too) - removing ~40-46% of trades cost more real edge than it saved in
+slippage. **Conclusion: a blanket time gate is the wrong tool.** The real
+driver is PSKY's own poor liquidity relative to its position size, not
+when it trades.
+
+**Sensitivity check** (half-strength impact model, 4bps/1% instead of 8bps/1%,
+`alpaca_live_2year_liquidity_test.py <impact> [hours]`, now a CLI arg on
+that script): confirms the earlier "somewhere in the middle" intuition holds
+for MPWR/Q (roughly proportional degradation between flat and full-strength)
+but NOT for PSKY - even at half-strength it's down to $288 (vs $8,031 flat,
+$168 full-strength) - closer to the pessimistic end regardless of exactly
+which coefficient is "right." PSKY's problem is structural, not a modeling
+artifact of one specific coefficient choice.
+
+**roster_liquidity_efficient_sizing.py — the real per-ticker answer.** Swept
+all 6 active combos (not just the 3 strong ones) across the full 1-100% grid,
+flat vs liquidity-aware, no deposits (isolates the sizing question). One
+early mistake worth remembering: "which fraction maximizes liquidity-adjusted
+Sharpe" is a USELESS metric here - liquidity cost only ever adds drag, so it
+trivially peaks at the smallest tested size (1%) for every single ticker,
+every time. The real, DIFFERENTIATED signal is where the liquidity/flat
+ratio first drops below 0.90 (10% drag):
+  PSKY   ~20% (0.91 at 20%, 0.78 by 30% - drops fast)
+  MPWR   ~75% (0.90 at 75%, 0.75 at 100%)
+  Q      ~50% (0.95 at 50%, 0.87 at 75%)
+  BEN    ~50% (0.95 at 50%, 0.88 at 75%)
+  ZBRA   effectively uncapped (0.92 even at 100%)
+  BIIB   effectively uncapped (0.96 even at 100%)
+PSKY is a real, structural outlier among the roster, not a modeling quirk -
+consistent across every variant tested above. Not yet implemented as a real
+per-ticker sizing mechanism (control.json only has per-ACCOUNT overrides
+today, `account_sizing_overrides` - a per-ticker equivalent would be new);
+this sweep is the evidence such a thing would be built on, not the feature
+itself.
+
+**Mobile: open positions now show what they were actually sized at.**
+Investigated first (found: this was NOT captured anywhere - not in
+position_attribution.py's schema, not passed into record_open(), broker
+APIs don't know about it either - so it can only be shown for positions
+opened AFTER this change, never backfilled for currently-open ones).
+- `position_attribution.record_open()` gained `sizing_mode`/`sizing_value`/
+  `dollars_committed` (all optional, None-default, backward compatible).
+- `auto_trader.py`'s `_trade_target`: these are the EFFECTIVE, already-
+  resolved values (post override/slide, post GARCH size_multiplier) - real
+  bug avoided here, not just theoretical: the loop processes many accounts
+  before batching the actual order execution, so `effective_sizing_value`
+  etc. are loop-local and would have silently held the LAST account's
+  numbers for every position's attribution if read after the batch call
+  instead of captured into `order_contexts` per-account inline, in the loop,
+  before execute_order_across_accounts() runs.
+- Mobile backend (`positions_service.py`): merges `position_attribution.
+  load_map()` (one read per fetch, not per position) into each PositionView
+  by `account_id|ticker`. Flutter (`OpenPosition.sizingLabel` getter +
+  `_PositionRow`): a small italic line under each position - "Sized at
+  15.0% of equity ($8.20)" when known, "Sizing unknown (opened before
+  tracking, or manually)" when not, never guessed.
+- Verified: round-tripped record_open->load_map->pop_open with all three new
+  fields against a temp state dir (not the real positions.json); `flutter
+  analyze` clean; debug AND release APK builds both clean.
+- Deployed: market was closed at the time ("next open Monday 09:30 ET"), so
+  did a full `restart_all.py` (not --only) - dashboard, mobile_backend, AND
+  auto_trader all restarted together, matching the "closed market = safest
+  restart window" reasoning used elsewhere in this file. auto_trader/
+  mobile_backend confirmed fresh via --check afterward; dashboard stayed
+  UNVERIFIED (pre-existing quirk, not something this change caused - not
+  chased further). Release APK rebuilt and confirmed served at
+  /download/app-release.apk (55.9MB, fresh).
+- **NOT YET verified against a real trade** - can't be, until the market
+  reopens and a real position actually opens under this code. Same
+  "verified everything except the live fill itself" gap as most first-time
+  live-adjacent changes in this file; check the phone after the next real
+  entry.
+
+=== PER-TICKER LIQUIDITY SIZING CAPS, THREE TIERS EACH, LIVE (2026-08-16) ===
+
+Turned the roster_liquidity_efficient_sizing.py sweep (immediately above)
+into a real mechanism rather than just evidence sitting in a JSON file.
+
+`risk_presets.py` gained `TICKER_SIZING_CAPS` (6 tickers x Conservative/
+Moderate/Aggressive) and `ticker_sizing_cap(ticker, risk_preset)`. Each
+value is a GRID POINT already tested by the sweep, not interpolated - same
+discipline as vol_target_ann - chosen per ticker as the largest tested
+fraction (1/2/5/10/15/20/30/50/75/100%) where liquidity-adjusted return was
+still >= a tier-specific fraction of the flat-slippage value:
+  Conservative >= 0.98 (loses <=2% to liquidity)
+  Moderate     >= 0.90 (loses <=10% - same bar the sweep itself used)
+  Aggressive   >= 0.75 (loses <=25%)
+Result: PSKY 10/20/30%, Q 30/50/75%, BEN 30/50/100%, MPWR 30/75/100%,
+ZBRA 50/100/100%, BIIB 75/100/100%. A ticker outside these 6 gets None (no
+cap) - untested is left alone, never assumed safe.
+
+Wired into `auto_trader.py`'s `_trade_target`, immediately after
+effective_sizing_value *= size_multiplier (the same point the GARCH cut
+already applies) - a pure MIN against whatever sizing already came out of
+the global preset / per-account override / slide, never a way to size UP.
+Only touches PCT_EQUITY mode (the cap was measured in %-of-equity terms,
+meaningless against FIXED_DOLLARS/FIXED_SHARES). A preset name outside
+Conservative/Moderate/Aggressive (None, or a hand-typed custom sizing_value)
+falls back to the Moderate cap - the ceiling should still protect a custom
+value, and Moderate is the sensible default to fall back to, not the most
+permissive tier.
+
+**Real effect**: at Aggressive (global 50%), PSKY now sizes at 30% instead
+of 50% - the other 5 tickers' caps (Q 75, BEN 100, MPWR 100, ZBRA 100,
+BIIB 100) all sit at or above 50%, so they're unaffected; the cap only ever
+binds where a ticker's own liquidity genuinely can't support the global
+rate. The mobile positions-sizing indicator (built the same day, just
+before this) automatically shows the POST-clamp value with no further work
+needed - `record_open()` is fed `effective_sizing_value` after this clamp
+applies, so a capped PSKY trade will visibly show "Sized at 30%" right next
+to an uncapped ZBRA trade showing "Sized at 50%" at the identical preset.
+
+Verified: `ticker_sizing_cap()` unit-checked directly (PSKY/Aggressive->30,
+ZBRA/Aggressive->100 i.e. doesn't bind, unknown ticker->None, no-preset
+falls back to Moderate); hand-computed clamp math confirmed PSKY
+50%->30%, ZBRA 50%->50% (unclamped) at Aggressive; `auto_trader.py` still
+imports and loads cleanly standalone. Dashboard's Risk Profile caption
+updated to mention the per-ticker ceiling exists and where to see what
+actually applied. Deployed via `restart_all.py --only auto_trader,
+dashboard` then `--only mobile_backend` (mobile_backend's process also had
+stale risk_presets.py loaded, though it doesn't currently call the new
+function - restarted anyway for consistency), market closed throughout.
+**NOT YET verified against a real trade** for the same reason as the
+sizing-indicator entry above - no position has opened under this code yet;
+check PSKY's actual next live entry once the market reopens Monday.
+
+
+=== Update 2026-08-24/25 (silent-death outage: root cause, logging, watchdog, IG index data) ===
+THE OUTAGE. auto_trader.py stopped producing signals for ~108 minutes (last cycle 21:00:51Z,
+nothing until a fresh process at 22:48:36Z) with NO trace anywhere: no crash log, no Windows
+Error Reporting entry, no Application-log error. A second, longer hang followed the same night.
+
+ROOT CAUSE (found 2026-08-25, via IB Gateway's own launcher log). IB Gateway was sitting in a
+PRELOGON state, its log repeating "instance of control is not created yet" every ~5 minutes -
+it had never finished starting up. In that state Gateway ACCEPTS the socket and completes the
+API handshake, so ib.connect() returns cleanly inside its 8s timeout, but then never answers a
+data request. _DEFAULT_TIMEOUT only ever bounded ib.connect(); ib_async's synchronous request
+wrappers (ib.reqContractDetails, ib.reqAllOpenOrders) take NO timeout argument and wait
+forever. get_market_clock() is called early in run_cycle for every broker account, so the
+cycle blocked on the first one and never reached a single ticker - which is why ALL brokers
+went quiet, not just IBKR. Its own try/except couldn't help: a blocked call never raises.
+Signature to recognise it again: process alive, ~8s total CPU, heartbeat frozen, no exception.
+
+FIXES (all live 2026-08-25):
+1. ibkr.py: _REQUEST_TIMEOUT (20s) + _await() wrapping the ASYNC variants
+   (reqContractDetailsAsync/reqAllOpenOrdersAsync) via asyncio.wait_for, so a wedged Gateway
+   raises TimeoutError into handlers that already exist instead of hanging forever. Verified
+   both ways: healthy calls still return in ~0.2s, a never-responding call is cut off on time.
+2. logging_setup.py (NEW): pythonw.exe has nowhere for stdout/stderr to go, which is WHY there
+   was no trace. Redirects both to a rotating logs/<name>.log AND installs a sys.excepthook, so
+   even a fully uncaught exception writes a traceback before the process dies. Wired into
+   auto_trader.py, both watchdogs.
+3. auto_trader.py main(): the per-cycle body is now inside try/except - an exception logs a
+   traceback, refreshes the heartbeat, backs off (5s doubling to 5min) and RETRIES, instead of
+   killing the process. Same "stay alive, don't trade" philosophy as the unreadable-control path.
+4. auto_trader_watchdog.py (NEW) - see its own header for the full design.
+
+WATCHDOG: THREE MISTAKES MADE WHILE BUILDING IT, all worth not repeating.
+ a) STARTUP_GRACE_SECONDS was 30s. status.json's heartbeat is only written at the END of a full
+    run_cycle, and a real cycle takes ~60s (heartbeats land ~180s apart: 120s poll + ~60s work).
+    So the watchdog killed every cold start before it could ever write one - a crash loop.
+    Now 600s, deliberately generous: missing a genuine hang by minutes is far cheaper.
+ b) TWO auto_trader.py processes ran at once - a real double-order risk (checked: no duplicate
+    trade was actually placed). First assumed to be a kill/relaunch race inside one watchdog;
+    it was NOT. It was two WATCHDOGS, from a botched manual launch. auto_trader's own
+    _another_instance_alive() can't catch that: it looks for a FRESH HEARTBEAT, and neither
+    cold-starting child has written one yet. Hence _other_watchdog_running().
+ c) That guard was FIRST written as a scan for processes whose command line mentions
+    "auto_trader_watchdog.py" - which false-positived instantly, because the shell command that
+    launches it (and any grep, or editor) matches too. Replaced with a lock file holding the
+    owning pid, validated as still-alive AND still-running-this-script (so pid reuse and stale
+    locks both fail safe). Do not go back to command-line scanning for singleton checks.
+ Also: the watchdog ADOPTS an already-healthy auto_trader instead of launching one, so merely
+ starting it can't create the second instance it exists to prevent. restart_all.py now passes
+ argv=None for auto_trader (same as mobile_backend) and waits 90s, not 50s, since a
+ watchdog-owned relaunch can take up to its 60s poll to be noticed.
+
+IG AS A LIVE INDEX DATA SOURCE (I:NDX). Alpaca rejects index tickers outright ("invalid symbol:
+I:NDX"), so I:NDX was the last live target silently still on Polygon after the 2026-08-20
+"Polygon is backtesting-only" migration. IGBroker.get_live_bars() now serves it (bid/ask mid,
+tz-naive Europe/London timestamps converted to UTC - verified by arithmetic against a known UTC
+clock). THE CONSTRAINT THAT SHAPES ALL OF THIS: IG's historical-price endpoint allows only
+10,000 data points per WEEK. An unconditional 120s poll would burn ~11,700 in a single day -
+this is the same wall an early test pull hit, and the reason forex uses OANDA for data. It fits
+only because Opening Spike Fade can act ONLY between the open and the end of its reversal window
+(~25 min), so _index_bars_window_open() gates the IG call to open-2min..open+35min (~4,050
+points/week worst case). Outside that window it returns None and Polygon serves the chart, which
+is harmless precisely because the strategy structurally cannot trade then. The mobile backend
+deliberately does NOT call IG at all - it polls independently and would double-spend the same
+weekly budget for a display refresh.
+
+NOT A BUG (recorded so it isn't "fixed" again): the venv's pythonw.exe is a LAUNCHER STUB that
+spawns pythonw3.13.exe as a child, so every process shows up as a stub+real PAIR. Two rows in
+tasklist for one logical process is normal, not a duplicate instance. Terminating the stub was
+measured to take the child with it (the watchdog still uses taskkill /T for certainty).
+
+=== OPEN BUG 2026-08-25: extra_targets account_ids is NOT enforced (live-money risk) ===
+STATUS: NOT FIXED. Mitigated only by removing the affected target. Fix planned after a market
+close (deliberately not mid-session - it changes live order routing).
+
+WHAT. control.json's extra_targets entries carry an "account_ids" list, and the NDX group was
+even labelled "...(PAPER)" with account_ids=[MyIGPaper]. That field is IGNORED for routing.
+_resolve_targets() returns only (ticker, strategy, params, no_new_entries) and says so in its
+own docstring: "Routing to the right accounts relies entirely on the caller's existing
+per-(ticker,account) asset-class guard, not on anything here". So a target trades on EVERY
+eligible account whose asset class matches the TICKER - the account_ids list is decoration.
+
+HOW IT SURFACED. 2026-08-25 14:32 UK (2 min after the open) Opening Spike Fade fired
+BUY I:NDX @ 29256.8. I:NDX infers as "equity"; MyIGPaper is classed "forex", so the intended
+paper account was never even eligible. The only eligible equity accounts are AlpacaLive and
+IBKR Live - BOTH REAL MONEY. Both were attempted:
+  - AlpacaLive: order actually submitted, rejected by Alpaca ('asset "I:NDX" not found')
+  - IBKR Live : sizing floored to 0 whole shares (~GBP17 target vs 29,256 price)
+NOTHING FILLED - but only by luck. Neither is a safeguard; a cheaper index or a bigger balance
+and IBKR Live takes a real position in an instrument never validated for live trading.
+
+AUDIT OF THE OTHER GROUPS (same bug, currently harmless):
+  Crypto BTC  -> intended CBAPI+KRKAPI, routes CBAPI+KRKAPI. Correct by luck of asset class.
+  IG Forex    -> intended MyIGPaper only, ACTUALLY myOanda + MyIGPaper.
+  OANDA Forex -> intended myOanda only,  ACTUALLY myOanda + MyIGPaper.
+  Both forex accounts are paper so no money is at risk, BUT it means the IG-vs-OANDA
+  separation is fictional: both accounts trade all 5 pairs, each with the other group's tuned
+  params. Any comparison drawn between those two groups' results is invalid until this is fixed.
+
+THE FIX (planned): thread each target's account_ids through _resolve_targets into the
+_trade_target routing loop and intersect it with the existing asset-class guard. Then re-verify
+all groups route as intended. NOTE for re-adding NDX afterwards: fixing routing is NOT enough -
+MyIGPaper is classed forex, so it would still be ineligible for an "equity" ticker. Either
+I:NDX needs an asset class IG can serve, or the account needs to be classed for indices.
+
+LESSON. is_paper on the account in the config was checked and reported as proof the target was
+paper-only. It wasn't proof of anything - the field is real but nothing routes on it. Verify a
+restriction is ENFORCED end-to-end before describing something as safe, especially for
+anything that can reach a live account.
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,

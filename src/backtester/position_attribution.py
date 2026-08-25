@@ -16,7 +16,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from backtester.auto_trader_state import STATE_DIR, atomic_write_text
+from backtester.auto_trader_state import STATE_DIR, atomic_write_text, read_state_json
 
 PATH = STATE_DIR / "positions.json"
 
@@ -26,12 +26,12 @@ def _key(account_id: str, ticker: str) -> str:
 
 
 def load_map() -> dict[str, dict]:
-    if not PATH.exists():
-        return {}
-    try:
-        return json.loads(PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    """Raises StateFileUnreadable rather than returning {} on a read failure —
+    every caller below is a read-modify-write, so a silent empty return would
+    let the next save wipe every open position's strategy attribution, and a
+    close with no attribution is never recorded to live_trades (its P&L just
+    disappears). See read_state_json for the incident this pattern caused."""
+    return read_state_json(PATH, default={})
 
 
 def save_map(data: dict[str, dict]) -> None:
@@ -39,12 +39,27 @@ def save_map(data: dict[str, dict]) -> None:
     atomic_write_text(PATH, json.dumps(data, indent=2))
 
 
-def record_open(account_id: str, ticker: str, strategy_name: str, conviction: float | None = None) -> None:
+def record_open(
+    account_id: str, ticker: str, strategy_name: str, conviction: float | None = None,
+    sizing_mode: str | None = None, sizing_value: float | None = None,
+    dollars_committed: float | None = None,
+) -> None:
+    """sizing_mode/sizing_value/dollars_committed: the EFFECTIVE sizing this
+    specific entry actually used (2026-08-16) - already resolved through any
+    per-account slide/override and the GARCH size_multiplier, i.e. exactly
+    what was live at the moment of this fill, not the global control.json
+    setting (which may since have changed). All three None (the default) for
+    a caller that doesn't have this context, e.g. an old call site or a
+    position opened before this existed - the mobile /positions endpoint
+    treats that as "sizing unknown" rather than guessing."""
     data = load_map()
     data[_key(account_id, ticker)] = {
         "strategy_name": strategy_name,
         "opened_at": datetime.now(timezone.utc).isoformat(),
         "conviction": conviction,  # [0,1] entry-signal strength (#25); carried through to live_trades on close
+        "sizing_mode": sizing_mode,
+        "sizing_value": sizing_value,
+        "dollars_committed": dollars_committed,
     }
     save_map(data)
 

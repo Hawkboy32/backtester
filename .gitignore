@@ -22,5 +22,41 @@ live_trades.db
 .DS_Store
 risk_dial_sweep_results.jsonl
 risk_dial_sweep_log.txt
+risk_dial_sizing_sweep_results.jsonl
+risk_dial_sizing_sweep_log.txt
 shorting_sweep_log.txt
 walkforward_validation_log.txt
+equities_scan_refresh_log.txt
+alpaca_2year_log.txt
+alpaca_3month_equity_curves.json
+alpaca_3month_deposits_curves.json
+alpaca_2year_curves.json
+alpaca_2year_liquidity_curves.json
+alpaca_2year_liquidity_curves_*.json
+alpaca_2year_liquidity_half_log.txt
+alpaca_2year_liquidity_hours_log.txt
+roster_liquidity_efficient_sizing.json
+roster_liquidity_efficient_sizing_log.txt
+roster_capped_3month_test_log.txt
+roster_capped_3month_curves.json
+alpaca_2year_liquidity_log.txt
+
+# Timestamped DB/state backups (live_trades.db.bak-YYYYMMDD-HHMMSS,
+# control.json.bak-...). The bare *.bak rule above does NOT catch these -
+# they end in .bak-<timestamp> - and they hold REAL trade history.
+*.bak-*
+# Generated research/report artifacts. The one-off .py scripts that produce
+# these are deliberately left untracked rather than ignored, so they stay
+# visible in git status until someone decides a given one is worth keeping.
+*.html
+*.png
+/_combined_2year_tmp.json
+/crypto_btc_eth_5gbp_multiwindow.json
+/crypto_liquidity_stress_test.json
+/opening_spike_fade_trades.csv
+crypto_btc_eth_5gbp_multiwindow_log.txt
+crypto_btc_eth_multiwindow_validation_log.txt
+crypto_btc_eth_param_tuning_log.txt
+crypto_liquidity_stress_test_log.txt
+opening_spike_fade_multiwindow_log.txt
+opening_spike_fade_tuning_log.txt

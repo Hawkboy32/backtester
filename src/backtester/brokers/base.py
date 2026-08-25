@@ -52,6 +52,50 @@ class EquityPoint:
     equity: float
 
 
+@dataclass
+class BrokerFee:
+    """One fee the broker charged. `amount` is NEGATIVE (money leaving).
+
+    `kind` is the broker's own code where it has one (Alpaca: REG/TAF/CAT
+    regulatory fees, or a currency-conversion charge on funding); `description`
+    is its human-readable line, kept verbatim rather than reworded so the app
+    shows exactly what the broker says it charged for.
+    """
+    date: str
+    kind: str
+    amount: float
+    description: str
+
+    @property
+    def is_funding(self) -> bool:
+        """True for costs charged on money ENTERING the account (GBP->USD
+        conversion), as opposed to costs of trading.
+
+        The split matters because the two behave completely differently, and
+        lumping them into one "fees" total hides that. Measured on AlpacaLive
+        over 2026-08-11..13: trading fees were FIXED at $0.03/day while sell
+        proceeds tripled ($5.69 -> $17.46), because every regulatory fee rounds
+        up to a $0.01 minimum (below ~$360 per sell the true SEC fee is smaller
+        than the floor). Conversion, by contrast, is ~1.5% of every deposit and
+        scales forever. So trading cost is a fixed toll you outgrow; funding
+        cost is a percentage you don't.
+        """
+        return self.kind.upper() == "CONVERSION" or "conversion" in self.description.lower()
+
+
+def summarize_fees(fees: list[BrokerFee]) -> dict[str, float]:
+    """Split a fee list into the two kinds that behave differently.
+
+    Returns NEGATIVE amounts throughout (money leaving), matching BrokerFee,
+    so callers can add these straight onto a gross P&L without sign juggling.
+    Shared by the dashboard and the mobile backend so both classify identically
+    rather than each re-deriving the rule.
+    """
+    trading = sum(f.amount for f in fees if not f.is_funding)
+    funding = sum(f.amount for f in fees if f.is_funding)
+    return {"trading": trading, "funding": funding, "total": trading + funding}
+
+
 class BrokerAccount(ABC):
     """One linked, authenticated brokerage account."""
 
@@ -79,6 +123,22 @@ class BrokerAccount(ABC):
         """Real historical account equity, not a projection. `period` and
         `timeframe` follow Alpaca's conventions (e.g. period='1M'/'3M'/'1Y',
         timeframe='1D'/'1H').
+        """
+        raise NotImplementedError
+
+    def get_fees(self, limit: int = 100) -> list[BrokerFee]:
+        """Fees the broker has actually charged, newest first.
+
+        These never appear in live_trades.db — that only holds round-trip
+        entry/exit prices, so its realised P&L is GROSS of costs. On a small
+        account the difference is not academic: reconciling AlpacaLive on
+        2026-08-14 showed $0.22 of gross trading profit against $0.90 of fees,
+        of which $0.81 was GBP->USD conversion on deposits. Without surfacing
+        these, the app reports a profit on an account that is actually down.
+
+        NotImplementedError (not an empty list) where a broker has no uniform
+        fee endpoint — the caller must be able to tell "this broker can't tell
+        us" apart from "no fees charged".
         """
         raise NotImplementedError
 

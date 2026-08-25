@@ -131,13 +131,25 @@ def compute_qty_for_account(
         if reference_price <= 0:
             raise ValueError("reference_price must be positive to size by equity % or dollar amount")
 
+        snapshot = account.get_account_snapshot()
         if sizing_mode is SizingMode.PCT_EQUITY:
-            snapshot = account.get_account_snapshot()
             dollars = snapshot.equity * (sizing_value / 100)
         elif sizing_mode is SizingMode.FIXED_DOLLARS:
             dollars = sizing_value
         else:
             raise ValueError(f"Unknown sizing mode: {sizing_mode}")
+
+        # Cap at what the account can actually spend right now. equity (used
+        # above for PCT_EQUITY) includes value already tied up in OTHER open
+        # positions — with several roster combos active simultaneously,
+        # equity * rate can exceed real available buying_power, and the
+        # broker rejects the order outright (seen live on AlpacaLive
+        # 2026-08-12: sized $5.87 off $13.16 equity, but only $5.47 was
+        # actually free — the rest was in two other open positions).
+        # buying_power, not cash, so an account with real margin isn't
+        # needlessly under-sized; for a non-margin account (like AlpacaLive)
+        # buying_power == cash anyway, so this is a no-op there beyond the cap.
+        dollars = min(dollars, snapshot.buying_power)
 
         divisor = _forex_usd_divisor(ticker, reference_price) if ticker.startswith("C:") else reference_price
 

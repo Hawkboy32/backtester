@@ -30,18 +30,17 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from backtester.auto_trader_state import STATE_DIR, atomic_write_text
+from backtester.auto_trader_state import STATE_DIR, atomic_write_text, read_state_json
 
 PATH = STATE_DIR / "daily_pnl_guard.json"
 
 
 def load_state() -> dict:
-    if not PATH.exists():
-        return {}
-    try:
-        return json.loads(PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    """Raises StateFileUnreadable rather than returning {} on a read failure —
+    same reasoning as account_risk.load_state: this is a read-modify-write
+    guarding real money, and a silent empty return would forget today's peak
+    profit and un-block a tripped giveback guard. See read_state_json."""
+    return read_state_json(PATH, default={})
 
 
 def save_state(state: dict) -> None:

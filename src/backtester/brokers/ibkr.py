@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from ib_async import IB, Forex, LimitOrder, MarketOrder, StopOrder, Stock
+from ib_async import IB, Forex, LimitOrder, MarketOrder, StopOrder, Stock, util
 
 from backtester.brokers.base import AccountSnapshot, BrokerAccount, EquityPoint, OrderResult, OrderSide, Position
 
@@ -47,7 +47,37 @@ _CLOCK_SYMBOL = "SPY"
 # reports the same liquidHours/timeZoneId mechanism for a CASH contract.
 _FOREX_CLOCK_PAIR = "EURUSD"
 _DEFAULT_TIMEOUT = 8.0
+# Deadline for an individual REQUEST made on an already-open connection, which
+# _DEFAULT_TIMEOUT above does NOT cover: that one is passed to ib.connect() and
+# only bounds the TCP connect + API handshake.
+#
+# WHY THIS EXISTS (2026-08-24 outage, root-caused 2026-08-25): auto_trader.py
+# hung for ~108 minutes - alive, ~8s of CPU total, no exception, no traceback -
+# while IB Gateway sat in a PRELOGON state (its own log repeating "instance of
+# control is not created yet"). In that state Gateway ACCEPTS the socket and
+# completes the API handshake, so ib.connect() returns cleanly well inside its
+# 8s timeout, but never answers an actual data request. ib_async's synchronous
+# request wrappers take no timeout argument at all and wait forever, so the
+# cycle blocked on the very first one and never reached a single ticker - which
+# is why ALL brokers stopped, not just IBKR. get_market_clock()'s own
+# try/except couldn't help: a blocked call never raises.
+#
+# 20s is comfortably above a healthy round-trip (the same calls answer in
+# ~0.4s against a properly logged-in Gateway) while still bounding a wedged
+# one to something a 120s poll cycle can absorb.
+_REQUEST_TIMEOUT = 20.0
 ASSET_CLASSES = ("equity", "forex")
+
+
+def _await(coro, timeout: float = _REQUEST_TIMEOUT):
+    """Run one ib_async coroutine with a hard deadline, raising
+    asyncio.TimeoutError if it overruns.
+
+    Used instead of the synchronous ib.reqXxx() wrappers for every request
+    that actually waits on Gateway - see _REQUEST_TIMEOUT above. Callers keep
+    their existing try/except: a timeout now surfaces as a normal exception
+    they already handle, instead of an unbounded hang they cannot."""
+    return util.run(asyncio.wait_for(coro, timeout))
 
 
 def _ensure_event_loop() -> None:
@@ -196,7 +226,7 @@ class IBKRBroker(BrokerAccount):
                     Forex(_FOREX_CLOCK_PAIR) if self._asset_class == "forex"
                     else Stock(_CLOCK_SYMBOL, "SMART", "USD")
                 )
-                details = ib.reqContractDetails(probe)
+                details = _await(ib.reqContractDetailsAsync(probe))
                 if details:
                     cd = details[0]
                     parsed = _parse_ib_hours(cd.liquidHours, cd.timeZoneId)
@@ -208,7 +238,7 @@ class IBKRBroker(BrokerAccount):
 
     def get_open_order_tickers(self) -> set[str]:
         with self._connect(readonly=True) as ib:
-            trades = ib.reqAllOpenOrders()
+            trades = _await(ib.reqAllOpenOrdersAsync())
             active = {"PendingSubmit", "PreSubmitted", "Submitted", "ApiPending", "PendingCancel"}
             out = set()
             for t in trades:

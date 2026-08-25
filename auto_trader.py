@@ -63,18 +63,20 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timedelta, timezone
+import traceback
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
 from backtester import account_risk, accounts as accounts_module, daily_pnl_guard
-from backtester import current_signals, events, heartbeat, live_trades, notifications, position_attribution, roster, volatility
+from backtester import current_signals, events, heartbeat, live_trades, logging_setup, notifications, position_attribution, roster, source_stamp, version, volatility
 from backtester.auto_trader_state import (
     AutoTraderStatus, load_control, load_control_checked, load_status, save_status,
 )
 from backtester.brokers.base import BrokerAccount, OrderSide
+from backtester.brokers.ig import IGBroker
 from backtester.data import PolygonClient, PolygonError
 from backtester.engine import ENGINE_VERSION
 from backtester.execution import (
@@ -87,6 +89,7 @@ from backtester.execution import (
 from backtester.execution_log import log_results
 from backtester.conviction import compute_conviction, compute_levels
 from backtester.oanda_data import OandaDataClient, OandaError
+from backtester.risk_presets import ticker_sizing_cap
 from backtester.scan_db import record_scan
 from backtester.scanner import run_scan
 from backtester.strategies import STRATEGY_REGISTRY, build_strategy
@@ -162,7 +165,7 @@ def _get_regime(daily_client: PolygonClient, ticker: str, target_vol_ann: float)
     return info
 
 
-def _resolve_targets(control) -> list[tuple[str, str, dict, bool]]:
+def _resolve_targets(control, held_tickers: set[str] | None = None) -> list[tuple[str, str, dict, bool]]:
     """Returns (ticker, strategy_name, params, no_new_entries) tuples to trade
     this cycle. Manual mode (primary): one entry per control.tickers, never
     blocked from new entries, params from control.manual_strategy_params
@@ -189,6 +192,12 @@ def _resolve_targets(control) -> list[tuple[str, str, dict, bool]]:
     else:
         state = roster.load_roster()
         state = roster.apply_demotion_checks(state, live_trades.recent_performance, state.config)
+        # Retire cap-demoted entries whose position has since closed, so
+        # exit-only entries don't accumulate forever (see release_flat_paused).
+        state, retired = roster.release_flat_paused(state, held_tickers or set())
+        for label in retired:
+            ticker, _, strategy_name = label.partition("/")
+            roster.append_event(ticker, strategy_name, "retired", "position closed; leaving roster")
         roster.save_roster(state)
 
         primary = [
@@ -212,17 +221,61 @@ def _resolve_targets(control) -> list[tuple[str, str, dict, bool]]:
 # so the cutoff means the same real-world time year-round.
 _ROSTER_CHECK_CUTOFF_HOUR = 17
 
+# The only window in which an INDEX ticker is worth spending IG's scarce
+# historical-price allowance on. See ig.py's get_live_bars docstring for the
+# hard numbers: 10,000 points per WEEK, which an unconditional 120s poll would
+# burn through in a single morning (~11,700/day). Opening Spike Fade - the
+# only index strategy - can only ever act between the session open and the
+# end of its reversal window (opening_minutes=5 then reversal_window_minutes=
+# 20, so ~25 minutes), because it enters on exactly the first bar after the
+# opening window and exits on reversion or the time-stop. Outside this window
+# it structurally cannot open or close anything, so live data buys nothing
+# there and the Polygon fallback is harmless.
+#
+# -2 covers a cycle landing just before the bell; +35 leaves a margin past the
+# 25-minute worst case for a late/slow cycle. ~18 cycles x ~45 points is
+# ~810/day, ~4,050/week worst case - comfortably inside the allowance.
+_INDEX_LIVE_WINDOW_START_MIN = -2
+_INDEX_LIVE_WINDOW_END_MIN = 35
+_NY_TZ = ZoneInfo("America/New_York")
+_US_OPEN_MINUTES = 9 * 60 + 30  # 09:30 ET
+
+
+def _index_bars_window_open(now_utc: datetime | None = None) -> bool:
+    """True only inside the window where an index ticker's live IG bars are
+    actually actionable - see _INDEX_LIVE_WINDOW_* above for why this gate
+    exists at all (IG's weekly allowance) and why this particular window is
+    the right one.
+
+    Weekday check only: US market holidays are NOT modelled here. A holiday
+    costs at most one window's worth of allowance against a closed market
+    (IG simply returns the previous session's tail), which is a far cheaper
+    failure than wiring a holiday calendar into the data path.
+    """
+    now_ny = (now_utc or datetime.now(timezone.utc)).astimezone(_NY_TZ)
+    if now_ny.weekday() >= 5:
+        return False
+    minutes_now = now_ny.hour * 60 + now_ny.minute
+    return (
+        _US_OPEN_MINUTES + _INDEX_LIVE_WINDOW_START_MIN
+        <= minutes_now
+        <= _US_OPEN_MINUTES + _INDEX_LIVE_WINDOW_END_MIN
+    )
+
 
 def _maybe_check_roster_gap(status: AutoTraderStatus, control) -> None:
     """Once per calendar day, after market close: if the adaptive roster has
-    a gap (something paused, or fewer active entries than roster_size), run a
-    REAL fresh scan and compute what evaluate_roster would recommend — see
-    roster.compute_recommendation. This is the one place in this file that
-    deliberately runs an expensive scan; it's safe here specifically because
-    it only ever fires after hours, never competing with intraday trading
-    (evaluate_roster's own docstring says never to call it from inside the
-    live poll loop during the day — this respects that by construction, not
-    by working around it).
+    a gap (something paused, or fewer active entries than roster_size) OR a
+    full review_cadence_days has elapsed since the last scan, run a REAL
+    fresh scan and compute what evaluate_roster would recommend — see
+    roster.compute_recommendation. The cadence leg catches a decaying edge
+    via a fresh re-rank before live performance forces a demotion, not just
+    reacting after a gap already opened. This is the one place in this file
+    that deliberately runs an expensive scan; it's safe here specifically
+    because it only ever fires after hours, never competing with intraday
+    trading (evaluate_roster's own docstring says never to call it from
+    inside the live poll loop during the day — this respects that by
+    construction, not by working around it).
 
     NEVER applies anything. A real recommendation is saved via
     roster.save_pending() and pushed via one notification; the actual roster
@@ -249,8 +302,18 @@ def _maybe_check_roster_gap(status: AutoTraderStatus, control) -> None:
         state = roster.load_roster()
         active_count = sum(1 for e in state.entries if e.status == "active")
         has_gap = active_count < state.config.roster_size or any(e.status == "paused" for e in state.entries)
-        if not has_gap:
+
+        cadence_due = True
+        if status.last_roster_scan_date is not None:
+            days_since_scan = (
+                et_now.date() - date.fromisoformat(status.last_roster_scan_date)
+            ).days
+            cadence_due = days_since_scan >= state.config.review_cadence_days
+
+        if not has_gap and not cadence_due:
             return
+
+        status.last_roster_scan_date = today
 
         cfg = state.config
         tickers = sorted({
@@ -319,8 +382,16 @@ def _pick_live_data_source(
     CLAUDE_NOTES.txt for why: IG's own historical-price endpoint has a real
     weekly allowance too scarce for a 120s polling loop, one test pull
     exhausted it), then the first target account that both (a) can trade
-    this ticker's asset class and (b) exposes get_live_bars — currently only
-    AlpacaBroker (equities). Not account_asset_class-eligibility related
+    this ticker's asset class and (b) exposes get_live_bars — AlpacaBroker
+    (equities), CoinbaseBroker/KrakenBroker (crypto, added 2026-08-20 once
+    Polygon's crypto data was found running up to ~21h stale in practice —
+    Polygon is deliberately being pulled out of the live path project-wide
+    from this point on, kept only for backtesting; CBAPI naturally wins over
+    KRKAPI here since it's listed first in every crypto extra_targets entry
+    AND is the only one of the two whose get_live_bars can page back far
+    enough to cover a real strategy's lookback — see kraken.py's own
+    docstring for the confirmed ~12h ceiling on Kraken's OHLC endpoint).
+    Not account_asset_class-eligibility related
     (drawdown-blocked / market-closed accounts are still fine to READ data
     from, just not to trade on) — deliberately ignores blocked_account_ids/
     market_closed_account_ids, unlike the order-routing loop below.
@@ -335,6 +406,23 @@ def _pick_live_data_source(
         oanda = _get_oanda_client()
         if oanda is not None:
             return oanda
+
+    # Index tickers (I:NDX): Alpaca rejects them outright ("invalid symbol:
+    # I:NDX", seen live 2026-08-25) so the generic equity loop below would
+    # pick Alpaca, fail, and fall through to Polygon - the last live target
+    # still on Polygon after the 2026-08-20 migration. IG can serve them, but
+    # only inside _index_bars_window_open()'s gate: its historical-price
+    # allowance is far too scarce to poll all session (see that function and
+    # ig.py's get_live_bars for the numbers). Outside the window we return
+    # None deliberately - Polygon is a harmless fallback precisely when the
+    # strategy structurally cannot act.
+    if ticker.startswith("I:"):
+        if not _index_bars_window_open():
+            return None
+        for broker_account in broker_accounts:
+            if isinstance(broker_account, IGBroker):
+                return broker_account
+        return None
 
     for broker_account in broker_accounts:
         if ticker_asset_class not in account_asset_classes.get(broker_account.account_id, frozenset()):
@@ -370,11 +458,18 @@ def _trade_target(
     from_date = (datetime.now(timezone.utc).date() - timedelta(days=LOOKBACK_DAYS)).isoformat()
     to_date = _today_str()
 
-    # Prefer live data (Alpaca for equities, OANDA for forex once configured
-    # — see _pick_live_data_source) over Polygon: this account's Polygon plan
-    # has NO same-day intraday data at all (confirmed 2026-08-05, see
-    # CLAUDE_NOTES.txt), so a minute-bar strategy fed Polygon-only bars is
-    # really just re-evaluating yesterday's frozen close all day. Falls
+    # Prefer live data (Alpaca for equities, OANDA for forex, Coinbase/Kraken
+    # for crypto — see _pick_live_data_source) over Polygon: this account's
+    # Polygon plan has NO same-day intraday data at all for equities
+    # (confirmed 2026-08-05), and its crypto data was separately found
+    # running up to ~21h stale in practice (2026-08-20) despite no gap being
+    # expected there either — so a minute-bar strategy fed Polygon-only bars
+    # is really just re-evaluating a frozen, potentially very stale close all
+    # day. Polygon is deliberately being kept for BACKTESTING ONLY from here
+    # on, not as a live-signal source — every asset class now has a real
+    # live path and Polygon should only ever be reached as a last-resort
+    # fallback (e.g. mid-outage on every live source at once), not routine
+    # behavior. Falls
     # through to Polygon on any failure, empty result, or when no live
     # source is available for this ticker's asset class.
     bars = None
@@ -455,28 +550,25 @@ def _trade_target(
     if signal.value == "hold":
         return
 
-    # Proactive step-out: never open NEW positions on a known risk-event day
-    # (FOMC). Complements the reactive GARCH storm block below — this one fires
-    # BEFORE the event moves the market. Sells fall through untouched.
-    if control.block_event_days and signal.value == "buy":
+    # Proactive step-out: never open a NEW position (either direction — see
+    # account_position_modes) on a known risk-event day (FOMC). Complements
+    # the reactive GARCH storm block below — this one fires BEFORE the event
+    # moves the market. Applied per-account below, only when that account is
+    # actually OPENING (a close always falls through untouched, regardless
+    # of direction) — computed once here since it's the same for every
+    # account this cycle.
+    event_block_reason: str | None = None
+    if control.block_event_days:
         today_date = datetime.now(timezone.utc).date()
-        reason = events.event_reason(today_date, ticker)
-        if reason is not None:
-            status.last_signal = f"{ticker}/{strategy_name}: BUY blocked — {reason} (event step-out)"
-            save_status(status)
-            return
+        event_block_reason = events.event_reason(today_date, ticker)
 
     size_multiplier = 1.0
+    storm_blocked = False
+    regime_info = None
     if control.vol_target_enabled:
         regime_info = _get_regime(daily_client, ticker, control.vol_target_ann)
         if regime_info is not None:
-            if signal.value == "buy" and regime_info.regime == "storm":
-                status.last_signal = (
-                    f"{ticker}/{strategy_name}: BUY blocked — GARCH storm regime "
-                    f"(vol_pctile={regime_info.vol_pctile:.0f})"
-                )
-                save_status(status)
-                return
+            storm_blocked = regime_info.regime == "storm"
             size_multiplier = regime_info.size_multiplier
 
     status.last_signal = f"{ticker}/{strategy_name}: {signal.value.upper()} @ {current.close}"
@@ -484,10 +576,12 @@ def _trade_target(
 
     order_side = OrderSide.BUY if signal.value == "buy" else OrderSide.SELL
     sizing_mode = SizingMode(control.sizing_mode)
-    # Score the entry signal's conviction once (#25). Only meaningful for a BUY
-    # (a new entry); carried through attribution to live_trades on the eventual
-    # close. Logged only — it does NOT influence sizing/gating anywhere.
-    entry_conviction = compute_conviction(strategy, bars, current) if order_side is OrderSide.BUY else None
+    # Score the entry signal's conviction once (#25) — pure math over bars
+    # already fetched, safe to compute regardless of direction. Only
+    # meaningful for an actual entry (open long OR open short — see
+    # is_opening below); carried through attribution to live_trades on the
+    # eventual close. Logged only — it does NOT influence sizing/gating.
+    entry_conviction = compute_conviction(strategy, bars, current)
 
     account_orders: list[AccountOrder] = []
     # parallel to account_orders — pre-submit position snapshot per account, for
@@ -513,12 +607,14 @@ def _trade_target(
         held = {p.ticker for p in positions if p.qty > 0}
         position_attribution.reconcile(broker_account.account_id, held)
         existing_position = next((p for p in positions if p.ticker == ticker and p.qty > 0), None)
-        has_position = existing_position is not None
+        has_long = existing_position is not None and existing_position.side == "long"
+        has_short = existing_position is not None and existing_position.side == "short"
 
-        # A submitted-but-unfilled order isn't a position yet, so the has_position
-        # check alone can't stop us re-ordering the same ticker before the first
-        # fill. Skip any ticker that already has an open order on this account —
-        # covers slow fills during hours, not just the overnight case above.
+        # A submitted-but-unfilled order isn't a position yet, so the has_long/
+        # has_short check alone can't stop us re-ordering the same ticker before
+        # the first fill. Skip any ticker that already has an open order on this
+        # account — covers slow fills during hours, not just the overnight case
+        # above.
         try:
             if ticker in broker_account.get_open_order_tickers():
                 continue
@@ -526,13 +622,50 @@ def _trade_target(
             status.last_error = f"{broker_account.nickname}: open-order check failed: {e}"
             continue
 
+        # Same PositionMode concept engine.py already backtests (LONG_ONLY/
+        # SHORT_ONLY/LONG_SHORT) — an account not in account_position_modes
+        # defaults to long_only, reproducing every existing account's exact
+        # prior behavior. Only meaningful for a broker whose submit_market_order
+        # actually supports opening a short (OANDA always did; ig.py now does
+        # too) — see account_position_modes' own docstring.
+        position_mode = control.account_position_modes.get(broker_account.account_id, "long_only")
+        can_open_long = position_mode in ("long_only", "long_short")
+        can_open_short = position_mode in ("short_only", "long_short")
+
+        # Four-way decision, mirroring engine.py's backtest logic exactly:
+        # a BUY either opens a long (flat) or closes/covers a short (held);
+        # a SELL either opens a short (flat) or closes a long (held). Already
+        # holding the SAME direction the signal would open is a no-op (covers
+        # the plain long-only case exactly as before: a BUY signal while
+        # already long just does nothing, same as a stray SELL while flat).
+        is_opening = False
         if order_side is OrderSide.BUY:
-            if has_position or no_new_entries or broker_account.account_id in blocked_account_ids:
+            if has_long:
                 continue
-        elif order_side is OrderSide.SELL and not has_position:
+            if not has_short:
+                if not can_open_long or no_new_entries or broker_account.account_id in blocked_account_ids:
+                    continue
+                is_opening = True
+        else:  # OrderSide.SELL
+            if has_short:
+                continue
+            if not has_long:
+                if not can_open_short or no_new_entries or broker_account.account_id in blocked_account_ids:
+                    continue
+                is_opening = True
+
+        # Event-day/storm blocks only ever stop a NEW entry (either
+        # direction) — a close always falls through untouched, matching the
+        # pre-shorting "sells fall through untouched" behavior exactly.
+        if is_opening and (event_block_reason is not None or storm_blocked):
+            reason = event_block_reason or (
+                f"GARCH storm regime (vol_pctile={regime_info.vol_pctile:.0f})" if regime_info else "storm regime"
+            )
+            status.last_signal = f"{ticker}/{strategy_name}: {order_side.value.upper()} blocked — {reason}"
+            save_status(status)
             continue
 
-        if order_side is OrderSide.SELL:
+        if not is_opening:
             # Close what's actually held, not a fresh sizing calculation —
             # sizing_value/size_multiplier are an ENTRY (new-position) concept.
             # Recomputing "how many shares would today's sizing buy at today's
@@ -574,14 +707,47 @@ def _trade_target(
             # Still scaled by size_multiplier either way, same as the global
             # path, so a GARCH storm-regime cut applies under the override too.
             effective_sizing_value *= size_multiplier
+            # Per-ticker liquidity ceiling (2026-08-16) - layered on top of
+            # whichever sizing got us here (global, override, or slide), a
+            # pure safety MIN, never a way to size UP. Only touches
+            # PCT_EQUITY, since the cap itself was measured in %-of-equity
+            # terms and has no meaning against a fixed-dollar/fixed-share
+            # target. Ticker not in the sweep -> None -> no cap, same as
+            # today (uncapped is the status quo, not a new relaxation).
+            if effective_sizing_mode == SizingMode.PCT_EQUITY:
+                cap = ticker_sizing_cap(ticker, control.risk_preset)
+                if cap is not None:
+                    effective_sizing_value = min(effective_sizing_value, cap)
             try:
                 qty = compute_qty_for_account(broker_account, current.close, effective_sizing_mode, effective_sizing_value, ticker)
             except Exception as e:  # noqa: BLE001
                 status.last_error = f"{broker_account.nickname}: sizing failed: {e}"
                 continue
 
-        account_orders.append(AccountOrder(account=broker_account, qty=qty))
-        order_contexts.append({"account": broker_account, "existing_position": existing_position})
+        # Protective bracket prices, attached to the OPENING order only — a
+        # closing order is already the exit, and handing a broker a stop on it
+        # would leave a resting order against a position that no longer exists.
+        take_profit_price = stop_loss_price = None
+        if is_opening:
+            take_profit_price, stop_loss_price = _bracket_prices(
+                control, current.close, order_side
+            )
+
+        account_orders.append(AccountOrder(
+            account=broker_account, qty=qty,
+            take_profit_price=take_profit_price, stop_loss_price=stop_loss_price,
+        ))
+        # Sizing fields only meaningful when is_opening - captured HERE (per
+        # account, inside this loop) because effective_sizing_mode/value are
+        # loop-local and would silently hold the LAST account's numbers by
+        # the time the results are processed below, otherwise misattributing
+        # one account's sizing onto a different account's position.
+        ctx = {"account": broker_account, "existing_position": existing_position, "is_opening": is_opening}
+        if is_opening:
+            ctx["sizing_mode"] = effective_sizing_mode.value
+            ctx["sizing_value"] = effective_sizing_value
+            ctx["dollars_committed"] = qty * current.close
+        order_contexts.append(ctx)
 
     if not account_orders:
         return
@@ -598,9 +764,11 @@ def _trade_target(
             )
             continue
         broker_account = ctx["account"]
-        if order_side is OrderSide.BUY:
+        if ctx["is_opening"]:
             position_attribution.record_open(
-                broker_account.account_id, ticker, strategy_name, conviction=entry_conviction
+                broker_account.account_id, ticker, strategy_name, conviction=entry_conviction,
+                sizing_mode=ctx["sizing_mode"], sizing_value=ctx["sizing_value"],
+                dollars_committed=ctx["dollars_committed"],
             )
             notifications.notify_trade_open(
                 ticker, strategy_name, result.filled_qty or 0.0,
@@ -609,10 +777,30 @@ def _trade_target(
         else:
             attribution = position_attribution.pop_open(broker_account.account_id, ticker)
             if attribution is None:
-                continue  # position wasn't opened through this flow — no track record to close out
+                # No attribution — the position predates this flow, was opened
+                # manually, or its record was pruned. This used to `continue`,
+                # silently DISCARDING a real closed round trip: found
+                # 2026-08-14 reconciling AlpacaLive, where an orphaned DDOG
+                # close (-$0.07 real money) never reached live_trades and the
+                # app's realised P&L was quietly wrong as a result.
+                # Record it anyway under UNATTRIBUTED_STRATEGY: the P&L is
+                # real and belongs in the books. The placeholder name keeps it
+                # OUT of any real strategy's recent_performance() stats, so a
+                # trade whose strategy we can't prove can't skew a demotion
+                # decision either way.
+                attribution = {
+                    "strategy_name": live_trades.UNATTRIBUTED_STRATEGY,
+                    "opened_at": "",
+                    "conviction": None,
+                }
             existing_position = ctx["existing_position"]
             exit_price = result.filled_avg_price or current.close
             qty = result.filled_qty or existing_position.qty
+            # Sign qty by the CLOSED position's own direction, matching
+            # engine.py's Trade convention (shares negative for a short) —
+            # a short's economics are the OPPOSITE of a long's for the same
+            # (exit - entry) sign: profit when price FALLS, not rises.
+            signed_qty = qty if existing_position.side == "long" else -qty
             live_trades.record_realized_trade(
                 account_id=broker_account.account_id,
                 ticker=ticker,
@@ -622,12 +810,104 @@ def _trade_target(
                 entry_price=existing_position.avg_entry_price,
                 exit_time=datetime.now(timezone.utc).isoformat(),
                 exit_price=exit_price,
-                qty=qty,
+                qty=signed_qty,
                 conviction=attribution.get("conviction"),
             )
-            pnl = (exit_price - existing_position.avg_entry_price) * qty
+            pnl = (exit_price - existing_position.avg_entry_price) * signed_qty
             notifications.notify_trade_close(
                 ticker, attribution["strategy_name"], qty, pnl,
+                broker_account.nickname, broker_account.is_paper,
+            )
+
+
+def _bracket_prices(control, entry_price: float, order_side: OrderSide) -> tuple[float | None, float | None]:
+    """(take_profit_price, stop_loss_price) for an OPENING order, or (None, None).
+
+    Mirrors engine.BacktestEngine's protective exits so the live account is
+    running the thing that was actually backtested — for a long the stop sits
+    BELOW entry and the target above; for a short (SELL opens on a long_short
+    account) both flip. Getting that flip wrong would submit a "stop" that is
+    really a target, which most brokers accept without complaint.
+    """
+    if entry_price <= 0:
+        return None, None
+    is_long = order_side is OrderSide.BUY
+    take_profit_price = stop_loss_price = None
+    if control.take_profit_pct:
+        take_profit_price = entry_price * (
+            (1 + control.take_profit_pct) if is_long else (1 - control.take_profit_pct)
+        )
+    if control.stop_loss_pct:
+        stop_loss_price = entry_price * (
+            (1 - control.stop_loss_pct) if is_long else (1 + control.stop_loss_pct)
+        )
+    # Brokers reject sub-penny prices on US equities; round to the tick they
+    # actually accept rather than having the whole opening order bounce.
+    if take_profit_price is not None:
+        take_profit_price = round(take_profit_price, 2)
+    if stop_loss_price is not None:
+        stop_loss_price = round(stop_loss_price, 2)
+    return take_profit_price, stop_loss_price
+
+
+def _flatten_before_close(control, broker_accounts, closing_soon_ids: set[str], status) -> None:
+    """Close every open position on accounts whose session ends shortly.
+
+    OFF by default and deliberately so: it lost money in all three backtest
+    windows (see AutoTraderControl.flatten_before_close_minutes). It exists
+    because "don't hold overnight" is a legitimate risk preference that should
+    be available as a control, not because the evidence recommends it.
+
+    Exits only — this can never open a position, so a bug here can only ever
+    reduce exposure.
+    """
+    for broker_account in broker_accounts:
+        if broker_account.account_id not in closing_soon_ids:
+            continue
+        try:
+            positions = [p for p in broker_account.get_positions() if p.qty]
+        except Exception as e:  # noqa: BLE001
+            status.last_error = f"{broker_account.nickname}: flatten position read failed: {e}"
+            continue
+
+        for position in positions:
+            side = OrderSide.SELL if position.side == "long" else OrderSide.BUY
+            try:
+                result = broker_account.submit_market_order(position.ticker, side, abs(position.qty))
+            except Exception as e:  # noqa: BLE001
+                status.last_error = f"{broker_account.nickname}: flatten {position.ticker} failed: {e}"
+                continue
+            if not result.success:
+                notifications.notify_order_rejected(
+                    position.ticker, side.value, broker_account.nickname,
+                    result.error or "unknown error",
+                )
+                continue
+
+            attribution = position_attribution.pop_open(broker_account.account_id, position.ticker)
+            if attribution is None:
+                attribution = {
+                    "strategy_name": live_trades.UNATTRIBUTED_STRATEGY,
+                    "opened_at": "", "conviction": None,
+                }
+            exit_price = result.filled_avg_price or position.current_price or position.avg_entry_price
+            qty = result.filled_qty or abs(position.qty)
+            signed_qty = qty if position.side == "long" else -qty
+            live_trades.record_realized_trade(
+                account_id=broker_account.account_id,
+                ticker=position.ticker,
+                strategy_name=attribution["strategy_name"],
+                is_paper=broker_account.is_paper,
+                entry_time=attribution["opened_at"],
+                entry_price=position.avg_entry_price,
+                exit_time=datetime.now(timezone.utc).isoformat(),
+                exit_price=exit_price,
+                qty=signed_qty,
+                conviction=attribution.get("conviction"),
+            )
+            notifications.notify_trade_close(
+                position.ticker, attribution["strategy_name"], qty,
+                (exit_price - position.avg_entry_price) * signed_qty,
                 broker_account.nickname, broker_account.is_paper,
             )
 
@@ -665,10 +945,23 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
     # is safe (only ever fires after market close).
     _maybe_check_roster_gap(status, control)
 
-    if status.trades_today >= control.max_trades_per_day:
-        status.last_signal = f"max trades/day ({control.max_trades_per_day}) reached — not trading"
+    # Daily trade cap. Deliberately NOT an early return any more: signal
+    # publishing (current_signals.record_signal, which the mobile app and
+    # dashboard both read) happens inside _trade_target below, so bailing out
+    # here silently blacked out the app's live data for the rest of the day
+    # once the cap was hit — found live 2026-08-12, the app fell back to
+    # direct-Polygon fetches showing the PREVIOUS day's prices. The cap is a
+    # limit on opening new risk, not a reason to stop observing the market.
+    # Reuses the existing no_new_entries flag (same semantics a paused roster
+    # entry already uses) so exits still work while the cap is in force —
+    # being unable to CLOSE a position because of a counter is its own risk.
+    cap_reached = status.trades_today >= control.max_trades_per_day
+    if cap_reached:
+        status.last_signal = (
+            f"max trades/day ({control.max_trades_per_day}) reached — new entries blocked "
+            "(exits and signal updates continue)"
+        )
         save_status(status)
-        return status
 
     if not control.account_ids or (
         not control.use_roster and (not control.tickers or not control.strategy_name)
@@ -742,6 +1035,7 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
     # daily cap. Skip closed accounts entirely; a broker with no clock (24/7 crypto)
     # returns None and is always considered open.
     market_closed_account_ids: set[str] = set()
+    closing_soon_account_ids: set[str] = set()
     next_open = None
     for broker_account in broker_accounts:
         try:
@@ -752,6 +1046,17 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
         if clock is not None and not clock["is_open"]:
             market_closed_account_ids.add(broker_account.account_id)
             next_open = clock.get("next_open")
+        elif clock is not None and control.flatten_before_close_minutes:
+            # Only meaningful for a broker that reports next_close; one that
+            # doesn't simply never flattens rather than guessing a close time.
+            next_close = clock.get("next_close")
+            if next_close is not None:
+                minutes_left = (next_close - datetime.now(timezone.utc)).total_seconds() / 60
+                if 0 < minutes_left <= control.flatten_before_close_minutes:
+                    closing_soon_account_ids.add(broker_account.account_id)
+
+    if closing_soon_account_ids:
+        _flatten_before_close(control, broker_accounts, closing_soon_account_ids, status)
 
     if len(market_closed_account_ids) == len(broker_accounts):
         when = f" (next open {next_open:%A %H:%M} ET)" if next_open is not None else ""
@@ -800,7 +1105,20 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
                 if not was_blocked:
                     notifications.notify_giveback_blocked(broker_account.nickname, reason or "")
 
-    targets = _resolve_targets(control)
+    # Which tickers are actually held anywhere right now. Used only to retire
+    # cap-demoted roster entries once they're genuinely flat (see
+    # roster.release_flat_paused) — a combo that still holds something must
+    # stay tradeable so it can be CLOSED. Best-effort: an unreachable broker
+    # yields no tickers, which just defers the retirement a cycle rather than
+    # wrongly declaring a position gone (the safe direction to fail).
+    held_tickers: set[str] = set()
+    for broker_account in broker_accounts:
+        try:
+            held_tickers.update(p.ticker for p in broker_account.get_positions() if p.qty)
+        except Exception:  # noqa: BLE001 — never let a position read stop the cycle
+            continue
+
+    targets = _resolve_targets(control, held_tickers)
     if not targets:
         status.last_signal = "roster empty — nothing to trade" if control.use_roster else status.last_signal
         save_status(status)
@@ -812,11 +1130,15 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
             status.last_signal = "stopped mid-cycle (killed or disabled)"
             save_status(status)
             return status
-        if status.trades_today >= control.max_trades_per_day:
-            break
+        # Re-checked per target (trades_today grows as this loop runs), and
+        # folded into no_new_entries rather than breaking out — see the
+        # cap_reached note above for why the loop must still run: every
+        # remaining target needs its signal published even once the cap is
+        # spent, otherwise the app goes dark for the rest of the day.
+        cap_reached = status.trades_today >= control.max_trades_per_day
 
         _trade_target(
-            ticker, strategy_name, params, no_new_entries,
+            ticker, strategy_name, params, no_new_entries or cap_reached,
             broker_accounts, client, daily_client, control, status,
             blocked_account_ids, market_closed_account_ids, account_asset_classes,
         )
@@ -880,6 +1202,11 @@ def _another_instance_alive() -> bool:
 
 
 def main() -> None:
+    # As early as possible, before anything else could raise - see
+    # logging_setup.py's own doc comment for why (a pythonw.exe process has
+    # nowhere for print()/tracebacks to go otherwise, which is exactly how
+    # the 2026-08-24 outage left zero trace of what killed it).
+    logging_setup.configure("auto_trader")
     # Load .env by ABSOLUTE path (next to this file), not via cwd — so the bot
     # works identically whether launched from the dashboard, a terminal, or the
     # login auto-start task (which runs from an arbitrary working directory).
@@ -888,11 +1215,46 @@ def main() -> None:
         print("Another auto-trader instance appears to be running (fresh heartbeat) — exiting to avoid double-trading.")
         return
     status = load_status()
-    print(f"Auto-trader starting (pid={os.getpid()}).")
+    print(f"Auto-trader starting (pid={os.getpid()}, version={version.VERSION}).")
+    # Records which source revision THIS process actually loaded, so the
+    # dashboard can flag it as stale if the code on disk changes later
+    # without a restart — see source_stamp.py for the two outages that
+    # motivated it. Never raises.
+    source_stamp.record_start("auto_trader")
+    # Cycles since the last exception, purely for the backoff below - a
+    # process that's erroring every single cycle should slow down rather than
+    # hammer a broker/API that's clearly having a bad time, but one that's
+    # mostly healthy shouldn't be punished by a single blip.
+    consecutive_errors = 0
     try:
         while True:
-            control, readable = load_control_checked()
-            status = run_cycle(status)
+            try:
+                control, readable = load_control_checked()
+                status = run_cycle(status)
+                consecutive_errors = 0
+            except Exception:  # noqa: BLE001
+                # THE fix for the 2026-08-24 outage: this used to be
+                # unguarded, so any exception here (a bad strategy param, a
+                # broker API hiccup, anything) propagated straight out of
+                # main() and killed the whole process - silently, since
+                # pythonw.exe has no console for the traceback to appear on.
+                # Logging it and continuing turns "the bot is dead until
+                # someone notices" into "one cycle failed, logged, retried" -
+                # the same "stay alive, keep the heartbeat" philosophy
+                # already applied to an unreadable control file below.
+                consecutive_errors += 1
+                print(f"Cycle failed (consecutive={consecutive_errors}):")
+                traceback.print_exc()
+                status.last_heartbeat = datetime.now(timezone.utc).isoformat()
+                try:
+                    save_status(status)
+                except Exception:  # noqa: BLE001
+                    pass  # the heartbeat write itself failing must never stop the retry
+                # Capped exponential-ish backoff: 5s, 10s, 20s, ... up to 5min,
+                # so a persistent failure (e.g. a broker outage) doesn't spin
+                # hot, but a one-off blip barely delays the next attempt.
+                time.sleep(min(300, 5 * (2 ** min(consecutive_errors - 1, 6))))
+                continue
             # Only a GENUINE kill switch stops the process. An unreadable control
             # file also fails closed (run_cycle won't trade), but exiting on it
             # would mean a transient read problem silently kills the bot — the
