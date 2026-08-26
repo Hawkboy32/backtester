@@ -912,6 +912,42 @@ def _flatten_before_close(control, broker_accounts, closing_soon_ids: set[str], 
             )
 
 
+# Floor between mid-cycle heartbeat writes, so refreshing liveness across a
+# 20+ ticker loop costs a handful of small writes rather than one per target.
+_HEARTBEAT_MIN_WRITE_INTERVAL = 30.0
+_last_heartbeat_write = 0.0
+
+
+def touch_heartbeat(status: AutoTraderStatus) -> None:
+    """Refresh the on-disk heartbeat MID-cycle, throttled.
+
+    WHY (2026-08-26): last_heartbeat was stamped at the top of run_cycle but
+    only written to disk by save_status() at the very END, so the file always
+    carried a timestamp one whole cycle old. A healthy cycle takes ~60s and
+    that was fine — but when IB Gateway went down overnight, every IBKR call
+    burned its 20s timeout, cycles stretched past the watchdog's 360s
+    staleness threshold, and a merely SLOW trader looked like a DEAD one. The
+    watchdog dutifully relaunched it roughly every 11 minutes for two hours.
+    (No duplicate ever ran - auto_trader's own singleton guard held - but the
+    churn was pointless.)
+
+    A heartbeat should measure LIVENESS, not cycle completion. Raising the
+    watchdog's threshold instead would just blind it for longer; writing more
+    often is the honest fix. Never raises: a failed heartbeat write must not
+    be able to stop a trade.
+    """
+    global _last_heartbeat_write
+    now = time.monotonic()
+    if now - _last_heartbeat_write < _HEARTBEAT_MIN_WRITE_INTERVAL:
+        return
+    status.last_heartbeat = datetime.now(timezone.utc).isoformat()
+    try:
+        save_status(status)
+        _last_heartbeat_write = now
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
     control = load_control()
 
@@ -1038,6 +1074,7 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
     closing_soon_account_ids: set[str] = set()
     next_open = None
     for broker_account in broker_accounts:
+        touch_heartbeat(status)  # a wedged broker makes this loop the slow one
         try:
             clock = broker_account.get_market_clock()
         except Exception as e:  # noqa: BLE001
@@ -1113,6 +1150,7 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
     # wrongly declaring a position gone (the safe direction to fail).
     held_tickers: set[str] = set()
     for broker_account in broker_accounts:
+        touch_heartbeat(status)  # position reads hit every broker; same reasoning
         try:
             held_tickers.update(p.ticker for p in broker_account.get_positions() if p.qty)
         except Exception:  # noqa: BLE001 — never let a position read stop the cycle
@@ -1125,6 +1163,10 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
         return status
 
     for ticker, strategy_name, params, no_new_entries in targets:
+        # Prove liveness as the loop runs, not just when it finishes - see
+        # touch_heartbeat. This is the loop that stretches when a broker is
+        # unreachable, so it is exactly where the proof is needed.
+        touch_heartbeat(status)
         control = load_control()  # re-check every target, not just once per cycle
         if control.killed or not control.enabled:
             status.last_signal = "stopped mid-cycle (killed or disabled)"

@@ -38,6 +38,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from backtester import accounts as accounts_module  # noqa: E402
+from backtester import logging_setup  # noqa: E402
 from backtester import notifications  # noqa: E402
 from backtester.brokers.ibkr import check_gateway_reachable  # noqa: E402
 
@@ -62,6 +63,12 @@ def _ibkr_targets() -> list[tuple[str, str, int]]:
 
 
 def main() -> None:
+    # Launched via pythonw.exe, so every print() below went nowhere until
+    # 2026-08-26. Found during a preflight check after IB Gateway sat down
+    # for ~5 hours overnight (its 03:00 IBC auto-restart didn't complete):
+    # this was the one process that could still fail invisibly, and its log
+    # was exactly what would have said whether it noticed. See logging_setup.
+    logging_setup.configure("ibgateway_watchdog")
     targets = _ibkr_targets()
     if not targets:
         print("[ibgateway_watchdog] no linked live IBKR accounts found - nothing to watch, exiting", flush=True)
