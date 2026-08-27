@@ -87,6 +87,18 @@ def record_start(process_name: str) -> None:
 # How to recognise each long-running process from its command line. Shared
 # with restart_all.py so the two can never disagree about what's supposed to
 # be running.
+#
+# KNOWN LIMITATION (root-caused 2026-08-27): "dashboard" almost always shows
+# UNVERIFIED right after a restart, even a clean one, and this is expected -
+# not a bug in the check. app.py's own record_start("dashboard") call only
+# executes when Streamlit actually RUNS the script, which it defers until a
+# browser opens a session over websocket - the server process comes up and
+# matches PROCESS_MATCHERS immediately, but nothing calls record_start until
+# someone loads the page. Confirmed live: the stamped pid/timestamp on disk
+# was from the LAST time a browser had it open, a full day earlier, unmoved
+# across several restarts in between. Not worth "fixing" with a forced
+# websocket session just to satisfy this check - dashboard is read-only and
+# non-critical, and opening it in a browser resolves the flag naturally.
 PROCESS_MATCHERS = {
     "dashboard": "streamlit",
     "mobile_backend": "signal_api",

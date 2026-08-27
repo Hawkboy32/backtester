@@ -176,15 +176,27 @@ def _demotion_reason(stats, config: RosterConfig, grace_after_trades: int | None
 
     grace_after_trades: set on a combo just auto-released from a stale pause
     (see pause_release_days). While its trade count hasn't moved past that
-    mark, the LOSING-STREAK rule alone is skipped — otherwise the identical
-    frozen streak that caused the pause would re-trip on the very next check
-    and release would achieve nothing. Every other rule stays in force, and
-    the grace expires by itself the moment one new trade closes.
+    mark, EVERY demotion rule below is skipped, not just the losing-streak
+    one — otherwise the identical frozen numbers that caused the pause would
+    re-trip it on the very next check and release would achieve nothing.
+
+    2026-08-27 fix: this used to gate the losing-streak rule ALONE, leaving
+    the win-rate and cumulative-P&L-floor rules unconditional. Those are just
+    as frozen as the streak while no new trade has closed, so a combo paused
+    for either one was structurally unable to ever be released — confirmed
+    live: Q/VWAP Mean Reversion was manually released three times and
+    re-paused within seconds to minutes each time, always citing the exact
+    same cumulative-P&L figure, because nothing had traded in between to
+    change it and grace didn't cover that rule. The grace expires by itself
+    the moment one new trade closes, at which point every rule re-engages on
+    genuinely fresh data.
     """
     if stats.num_trades < config.min_live_trades:
         return None
     in_grace = grace_after_trades is not None and stats.num_trades <= grace_after_trades
-    if not in_grace and stats.current_losing_streak >= config.losing_streak_threshold:
+    if in_grace:
+        return None
+    if stats.current_losing_streak >= config.losing_streak_threshold:
         return f"{stats.current_losing_streak} consecutive live losses (threshold {config.losing_streak_threshold})"
     if stats.win_rate is not None and stats.win_rate < config.win_rate_floor:
         return f"live win rate {stats.win_rate:.0%} below floor {config.win_rate_floor:.0%}"
