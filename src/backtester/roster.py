@@ -303,6 +303,7 @@ def evaluate_roster(
     config: RosterConfig | None = None,
     score_fn: ScoreFn = ranking.rank_combos,
     dry_run: bool = False,
+    events_out: list[tuple[str, str, str, str]] | None = None,
 ) -> RosterState:
     """Expensive path: re-rank via score_fn (default ranking.rank_combos,
     reused unmodified) then walk the ranked list best-to-worst, promoting up
@@ -326,9 +327,28 @@ def evaluate_roster(
     "paused"/"demoted" events for a change nobody has actually approved yet.
     The returned RosterState is identical either way; only the audit-log side
     effect is suppressed.
+
+    events_out: when given a list, every (ticker, strategy_name, action,
+    reason) that WOULD be logged is appended to it, regardless of dry_run -
+    added 2026-08-28 after a real gap: compute_recommendation's dry_run
+    preview computed real state changes (promoted_at, status, etc.) that the
+    mobile app's /roster-recommendation "apply" action then persisted for
+    real via save_roster(), but the corresponding audit events were
+    discarded at preview-time and never regenerated at apply-time - a
+    combo's real promotion/pause silently left no trace in
+    roster_events.jsonl. Confirmed live: PSKY's real 2026-08-13T23:10:56
+    re-promotion (a live roster.json field) has no matching event anywhere
+    in the log. Passing events_out lets the caller capture what SHOULD be
+    logged during the dry-run preview and replay it for real once (and only
+    if) the recommendation is actually approved.
     """
     config = config or current_roster.config
-    _log_event = (lambda *a, **kw: None) if dry_run else append_event
+
+    def _log_event(ticker: str, strategy_name: str, action: str, reason: str) -> None:
+        if events_out is not None:
+            events_out.append((ticker, strategy_name, action, reason))
+        if not dry_run:
+            append_event(ticker, strategy_name, action, reason)
     params_lookup = {(r.ticker, r.strategy_name): r.params for r in scan_rows}
     existing_by_key = {(e.ticker, e.strategy_name): e for e in current_roster.entries}
 
@@ -496,6 +516,12 @@ class PendingRecommendation:
     num_scan_results: int
     summary: list[str]  # human-readable per-combo diff lines, e.g. "MPWR/VWAP Mean Reversion: paused -> active"
     proposed_state: RosterState
+    # The audit events evaluate_roster's dry-run preview WOULD have logged -
+    # replayed for real (via append_event) only if this recommendation is
+    # actually approved. See evaluate_roster's events_out docstring for why
+    # this exists: without it, an applied recommendation persisted real
+    # state changes with no corresponding roster_events.jsonl entry at all.
+    events: list[tuple[str, str, str, str]]
 
 
 def load_pending() -> PendingRecommendation | None:
@@ -512,6 +538,10 @@ def load_pending() -> PendingRecommendation | None:
             num_scan_results=data["num_scan_results"],
             summary=data["summary"],
             proposed_state=RosterState(entries=entries, config=config),
+            # .get() with a default: a recommendation file written before
+            # this field existed shouldn't fail to load - it just replays no
+            # events on apply, same (missing, not wrong) behavior as before.
+            events=[tuple(e) for e in data.get("events", [])],
         )
     except Exception:
         return None
@@ -528,6 +558,7 @@ def save_pending(rec: PendingRecommendation) -> None:
             "entries": [asdict(e) for e in rec.proposed_state.entries],
             "config": asdict(rec.proposed_state.config),
         },
+        "events": [list(e) for e in rec.events],
     }
     atomic_write_text(RECOMMENDATION_PATH, json.dumps(data, indent=2))
 
@@ -549,7 +580,8 @@ def compute_recommendation(
     None if the proposed state is identical to the current one — no point
     surfacing a no-op recommendation.
     """
-    proposed = evaluate_roster(scan_rows, live_perf_fn, current_roster, dry_run=True)
+    events: list[tuple[str, str, str, str]] = []
+    proposed = evaluate_roster(scan_rows, live_perf_fn, current_roster, dry_run=True, events_out=events)
 
     current_by_key = {(e.ticker, e.strategy_name): e.status for e in current_roster.entries}
     proposed_by_key = {(e.ticker, e.strategy_name): e.status for e in proposed.entries}
@@ -571,4 +603,5 @@ def compute_recommendation(
         num_scan_results=len(scan_rows),
         summary=summary,
         proposed_state=proposed,
+        events=events,
     )
