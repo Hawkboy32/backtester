@@ -157,6 +157,47 @@ def bearish_fvg_gap(low_two_bars_ago: float, high_current: float) -> float | Non
     return gap if gap > 0 else None
 
 
+def turn_confirmed_uptick(closes: pd.Series, in_zone: pd.Series, confirm_bars: int) -> bool:
+    """True if the last `confirm_bars` bars show a sustained uptick STARTING
+    from a bar where `in_zone` (e.g. VWAP-mean-reversion's "oversold", or
+    Bollinger's "below the lower band") was true — a "wait for the turn"
+    entry confirmation, as opposed to firing the instant `in_zone` is first
+    true. Added 2026-08-27/28 for VwapMeanReversionStrategy and
+    BollingerMeanReversionStrategy's `confirm_turn_bars` param; shared here
+    since both strategies need the identical shape, just against a
+    different `in_zone` series.
+
+    A PURE function of the passed-in Series - no internal state - because
+    both callers are re-instantiated fresh every polling cycle in live
+    trading (confirmed: auto_trader.py's _trade_target() calls
+    build_strategy() every cycle), so nothing persisted on `self` between
+    calls would ever survive to be useful there. `history` is always a
+    pandas object anyway, so recomputing this from it each call costs
+    nothing extra worth avoiding.
+
+    Deliberately does NOT try to isolate the exact FIRST bar of a longer
+    up-run (i.e., this can stay True for several consecutive bars once a
+    qualifying run starts) - the caller's engine only acts on a BUY signal
+    while flat, so a predicate held true for multiple bars in a row still
+    only opens one position, on whichever bar it first goes true. Handling
+    that inside this function would just be duplicating logic the engine
+    already gets right.
+
+    The baseline bar (`confirm_bars` back from the end) must itself be
+    `in_zone` - the run has to start FROM the zone that would otherwise have
+    triggered an instant entry, not from some already-recovered point partway
+    through the reversion.
+    """
+    n = len(closes)
+    if confirm_bars <= 0 or n <= confirm_bars:
+        return False
+    baseline_idx = n - 1 - confirm_bars
+    if not bool(in_zone.iloc[baseline_idx]):
+        return False
+    recent = closes.iloc[baseline_idx:]
+    return bool((recent.diff().iloc[1:] > 0).all())
+
+
 def rsi(closes: pd.Series, period: int) -> pd.Series:
     delta = closes.diff()
     gain = delta.clip(lower=0)

@@ -7,12 +7,18 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtester.strategies.indicators import session_vwap
+from backtester.strategies.indicators import session_vwap, turn_confirmed_uptick
 from backtester.strategy import Bar, Lookback, Signal, Strategy
 
 
 class VwapMeanReversionStrategy(Strategy):
-    def __init__(self, min_bars: int = 5, entry_deviation_pct: float = 0.5, acceptance_bars: int = 1):
+    def __init__(
+        self,
+        min_bars: int = 5,
+        entry_deviation_pct: float = 0.5,
+        acceptance_bars: int = 1,
+        confirm_turn_bars: int = 0,
+    ):
         self.min_bars = min_bars
         self.entry_deviation_pct = entry_deviation_pct  # % below VWAP that triggers a buy
         # How many CONSECUTIVE bars must stay beyond entry_deviation_pct before
@@ -24,8 +30,23 @@ class VwapMeanReversionStrategy(Strategy):
         # treating it as a real entry. This is an entry-condition EXPERIMENT on
         # the existing strategy, not a new one — don't change the
         # STRATEGY_REGISTRY default unless a walk-forward pass validates it
-        # beats 1, same discipline as the Phase E param sweep.
+        # beats 1, same discipline as the Phase E param sweep. WALK-FORWARD
+        # TESTED AND REJECTED 2026-08-14ish (see CLAUDE_NOTES.txt): mean
+        # Sharpe fell 3.45 -> 1.85 -> 1.49 as this went 1 -> 2 -> 3. Left in
+        # place, defaulted off, as a documented negative result.
         self.acceptance_bars = acceptance_bars
+        # A DIFFERENT delay mechanism from acceptance_bars above - that one
+        # waits for the deviation to persist while price may still be
+        # FALLING; this waits for actual evidence of a turn back toward VWAP
+        # before entering (user's own idea, 2026-08-27: "set a marker then
+        # wait... place the trade when it sees the turn back"). 0 (default)
+        # is the ORIGINAL, unchanged behavior. See
+        # indicators.turn_confirmed_uptick for the exact predicate and why
+        # it must stay a pure function of `history`, not `self` state.
+        # NOT yet walk-forward validated - acceptance_bars' rejection is
+        # evidence delay costs something in this strategy family, but it's a
+        # different mechanism, so it informs the prior without deciding it.
+        self.confirm_turn_bars = confirm_turn_bars
 
     def required_lookback(self) -> Lookback:
         # 2, not 1 — same reasoning as VwapTrendStrategy: iloc[-2] crosses the
@@ -62,7 +83,14 @@ class VwapMeanReversionStrategy(Strategy):
         # reverted back up to (or through) VWAP -> take profit
         reverted_to_vwap = prev_close < prev_vwap and curr_close >= curr_vwap
 
-        if entered_oversold:
+        # Mutually exclusive with the acceptance_bars trigger above, not
+        # combined with it — confirm_turn_bars=0 (default) preserves the
+        # original entered_oversold path byte-for-byte; >0 replaces it
+        # entirely with the turn-confirmation entry.
+        if self.confirm_turn_bars > 0:
+            if turn_confirmed_uptick(closes, oversold, self.confirm_turn_bars):
+                return Signal.BUY
+        elif entered_oversold:
             return Signal.BUY
         if reverted_to_vwap:
             return Signal.SELL

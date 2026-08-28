@@ -93,6 +93,16 @@ STRATEGY_REGISTRY: dict[str, dict] = {
         "default_params": {"min_bars": 5, "entry_deviation_pct": 0.3},
         "regime": "range",
     },
+    # NOT live-deployed — a testing-only variant for the "wait for the turn"
+    # entry-confirmation investigation (2026-08-27/28, see
+    # woolly-zooming-kurzweil.md). Same class, same tuned entry threshold,
+    # confirm_turn_bars turned on. Never mutate the entry above; add a
+    # sweep/roster/extra_targets entry pointed at THIS name to test it.
+    "VWAP Mean Reversion (Turn-Confirmed)": {
+        "class": VwapMeanReversionStrategy,
+        "default_params": {"min_bars": 5, "entry_deviation_pct": 0.3, "confirm_turn_bars": 2},
+        "regime": "range",
+    },
     "VWAP Drift Pullback": {
         "class": VwapDriftPullbackStrategy,
         "default_params": {
@@ -141,6 +151,13 @@ STRATEGY_REGISTRY: dict[str, dict] = {
     "Bollinger Mean Reversion": {
         "class": BollingerMeanReversionStrategy,
         "default_params": {"period": 15, "num_std": 3.0},
+        "regime": "range",
+    },
+    # NOT live-deployed — see "VWAP Mean Reversion (Turn-Confirmed)" above,
+    # same reasoning, same investigation.
+    "Bollinger Mean Reversion (Turn-Confirmed)": {
+        "class": BollingerMeanReversionStrategy,
+        "default_params": {"period": 15, "num_std": 3.0, "confirm_turn_bars": 2},
         "regime": "range",
     },
     "RSI Divergence": {

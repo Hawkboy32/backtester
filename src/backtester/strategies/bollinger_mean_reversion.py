@@ -7,13 +7,21 @@ from __future__ import annotations
 
 import pandas as pd
 
+from backtester.strategies.indicators import turn_confirmed_uptick
 from backtester.strategy import Bar, Lookback, Signal, Strategy
 
 
 class BollingerMeanReversionStrategy(Strategy):
-    def __init__(self, period: int = 20, num_std: float = 2.0):
+    def __init__(self, period: int = 20, num_std: float = 2.0, confirm_turn_bars: int = 0):
         self.period = period
         self.num_std = num_std
+        # "Wait for the turn" entry confirmation instead of firing the
+        # instant close crosses below the lower band - see
+        # VwapMeanReversionStrategy's own confirm_turn_bars docstring (same
+        # mechanism, same reasoning, same stateless-by-necessity constraint
+        # for live trading) and indicators.turn_confirmed_uptick for the
+        # predicate itself. 0 (default) is the ORIGINAL, unchanged behavior.
+        self.confirm_turn_bars = confirm_turn_bars
 
     def required_lookback(self) -> Lookback:
         return Lookback(bars=self.period + 2)
@@ -37,7 +45,14 @@ class BollingerMeanReversionStrategy(Strategy):
         broke_down = prev_close >= prev_lower and curr_close < curr_lower
         reverted_to_mean = curr_close > curr_mid
 
-        if broke_down:
+        # Mutually exclusive with the broke_down trigger above, not combined
+        # with it — confirm_turn_bars=0 (default) preserves the original
+        # behavior byte-for-byte; >0 replaces it entirely.
+        if self.confirm_turn_bars > 0:
+            below_lower = closes < lower
+            if turn_confirmed_uptick(closes, below_lower, self.confirm_turn_bars):
+                return Signal.BUY
+        elif broke_down:
             return Signal.BUY
         if reverted_to_mean:
             return Signal.SELL
