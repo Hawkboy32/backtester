@@ -110,6 +110,8 @@ class BacktestEngine:
         dynamic_size_fn: Callable[[float], float] | None = None,
         stop_loss_pct: float | None = None,
         take_profit_pct: float | None = None,
+        trailing_arm_pct: float | None = None,
+        trailing_stop_pct: float | None = None,
         max_hold_bars: int | None = None,
         close_at_session_end: bool = False,
         deposits: dict | None = None,
@@ -174,18 +176,46 @@ class BacktestEngine:
         it, and testing against the close alone would silently miss most stop
         hits and overstate results.
 
+        trailing_arm_pct / trailing_stop_pct (2026-08-28): a TRAILING exit,
+        distinct from the fixed take_profit_pct above. trailing_arm_pct is
+        how far in profit (fraction of entry price) a position must move at
+        least once before the trailing exit can fire at all — before that,
+        an ordinary post-entry wiggle can never trigger it. trailing_stop_pct
+        is the fraction of the PEAK price reached since entry (not the entry
+        price — the standard trailing-stop convention) that price may give
+        back before it fires. Both None (default) is a zero-regression no-op.
+        Setting trailing_stop_pct without trailing_arm_pct raises — a trail
+        distance with no arm threshold is ambiguous about when it starts.
+        Requires "armed" no separate flag: the peak is monotonic once
+        tracked (only ever moves further in the position's favor), so
+        whether the arm threshold has been reached is a pure function of the
+        current peak vs entry — do not "helpfully" add an armed flag here,
+        it would just be redundant state that could drift from the peak it's
+        derived from. Added specifically for the case a fixed take_profit_pct
+        can't address: a position that recovers into real profit and then
+        gives it all back before the strategy's own signal exits (found live
+        in the 2026-08-27 loss diagnostic — 6 of 10 recovered-to-entry
+        losing trades fell away again for a genuine second leg down, some
+        held 700+ minutes). take_profit_pct may still be set alongside
+        trailing as a hard ceiling for whatever the trail never catches.
+
         max_hold_bars: force an exit at the close of the Nth bar after entry,
         whatever the price is doing.
 
         close_at_session_end: flatten at the close of each session's last bar
         rather than carrying a position overnight.
 
-        Two deliberately CONSERVATIVE modelling choices, because both are
+        Three deliberately CONSERVATIVE modelling choices, because all are
         places a backtest can flatter itself:
           - If a bar's range contains BOTH the stop and the target, OHLC data
             cannot say which was touched first. This assumes the STOP — the
             worse outcome. Assuming the target would inflate every result and
             is the classic way stop/target backtests lie.
+          - Same reasoning extended to trailing vs. take_profit_pct: if a bar
+            could satisfy both, this assumes TRAILING fired — its exit price
+            (peak - trail distance) is necessarily closer to entry (less
+            profit) than take_profit_pct's fixed target, so assuming the
+            target instead would again be the self-flattering assumption.
           - A bar that GAPS through a level fills at that bar's OPEN, not at
             the level. A stop gapped through fills worse than the stop price,
             which is what actually happens; pretending otherwise would hide
@@ -242,11 +272,19 @@ class BacktestEngine:
             raise ValueError("stop_loss_pct must be a positive fraction of entry price (e.g. 0.01 for 1%)")
         if take_profit_pct is not None and take_profit_pct <= 0:
             raise ValueError("take_profit_pct must be a positive fraction of entry price")
+        if trailing_arm_pct is not None and trailing_arm_pct <= 0:
+            raise ValueError("trailing_arm_pct must be a positive fraction of entry price")
+        if trailing_stop_pct is not None and trailing_stop_pct <= 0:
+            raise ValueError("trailing_stop_pct must be a positive fraction of the peak price")
+        if trailing_stop_pct is not None and trailing_arm_pct is None:
+            raise ValueError("trailing_stop_pct requires trailing_arm_pct — ambiguous where the trail starts otherwise")
         if max_hold_bars is not None and max_hold_bars < 1:
             raise ValueError("max_hold_bars must be >= 1")
 
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
+        self.trailing_arm_pct = trailing_arm_pct
+        self.trailing_stop_pct = trailing_stop_pct
         self.max_hold_bars = max_hold_bars
         self.close_at_session_end = close_at_session_end
         self.starting_cash = starting_cash
@@ -271,6 +309,7 @@ class BacktestEngine:
 
     def _protective_exit(
         self, entry_price: float, shares: float, current: Bar, bars_held: int, is_session_end: bool,
+        peak_price: float | None = None,
     ) -> tuple[float, str] | None:
         """The raw fill price and reason if a protective exit fires on this bar,
         else None. Price is PRE-slippage; the caller applies it directionally.
@@ -278,8 +317,14 @@ class BacktestEngine:
         Precedence is deliberate: intrabar price levels are checked before the
         end-of-bar time rules, because a resting stop or target triggers the
         instant price touches it — necessarily at or before this bar's close.
-        And the stop is checked before the target so that a bar spanning both
-        resolves to the stop (see __init__ for why that conservatism matters).
+        Stop is checked before trailing, and trailing before the fixed target
+        — a bar spanning multiple levels always resolves to whichever is
+        closest to entry (the conservative outcome; see __init__ for why).
+
+        peak_price: the high-water mark (long) / low-water mark (short) since
+        entry, maintained by the caller (run()) every bar a position is open
+        — this function stays a pure function of its arguments, no state of
+        its own, same as every other check here.
         """
         is_long = shares > 0
 
@@ -295,6 +340,20 @@ class BacktestEngine:
                 # the order fills at the open, which is WORSE than the stop.
                 gapped = (current.open <= stop_price) if is_long else (current.open >= stop_price)
                 return (current.open if gapped else stop_price), "stop_loss"
+
+        if self.trailing_arm_pct is not None and peak_price is not None:
+            armed = (
+                (peak_price - entry_price) >= entry_price * self.trailing_arm_pct if is_long
+                else (entry_price - peak_price) >= entry_price * self.trailing_arm_pct
+            )
+            if armed and self.trailing_stop_pct is not None:
+                trail_price = (
+                    peak_price * (1 - self.trailing_stop_pct) if is_long
+                    else peak_price * (1 + self.trailing_stop_pct)
+                )
+                if (current.low <= trail_price) if is_long else (current.high >= trail_price):
+                    gapped = (current.open <= trail_price) if is_long else (current.open >= trail_price)
+                    return (current.open if gapped else trail_price), "trailing_stop"
 
         if target_price is not None:
             if (current.high >= target_price) if is_long else (current.low <= target_price):
@@ -344,6 +403,11 @@ class BacktestEngine:
         shares = 0.0
         entry_index: int | None = None
         open_trade: Trade | None = None
+        # High-water mark (long) / low-water mark (short) since entry, for
+        # trailing_stop_pct. Monotonic by construction (max/min only ever
+        # moves it further in the position's favor), so "armed" needs no
+        # separate flag — see _protective_exit's docstring.
+        peak_price: float | None = None
         trades: list[Trade] = []
         equity_values: list[float] = []
         regime_values: list[str | None] = [] if self.regime_by_date is not None else None
@@ -420,12 +484,18 @@ class BacktestEngine:
 
             protective = None
             if shares != 0 and open_trade is not None and entry_index is not None:
+                # Update this bar's extreme BEFORE checking the trailing
+                # condition, so the check sees the same bar's own high/low —
+                # matching how stop/target already check THIS bar's touch,
+                # not last bar's.
+                peak_price = max(peak_price, current.high) if shares > 0 else min(peak_price, current.low)
                 protective = self._protective_exit(
                     open_trade.entry_price,
                     shares,
                     current,
                     i - entry_index,
                     bool(session_end_flags[i]) if session_end_flags is not None else False,
+                    peak_price,
                 )
 
             if protective is not None:
@@ -449,6 +519,7 @@ class BacktestEngine:
                 trades.append(open_trade)
                 open_trade = None
                 entry_index = None
+                peak_price = None
                 shares = 0.0
             elif signal is Signal.BUY and shares == 0 and can_open_long and allow_new_entry:
                 if spend > self.commission_per_trade:
@@ -465,6 +536,7 @@ class BacktestEngine:
                         shares=shares, conviction=conviction,
                     )
                     entry_index = i
+                    peak_price = buy_fill_price
             elif signal is Signal.SELL and shares == 0 and can_open_short and allow_new_entry:
                 # Opens a SHORT — shares goes negative (see module docstring for
                 # why equity/pnl need no special-casing for this). Sized the
@@ -483,6 +555,7 @@ class BacktestEngine:
                         shares=shares, conviction=conviction,
                     )
                     entry_index = i
+                    peak_price = sell_fill_price
             elif signal is Signal.SELL and shares > 0:
                 # Closes an existing LONG (unchanged from before position_mode existed).
                 exit_slip = self._slip_bps(shares, current.volume) / 10_000
@@ -495,6 +568,7 @@ class BacktestEngine:
                     trades.append(open_trade)
                     open_trade = None
                 entry_index = None
+                peak_price = None
                 shares = 0.0
             elif signal is Signal.BUY and shares < 0:
                 # Closes an existing SHORT — buying back to cover costs cash.
@@ -508,6 +582,7 @@ class BacktestEngine:
                     trades.append(open_trade)
                     open_trade = None
                 entry_index = None
+                peak_price = None
                 shares = 0.0
 
             equity = cash + shares * current.close
