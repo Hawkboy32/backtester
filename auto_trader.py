@@ -165,28 +165,40 @@ def _get_regime(daily_client: PolygonClient, ticker: str, target_vol_ann: float)
     return info
 
 
-def _resolve_targets(control, held_tickers: set[str] | None = None) -> list[tuple[str, str, dict, bool]]:
-    """Returns (ticker, strategy_name, params, no_new_entries) tuples to trade
-    this cycle. Manual mode (primary): one entry per control.tickers, never
-    blocked from new entries, params from control.manual_strategy_params
-    (merged over STRATEGY_REGISTRY defaults inside build_strategy — empty
-    dict here means "use the current default", same as always). Roster mode
-    (primary): runs the cheap demotion-only pass (never promotes — that's a
-    deliberate, separate dashboard action) and trades every active AND
-    paused entry, so a paused entry can still exit an existing position,
-    just never open a new one.
+def _resolve_targets(
+    control, held_tickers: set[str] | None = None
+) -> list[tuple[str, str, dict, bool, list[str] | None]]:
+    """Returns (ticker, strategy_name, params, no_new_entries, account_ids)
+    tuples to trade this cycle. Manual mode (primary): one entry per
+    control.tickers, never blocked from new entries, params from
+    control.manual_strategy_params (merged over STRATEGY_REGISTRY defaults
+    inside build_strategy — empty dict here means "use the current
+    default", same as always). Roster mode (primary): runs the cheap
+    demotion-only pass (never promotes — that's a deliberate, separate
+    dashboard action) and trades every active AND paused entry, so a paused
+    entry can still exit an existing position, just never open a new one.
 
     Then, regardless of which primary branch ran, appends one target per
     ticker for every group in control.extra_targets — additional CONCURRENT
     manual-style targets (e.g. a forex account trading its own separately-
     tuned params alongside an equities roster primary). These are never
-    blocked from new entries either. Routing to the right accounts relies
-    entirely on the caller's existing per-(ticker,account) asset-class
-    guard, not on anything here — this function just returns tickers.
+    blocked from new entries either.
+
+    account_ids is None for primary targets (unrestricted — trade against
+    every account in control.account_ids that matches the ticker's asset
+    class, same as always) and a specific list for extra_targets groups,
+    restricting that group to ONLY its own account_ids rather than every
+    asset-class-matching account in the whole cycle's pool. Caller
+    (_trade_target's broker_accounts argument) must actually scope by this
+    — previously this field didn't exist at all and every extra_targets
+    group silently traded on every matching account regardless of its own
+    account_ids, found live 2026-08-25 (an "(PAPER)" target reached real
+    AlpacaLive/IBKR Live accounts; nothing filled, but by luck, not by
+    design — see CLAUDE_NOTES.txt "OPEN BUG 2026-08-25").
     """
     if not control.use_roster:
         primary = [
-            (ticker, control.strategy_name, control.manual_strategy_params.get(control.strategy_name, {}), False)
+            (ticker, control.strategy_name, control.manual_strategy_params.get(control.strategy_name, {}), False, None)
             for ticker in control.tickers
         ]
     else:
@@ -201,13 +213,13 @@ def _resolve_targets(control, held_tickers: set[str] | None = None) -> list[tupl
         roster.save_roster(state)
 
         primary = [
-            (entry.ticker, entry.strategy_name, entry.params, entry.status == "paused")
+            (entry.ticker, entry.strategy_name, entry.params, entry.status == "paused", None)
             for entry in state.entries
             if entry.status in ("active", "paused")
         ]
 
     extra = [
-        (ticker, group.get("strategy_name", ""), group.get("strategy_params", {}), False)
+        (ticker, group.get("strategy_name", ""), group.get("strategy_params", {}), False, group.get("account_ids", []))
         for group in control.extra_targets
         for ticker in group.get("tickers", [])
     ]
@@ -1162,7 +1174,7 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
         save_status(status)
         return status
 
-    for ticker, strategy_name, params, no_new_entries in targets:
+    for ticker, strategy_name, params, no_new_entries, target_account_ids in targets:
         # Prove liveness as the loop runs, not just when it finishes - see
         # touch_heartbeat. This is the loop that stretches when a broker is
         # unreachable, so it is exactly where the proof is needed.
@@ -1179,9 +1191,18 @@ def run_cycle(status: AutoTraderStatus) -> AutoTraderStatus:
         # spent, otherwise the app goes dark for the rest of the day.
         cap_reached = status.trades_today >= control.max_trades_per_day
 
+        # Scope to this target's own account_ids when it has one (extra_targets
+        # groups) — a target with account_ids=None (primary) still gets the
+        # full pool, unchanged from before. This is the actual enforcement;
+        # see _resolve_targets' docstring for the incident that was missing it.
+        target_broker_accounts = (
+            broker_accounts if target_account_ids is None
+            else [a for a in broker_accounts if a.account_id in target_account_ids]
+        )
+
         _trade_target(
             ticker, strategy_name, params, no_new_entries or cap_reached,
-            broker_accounts, client, daily_client, control, status,
+            target_broker_accounts, client, daily_client, control, status,
             blocked_account_ids, market_closed_account_ids, account_asset_classes,
         )
 

@@ -160,9 +160,13 @@ class AutoTraderControl:
     # nested dataclass, so load_control/save_control need no changes (JSON round-trips them as-is).
     # Not another roster instance — roster.json is one global shared list; each extra target is
     # always a fixed ticker list + strategy, same shape as (but independent from) manual mode.
-    # Relies entirely on auto_trader.py's existing per-(ticker,account) asset-class crosstalk guard
-    # to route correctly — an extra target's accounts get unioned into the same broker_accounts
-    # pool the primary uses, not treated as a separate pass.
+    # account_ids IS enforced (fixed 2026-09-01, see auto_trader.py's _resolve_targets/run_cycle) —
+    # a group only ever trades on its own account_ids, never the wider pool. Before the fix this
+    # field was silently ignored; a group traded on EVERY account matching its ticker's asset
+    # class, found live 2026-08-25 (an "(PAPER)"-labelled target reached real accounts — see
+    # CLAUDE_NOTES.txt "OPEN BUG 2026-08-25"). The pool IS still unioned across primary + every
+    # extra_targets group (for connectivity/build purposes — see run_cycle's all_account_ids), but
+    # each target is then scoped back down to only its own account_ids before trading.
     account_sizing_overrides: dict[str, dict] = field(default_factory=dict)  # {account_id:
     # {"slide_start_pct": float, "slide_floor_notional": float (optional, default 1.0)}} —
     # overrides just that account's sizing with a SLIDING %-of-equity rate (see
