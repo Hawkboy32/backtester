@@ -131,6 +131,12 @@ def compute_qty_for_account(
         if reference_price <= 0:
             raise ValueError("reference_price must be positive to size by equity % or dollar amount")
 
+        # Swap in the account's own native-currency price BEFORE any sizing
+        # math touches reference_price — see native_reference_price's own
+        # docstring. A no-op for every broker except one explicitly executing
+        # in a currency other than its signal feed's.
+        reference_price = account.native_reference_price(ticker, reference_price)
+
         snapshot = account.get_account_snapshot()
         if sizing_mode is SizingMode.PCT_EQUITY:
             dollars = snapshot.equity * (sizing_value / 100)

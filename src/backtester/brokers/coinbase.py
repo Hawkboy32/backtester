@@ -54,23 +54,66 @@ def _money(field) -> float:
 
 
 class CoinbaseBroker(BrokerAccount):
-    def __init__(self, nickname: str, api_key: str, api_secret: str):
+    def __init__(self, nickname: str, api_key: str, api_secret: str, quote_currency: str = "USD"):
         self.nickname = nickname
         self.is_paper = False  # no verified sandbox for this broker
         self._client = RESTClient(api_key=api_key, api_secret=api_secret)
+        # The currency this account actually HOLDS and EXECUTES in — default
+        # USD (every ticker's own quote currency, matches its Polygon feed,
+        # zero behavior change). An account funded in a different currency
+        # (e.g. CBAPI holds GBP with no USD wallet at all — confirmed live
+        # 2026-09-05, "account is not available" on every BTC-USD attempt)
+        # can override this to trade its NATIVE product instead (BTC-GBP)
+        # rather than needing a fiat conversion the exchange's own retail UI
+        # doesn't offer for this account. See native_reference_price() below
+        # for the other half this requires — pricing must follow currency
+        # too, or sizing silently mis-fires.
+        self.quote_currency = quote_currency
 
-    def _product_id(self, ticker: str) -> str:
+    def _product_id(self, ticker: str, quote_currency: str | None = None) -> str:
         """Coinbase's product_id format ("BTC-USD") differs from the Polygon-
         style ticker ("X:BTCUSD") used everywhere else in this app (universe
         CSVs, the Trade Execution ticker picker). Every pair in
-        data/crypto_universe.csv is USD-quoted, so a strip+rejoin is a
-        reliable deterministic transform, not a guess. Already product-id-
-        shaped input (contains a "-") passes through unchanged, so a hand-
-        typed real product_id still works untouched."""
+        data/crypto_universe.csv is USD-quoted, so a strip+rejoin against
+        the target quote currency is a reliable deterministic transform, not
+        a guess. Already product-id-shaped input (contains a "-") passes
+        through unchanged, so a hand-typed real product_id still works
+        untouched.
+
+        `quote_currency` defaults to `self.quote_currency` (the account's
+        real EXECUTION/holding currency — GBP for CBAPI) for order placement
+        and sizing. Callers that need the ticker's own USD-denominated
+        market data instead (get_live_bars — see its docstring on why it
+        must always be USD, not this account's currency) pass "USD"
+        explicitly rather than relying on the default."""
         if "-" in ticker:
             return ticker
         t = ticker[2:] if ticker.startswith("X:") else ticker
-        return f"{t[:-3]}-USD" if t.endswith("USD") else ticker
+        currency = quote_currency if quote_currency is not None else self.quote_currency
+        return f"{t[:-3]}-{currency}" if t.endswith("USD") else ticker
+
+    def native_reference_price(self, ticker: str, fallback_price: float) -> float:
+        """Overrides the base no-op ONLY when this instance trades a
+        currency other than the ticker's own (self.quote_currency != "USD").
+        fallback_price is the strategy's USD signal price (e.g. Polygon
+        X:BTCUSD) — correct for sizing an account that HOLDS USD, wrong for
+        one that holds GBP: dividing GBP equity by a USD price would
+        silently under-size every order by the GBP/USD rate with no error.
+
+        Fetches Coinbase's own live price for the REAL executed product
+        (e.g. BTC-GBP) directly, rather than converting via a separately-
+        sourced FX rate — one live number from the venue that's about to
+        fill the order, not a second data source that could disagree with
+        it. Raises on failure rather than silently falling back to
+        fallback_price: a sizing exception is caught by the caller and skips
+        this cycle's trade (fails closed) — falling back here would silently
+        reintroduce the exact currency-mismatch bug this method exists to
+        prevent.
+        """
+        if self.quote_currency == "USD":
+            return fallback_price
+        product = self._client.get_product(product_id=self._product_id(ticker))
+        return float(_get(product, "price"))
 
     def _default_portfolio_uuid(self) -> str:
         portfolios = self._client.get_portfolios().portfolios or []
@@ -177,6 +220,19 @@ class CoinbaseBroker(BrokerAccount):
         either field (VWAP Mean Reversion computes its own running VWAP from
         open/high/low/close/volume, never reads this column - confirmed by
         reading vwap_mean_reversion.py before relying on this).
+
+        ALWAYS fetches the USD-quoted product, regardless of self.quote_currency
+        - unlike native_reference_price/submit_market_order, which deliberately
+        use the account's real execution currency (GBP for CBAPI). This
+        method's whole contract is "shaped identically to Polygon's bars" for
+        a Polygon-style ticker (X:BTCUSD always means USD, same as every other
+        broker's get_live_bars) - every caller (strategy signal computation,
+        the mobile app's chart) expects that, and silently handing back
+        GBP-denominated candles under a "X:BTCUSD" label is a real, confirmed
+        bug (found 2026-09-07: the mobile app's 5m/15m chart, which fetches
+        bars fresh per-request and picked CBAPI, showed BTC at ~$58.7k -
+        actually its GBP price - while the 1m view, using a cached signal
+        snapshot computed via KRKAPI at the time, correctly showed ~$79.4k).
         """
         granularity = self._GRANULARITY.get((multiplier, timespan))
         if granularity is None:
@@ -198,7 +254,7 @@ class CoinbaseBroker(BrokerAccount):
             int(datetime.fromisoformat(to_date).replace(tzinfo=timezone.utc).timestamp()) + 86400,
             int(datetime.now(timezone.utc).timestamp()),
         )
-        product_id = self._product_id(ticker)
+        product_id = self._product_id(ticker, quote_currency="USD")
         columns = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
 
         all_rows: list[dict] = []
@@ -243,13 +299,23 @@ class CoinbaseBroker(BrokerAccount):
         product_id = self._product_id(ticker)
         try:
             client_order_id = str(uuid.uuid4())
+            # retail_portfolio_id is required here, not optional decoration:
+            # without it Coinbase can route the order against a portfolio
+            # other than the one get_account_snapshot/get_positions read
+            # from (confirmed live 2026-09-02 — orders failed with
+            # INVALID_ARGUMENT "account is not available" while the same
+            # default portfolio showed sufficient balance; matches
+            # Coinbase's own documented multi-portfolio/legacy-key behavior).
+            portfolio_uuid = self._default_portfolio_uuid()
             if side is OrderSide.BUY:
                 response = self._client.market_order_buy(
-                    client_order_id=client_order_id, product_id=product_id, base_size=str(qty)
+                    client_order_id=client_order_id, product_id=product_id, base_size=str(qty),
+                    retail_portfolio_id=portfolio_uuid,
                 )
             else:
                 response = self._client.market_order_sell(
-                    client_order_id=client_order_id, product_id=product_id, base_size=str(qty)
+                    client_order_id=client_order_id, product_id=product_id, base_size=str(qty),
+                    retail_portfolio_id=portfolio_uuid,
                 )
             if not response.success:
                 error_msg = response.error_response.error if response.error_response else "unknown error"

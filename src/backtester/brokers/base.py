@@ -110,6 +110,20 @@ class BrokerAccount(ABC):
     # sizing never produces a quantity the broker will reject.
     supports_fractional_shares: bool = True
 
+    def native_reference_price(self, ticker: str, fallback_price: float) -> float:
+        """The price to use for %-equity/fixed-dollar SIZING, in the same
+        currency as get_account_snapshot().equity.
+
+        Default: return fallback_price unchanged — true for every broker
+        except one explicitly configured to execute a ticker in a currency
+        OTHER than the one its signal price feed is quoted in (see
+        CoinbaseBroker's override and its own docstring for the real bug
+        this exists to prevent: a GBP-equity account dividing by a USD
+        price would silently under-size every order by the GBP/USD rate,
+        with no error — worse than the clean rejection it replaces).
+        """
+        return fallback_price
+
     @abstractmethod
     def get_account_snapshot(self) -> AccountSnapshot:
         raise NotImplementedError

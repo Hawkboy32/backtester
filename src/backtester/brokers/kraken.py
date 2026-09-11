@@ -8,12 +8,18 @@ broker). Spot trading only. `submit_market_order`'s `ticker` accepts either
 this app's usual Polygon-style ticker ("X:BTCUSD") or a real Kraken altname
 pair ("XBTUSD") directly — see `_pair()` for the translation.
 
-Position market values aren't computed: Kraken's asset-code system (XXBT,
-XETH, ZUSD, ...) doesn't map onto trading pairs in a small, reliably-correct
-way without a full pair-lookup table, so get_positions() reports quantity
-only rather than guess at a price. Account-level equity in
-get_account_snapshot is exact — Kraken computes it server-side (TradeBalance
-"eb" field), no guessing involved there.
+get_positions() enriches each recognized asset (via
+_KRAKEN_BALANCE_KEY_TO_SYMBOL) with a live current_price/market_value from
+Kraken's public Ticker endpoint (best-effort — a lookup failure just leaves
+those fields at their old None/0.0 defaults rather than dropping the
+position, since qty from Balance is the authoritative, more important part).
+avg_entry_price and unrealized_pl stay 0.0 always: Kraken's Balance/
+TradeBalance endpoints have no cost-basis field at all (unlike Coinbase's
+portfolio breakdown), so there's no real number to report there without
+reaching into this app's own trade log, which get_positions() deliberately
+doesn't do — it's a broker-API view, not a merge with app state. Account-level
+equity in get_account_snapshot is exact — Kraken computes it server-side
+(TradeBalance "eb" field), no guessing involved there.
 
 Bracket orders (take_profit_price/stop_loss_price) aren't implemented.
 """
@@ -43,6 +49,32 @@ FIAT_ASSETS = {"ZUSD", "ZEUR", "ZGBP", "ZCAD", "ZJPY", "ZCHF", "ZAUD"}
 # BCHUSD, UNIUSD, ATOMUSD, XLMUSD, ETCUSD), so no full 15-entry table is
 # needed — just the two real exceptions.
 _KRAKEN_SYMBOL_OVERRIDES = {"BTC": "XBT", "DOGE": "XDG"}
+
+# Kraken's raw Balance response uses its OWN asset codes, which do NOT
+# reliably follow the altname pair-naming _pair() above translates to/from -
+# confirmed 2026-09-06 via a live query of Kraken's public Assets endpoint
+# for every symbol in data/crypto_universe.csv. There's no clean rule: 7 of
+# 15 carry a legacy "X" prefix (XXBT, XETH, XXRP, XXDG, XLTC, XXLM, XETC)
+# while the other 8 don't (SOL, ADA, AVAX, LINK, DOT, BCH, UNI, ATOM) - each
+# entry verified individually, not guessed, same discipline as the override
+# table above.
+#
+# THE BUG THIS FIXES (found live 2026-09-06): get_positions() used to return
+# the raw key ("XXBT") as a Position's ticker. That never matched this app's
+# "X:BTCUSD" ticker anywhere it's compared - auto_trader.py's
+# `existing_position = next(p for p in positions if p.ticker == ticker ...)`
+# always came back None for this account, so the bot thought it was
+# permanently flat: it kept trying to re-buy on every BUY signal (only
+# stopped by running out of funds, not by design) and could never recognize
+# a SELL signal as a close, since a long-only account with no perceived
+# position can't open a short either. A real, live BTC position sat
+# unmanageable by the bot's own signal logic until this was fixed.
+_KRAKEN_BALANCE_KEY_TO_SYMBOL = {
+    "XXBT": "BTC", "XETH": "ETH", "SOL": "SOL", "XXRP": "XRP", "ADA": "ADA",
+    "XXDG": "DOGE", "AVAX": "AVAX", "LINK": "LINK", "DOT": "DOT",
+    "XLTC": "LTC", "BCH": "BCH", "UNI": "UNI", "ATOM": "ATOM",
+    "XXLM": "XLM", "XETC": "ETC",
+}
 
 
 class KrakenError(RuntimeError):
@@ -75,6 +107,26 @@ class KrakenBroker(BrokerAccount):
             raise KrakenError("; ".join(response["error"]))
         return response.get("result", {})
 
+    def _public(self, method: str, data: dict | None = None) -> dict:
+        response = self._client.query_public(method, data)
+        if response.get("error"):
+            raise KrakenError("; ".join(response["error"]))
+        return response.get("result", {})
+
+    def _ticker_price(self, ticker: str) -> float:
+        """Live last-trade price for one pair, via Kraken's public Ticker
+        endpoint (no auth needed). Only called from get_positions() for a
+        single pair at a time, so — unlike get_live_bars' OHLC call, which
+        has to filter out a known "last" sibling key — the response's only
+        key is the one we want, whatever exact form Kraken names it in
+        (confirmed live 2026-09-07: querying altname "XBTUSD" comes back
+        keyed "XXBTZUSD", not the name we sent)."""
+        result = self._public("Ticker", {"pair": self._pair(ticker)})
+        data_key = next(iter(result), None)
+        if data_key is None:
+            raise KrakenError(f"Kraken Ticker returned no data for {ticker}")
+        return float(result[data_key]["c"][0])
+
     def get_account_snapshot(self) -> AccountSnapshot:
         balance = self._private("Balance")
         trade_balance = self._private("TradeBalance")
@@ -89,14 +141,30 @@ class KrakenBroker(BrokerAccount):
             qty = float(qty_str)
             if asset in FIAT_ASSETS or qty == 0:
                 continue
+            # Translate back to this app's "X:<SYMBOL>USD" ticker so it
+            # actually matches what auto_trader.py compares positions
+            # against - see _KRAKEN_BALANCE_KEY_TO_SYMBOL's own docstring
+            # for the bug this fixes. Falls back to the raw asset code
+            # unchanged for anything outside the verified table (a coin
+            # added to the universe later, unexpected dust) rather than
+            # raising - same "never let one unfamiliar row fail the whole
+            # read" precedent as coinbase.py's _ticker_from_epic.
+            symbol = _KRAKEN_BALANCE_KEY_TO_SYMBOL.get(asset)
+            ticker = f"X:{symbol}USD" if symbol else asset
+            current_price = None
+            if symbol:
+                try:
+                    current_price = self._ticker_price(ticker)
+                except Exception:
+                    pass  # best-effort enrichment - qty/ticker above are already correct without it
             positions.append(
                 Position(
-                    ticker=asset,
+                    ticker=ticker,
                     qty=qty,
                     side="long",
                     avg_entry_price=0.0,
-                    current_price=None,
-                    market_value=0.0,
+                    current_price=current_price,
+                    market_value=qty * current_price if current_price is not None else 0.0,
                     unrealized_pl=0.0,
                 )
             )

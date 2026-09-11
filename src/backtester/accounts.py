@@ -303,7 +303,10 @@ def build_broker_accounts(account_ids: list[str] | None = None) -> list[BrokerAc
             # 2-field slot instead of a dedicated field.
             obj = OandaBroker(nickname=a["nickname"], api_key=api_key, account_id=secret_key, is_paper=a["is_paper"])
         elif broker == "coinbase":
-            obj = CoinbaseBroker(nickname=a["nickname"], api_key=api_key, api_secret=secret_key)
+            obj = CoinbaseBroker(
+                nickname=a["nickname"], api_key=api_key, api_secret=secret_key,
+                quote_currency=a.get("quote_currency", "USD"),
+            )
         elif broker == "kraken":
             obj = KrakenBroker(nickname=a["nickname"], api_key=api_key, api_secret=secret_key)
         elif broker == "tastytrade":
