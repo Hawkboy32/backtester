@@ -63,12 +63,21 @@ def _is_pid_alive(pid: int) -> bool:
     """Same OS-level check as auto_trader.py's own _is_pid_alive /
     diagnose_bot.py's copy - kept as a third copy rather than imported,
     since this script must stay importable (and startable) even if
-    auto_trader.py itself is what's currently broken."""
+    auto_trader.py itself is what's currently broken.
+
+    CREATE_NO_WINDOW (2026-09-05): this runs every CHECK_INTERVAL_SECONDS
+    (60s) from a windowless pythonw.exe parent - without this flag, Windows
+    pops a fresh console for the child tasklist.exe every single time, which
+    flashes on screen and closes. Purely cosmetic (doesn't touch capture,
+    timeout, or exit-code behavior at all), but a console flashing every
+    minute, unattended, forever, is worth silencing - confirmed live as
+    exactly what the user was seeing."""
     if os.name == "nt":
         try:
             out = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
                 capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
             return str(pid) in out.stdout
         except Exception:  # noqa: BLE001
@@ -109,6 +118,7 @@ def _pid_command_line(pid: int) -> str:
         return subprocess.run(
             ["powershell", "-NoProfile", "-Command", script],
             capture_output=True, text=True, timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         ).stdout.strip()
     except Exception:  # noqa: BLE001
         return ""
@@ -175,6 +185,7 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         subprocess.run(
             ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
             capture_output=True, timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except Exception:  # noqa: BLE001
         try:
@@ -199,7 +210,10 @@ def _kill_pid_tree(pid: int) -> None:
     left running while a replacement started alongside it: the exact
     double-instance this file exists to prevent."""
     try:
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=30)
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW,
+        )
     except Exception:  # noqa: BLE001
         pass
 

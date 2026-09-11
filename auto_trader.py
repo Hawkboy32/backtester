@@ -309,6 +309,19 @@ def _maybe_check_roster_gap(status: AutoTraderStatus, control) -> None:
     # below still counts as "checked today" and doesn't retry (and refail)
     # every poll cycle for the rest of the day.
     status.last_roster_check_date = today
+    # ...and PERSIST it here, not just in memory. Found live 2026-09-02:
+    # the assignment above only reaches disk via a later save_status(), so
+    # when the scan below outran the watchdog's 660s staleness threshold the
+    # process was killed before ever saving it. Every relaunch then re-read
+    # the stale on-disk date, re-ran the same doomed scan, and was killed
+    # again — seven relaunches across ~2.5 hours with the trader effectively
+    # dead the whole time. Writing it now means a scan that still overruns
+    # costs ONE cycle, never an unbounded loop.
+    status.last_heartbeat = datetime.now(timezone.utc).isoformat()
+    try:
+        save_status(status)
+    except Exception:  # noqa: BLE001
+        pass  # a failed flag write must never stop the check itself
 
     try:
         state = roster.load_roster()
@@ -342,6 +355,15 @@ def _maybe_check_roster_gap(status: AutoTraderStatus, control) -> None:
             to_date=to_date.isoformat(),
             client=PolygonClient(),
             market_calendar="equity",
+            # Keep proving liveness WHILE this runs. A full S&P 500 +
+            # Nasdaq-100 rescan takes far longer than the watchdog's 660s
+            # staleness threshold, so without this the watchdog kills a
+            # perfectly healthy scan mid-flight and never lets it finish —
+            # the 2026-09-02 crash loop above. Same reasoning as the
+            # touch_heartbeat calls in run_cycle's own loops: a heartbeat
+            # measures LIVENESS, not completion. Throttled internally to
+            # one write per 30s, so this costs a handful of writes total.
+            progress_callback=lambda _i, _total, _ticker: touch_heartbeat(status),
         )
         run_id = record_scan(
             {
@@ -1220,6 +1242,7 @@ def _is_pid_alive(pid: int) -> bool:
             out = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
                 capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
             return str(pid) in out.stdout
         except Exception:  # noqa: BLE001
