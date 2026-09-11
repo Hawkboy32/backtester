@@ -1,10 +1,30 @@
 [theme]
 base = "dark"
+# Refined 2026-09-10 to match the Holotable reference art (gunmetal console +
+# tactical-map tiles + cyan holo-glow) - see CLAUDE_NOTES.txt. primaryColor is
+# left byte-for-byte unchanged: main.dart documents this exact hex as a
+# deliberately shared seed color across the dashboard, mobile app, and the
+# Android widget (SignalsWidget.kt) - not something to drift independently.
 primaryColor = "#3dc7f0"
-backgroundColor = "#0b0e14"
-secondaryBackgroundColor = "#141a24"
-textColor = "#e8f1fa"
+backgroundColor = "#0c0e11"
+secondaryBackgroundColor = "#1a1d22"
+textColor = "#eaf2f7"
+borderColor = "#2e3339"
 font = "monospace"
+
+# Semantic tokens - greenColor/redColor deliberately stay separate from the
+# app's own COLOR_GAIN/COLOR_LOSS constants in app.py (gain/loss must never
+# silently drift if one of the two gets tuned later), but are set to the same
+# values here so native st.badge/st.success/st.error etc. match the custom
+# signal-feed colors instead of falling back to Streamlit's defaults.
+greenColor = "#00e676"
+redColor = "#ff5252"
+# Tactical-map gold/tan and brick-red accents from the reference art, for
+# decorative use only (badges, the console indicator grid) - never reused for
+# gain/loss so the green=profit/red=loss convention stays unambiguous.
+yellowColor = "#c9a227"
+orangeColor = "#b8935a"
+grayColor = "#8899a6"
 
 [browser]
 gatherUsageStats = false

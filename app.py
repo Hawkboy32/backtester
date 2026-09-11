@@ -101,15 +101,16 @@ TERMINAL_CSS = """
 <style>
 [data-testid="stMetricValue"] { font-family: 'Roboto Mono', 'Courier New', monospace; }
 div[data-testid="stMetric"] {
-    background-color: #121820;
-    border: 1px solid #1e2a35;
-    border-radius: 6px;
+    background-color: #16191d;
+    border: 1px solid #2e3339;
+    border-top: 2px solid #3dc7f0;
+    border-radius: 4px;
     padding: 10px 14px;
 }
 .stTabs [data-baseweb="tab-list"] { gap: 4px; }
 .stTabs [data-baseweb="tab"] {
     font-family: 'Roboto Mono', 'Courier New', monospace;
-    background-color: #121820;
+    background-color: #16191d;
     border-radius: 4px 4px 0 0;
 }
 code, .stCode, .stCodeBlock { font-family: 'Roboto Mono', 'Courier New', monospace !important; }
@@ -117,7 +118,7 @@ code, .stCode, .stCodeBlock { font-family: 'Roboto Mono', 'Courier New', monospa
     max-height: 420px;
     overflow-y: auto;
     background-color: #0b0f14;
-    border: 1px solid #1e2a35;
+    border: 1px solid #2e3339;
     border-radius: 6px;
     padding: 8px;
 }
@@ -127,12 +128,44 @@ code, .stCode, .stCodeBlock { font-family: 'Roboto Mono', 'Courier New', monospa
     padding: 3px 8px;
     margin-bottom: 2px;
     border-left: 3px solid #8899a6;
-    background-color: #121820;
+    background-color: #16191d;
     white-space: nowrap;
     overflow-x: auto;
 }
+
+/* Console indicator grid - small square "LED" cells, echoing the Holotable
+   reference art's grid-button control panels. Decorative/glanceable only;
+   every cell's real status is still stated in the st.metric row next to it,
+   so this never becomes the only place a state is visible. */
+.console-grid {
+    display: flex;
+    gap: 6px;
+    margin: 4px 0 10px 0;
+}
+.console-cell {
+    width: 1.6rem;
+    height: 1.6rem;
+    border-radius: 3px;
+    border: 1px solid #2e3339;
+    background-color: #16191d;
+}
+.console-cell.lit-green { background-color: #00e67633; border-color: #00e676; box-shadow: 0 0 6px #00e67655; }
+.console-cell.lit-red { background-color: #ff525233; border-color: #ff5252; box-shadow: 0 0 6px #ff525255; }
+.console-cell.lit-amber { background-color: #c9a22733; border-color: #c9a227; box-shadow: 0 0 6px #c9a22755; }
+.console-cell.lit-cyan { background-color: #3dc7f033; border-color: #3dc7f0; box-shadow: 0 0 6px #3dc7f055; }
 </style>
 """
+
+
+def console_grid(states: list[str]) -> str:
+    """Renders `states` (each "green"/"red"/"amber"/"cyan"/"off") as a row of
+    small square indicator cells. Purely decorative - see .console-grid's own
+    comment in TERMINAL_CSS for why nothing relies on this being the only
+    place a status is shown."""
+    cells = "".join(
+        f'<div class="console-cell{f" lit-{s}" if s != "off" else ""}"></div>' for s in states
+    )
+    return f'<div class="console-grid">{cells}</div>'
 
 
 def signal_feed_line(ticker: str, strategy_name: str, total_return: float | None, sharpe_ratio: float | None, error: str | None) -> str:
@@ -2808,7 +2841,8 @@ def _apply_risk_preset(name: str) -> None:
 
 
 def render_auto_trading_tab() -> None:
-    st.subheader("Automated trading")
+    st.subheader("🤖 Chopper")
+    st.caption("The automated trading bot — this page arms it, watches it, and can stop it.")
     st.warning(
         "This mode executes trades on its own, on a timer, without you reviewing each one. "
         "It runs as a separate process (`auto_trader.py`) coordinated through shared control/"
@@ -3587,9 +3621,20 @@ def _render_bot_status(status, control, *, kill_switch: bool = True, kill_key: s
             heartbeat_stale = True
             age = None
     actually_running = status.running and not heartbeat_stale
+    trades_ok = status.trades_today < control.max_trades_per_day
+
+    st.markdown(
+        console_grid([
+            "green" if actually_running else "red",
+            "green" if (control.enabled and not control.killed) else "red",
+            "green" if trades_ok else "amber",
+            "red" if control.killed else "off",
+        ]),
+        unsafe_allow_html=True,
+    )
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Process", "🟢 Running" if actually_running else "🔴 Not running")
+    c1.metric("Chopper", "🟢 Running" if actually_running else "🔴 Not running")
     c2.metric("Armed", "🟢 Yes" if control.enabled and not control.killed else "🔴 No")
     c3.metric("Trades today", f"{status.trades_today} / {control.max_trades_per_day}")
     c4.metric("Killed", "⚠ Yes" if control.killed else "No")

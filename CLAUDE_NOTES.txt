@@ -4088,9 +4088,15 @@ spawns pythonw3.13.exe as a child, so every process shows up as a stub+real PAIR
 tasklist for one logical process is normal, not a duplicate instance. Terminating the stub was
 measured to take the child with it (the watchdog still uses taskkill /T for certainty).
 
-=== OPEN BUG 2026-08-25: extra_targets account_ids is NOT enforced (live-money risk) ===
-STATUS: NOT FIXED. Mitigated only by removing the affected target. Fix planned after a market
-close (deliberately not mid-session - it changes live order routing).
+=== FIXED 2026-09-01 (was OPEN BUG 2026-08-25): extra_targets account_ids now enforced ===
+STATUS: FIXED. _resolve_targets() now returns each target's account_ids (None for primary/
+unrestricted, a specific list for extra_targets groups), and run_cycle's loop scopes
+broker_accounts to that list before calling _trade_target - see auto_trader.py lines ~168-226
+and ~1194-1201. Regression test: verify_target_routing.py (run `python verify_target_routing.py`,
+offline, no broker calls) - all 9 checks pass, including the exact EURUSD/GBPUSD cross-
+contamination case from the incident below. Live control.json re-verified 2026-09-01: IG Forex
+scoped only to MyIGPaper, OANDA Forex only to myOanda, Crypto BTC to both crypto accounts as
+intended - no cross-contamination in the running config.
 
 WHAT. control.json's extra_targets entries carry an "account_ids" list, and the NDX group was
 even labelled "...(PAPER)" with account_ids=[MyIGPaper]. That field is IGNORED for routing.
@@ -4126,6 +4132,318 @@ LESSON. is_paper on the account in the config was checked and reported as proof 
 paper-only. It wasn't proof of anything - the field is real but nothing routes on it. Verify a
 restriction is ENFORCED end-to-end before describing something as safe, especially for
 anything that can reach a live account.
+=== FIXED 2026-09-02: roster-gap scan starved the heartbeat -> crash loop ===
+CORRECTION 2026-09-05: originally written up as a single ~1.3h/7-relaunch incident on Sept 2
+evening (see below, unchanged) - a weekly-review pass over the raw watchdog logs found the
+IDENTICAL silent signature ("Auto-trader starting" then nothing, zero heartbeats) in two
+EARLIER episodes: Aug 31 21:04 -> Sep 1 04:04 (39 relaunches, ~7h) and Sep 1 21:06 -> Sep 2
+04:04 (39 relaunches, ~7h). Both match this exact bug and are covered by the same fix below -
+the fix's live verification (flag flipped, heartbeat advancing, no further relaunches) still
+stands, this only corrects how long the bug had ALREADY been running undetected before that.
+
+NOT covered by this fix, found in the same re-audit - a DIFFERENT bug, still open: Sep 1
+10:04 -> 19:29 (53 relaunches, ~9.4h) shows a different signature entirely. The watchdog log
+says "process exited" (not "no fresh heartbeat"), and auto_trader.log for that window is full
+of real IBKR Gateway failures (repeated "Connectivity between IBKR and Trader Workstation has
+been lost", positions/executions/account-update timeouts) interleaved with dozens of "Another
+auto-trader instance appears to be running (fresh heartbeat) - exiting to avoid double-trading"
+- i.e. _another_instance_alive()'s guard (auto_trader.py ~1256) kept telling fresh relaunches a
+healthy twin already existed, while the watchdog separately kept deciding the tracked process
+had died and needed replacing. Root mechanism not yet pinned down (candidates: the watchdog's
+660s staleness threshold vs. the guard's own 300s/3-poll-interval freshness check disagreeing
+about the same heartbeat; a foreign-launched-process kill path failing quietly; the degraded
+IBKR calls still landing just enough touch_heartbeat writes to look "fresh" to the guard while
+looking "stale" to the watchdog) - needs its own dedicated investigation, not a bolt-on fix.
+Could recur on a future IBKR outage night. See CLAUDE_NOTES.txt/memory for the open-bug entry.
+
+ORIGINAL WRITE-UP (2026-09-02, the episode actually diagnosed live), unchanged below:
+SYMPTOM. From ~17:00 ET the watchdog relaunched auto_trader every 11 minutes, seven times,
+each new process logging only "Auto-trader starting" and then nothing. status.json stayed
+frozen on a DEAD pid (6728, heartbeat 21:00:27 UTC) the whole time. No traceback anywhere -
+the process wasn't crashing, it was being killed mid-work.
+
+CAUSE. _maybe_check_roster_gap() runs a REAL full S&P 500 + Nasdaq-100 rescan when the roster
+has a gap (it did: 5 active vs roster_size 6, plus Q and BIIB paused) and it's past 17:00 ET.
+That scan takes far longer than the watchdog's 660s staleness threshold, and it ran with NO
+heartbeat writes - so a perfectly healthy scan looked dead and got killed every time. Worse,
+`status.last_roster_check_date = today` was only set IN MEMORY; the kill landed before any
+save_status(), so every relaunch re-read the stale on-disk date (2026-08-20) and re-ran the
+same doomed scan. That's what made it an unbounded loop rather than one slow cycle.
+
+FIX (both halves needed):
+  1. PERSIST last_roster_check_date to disk immediately, before the scan. A scan that still
+     overruns now costs ONE cycle, never a loop.
+  2. Pass progress_callback=touch_heartbeat into run_scan, so liveness keeps being proven
+     per-ticker while the scan runs and it can actually finish.
+Verified live: flag flipped to 2026-09-02 instantly, heartbeat advancing ~30s, no further
+watchdog relaunches. The overdue rescan (blocked since 2026-08-20) then completed.
+
+LESSON. touch_heartbeat's own docstring already described this exact failure from 2026-08-26
+("the watchdog dutifully relaunched it roughly every 11 minutes for two hours") - the fix was
+applied to run_cycle's loops but NOT to the one place that deliberately runs an expensive
+scan. When adding a heartbeat because something slow can look dead, audit every slow path,
+not just the one that bit you.
+
+=== OPEN BUG 2026-09-02: qty rounded to 4dp - unusable for high-priced assets ===
+STATUS: NOT FIXED. Crypto group PARKED as mitigation (see below). Fix deferred deliberately -
+compute_qty_for_account sizes EVERY live trade on EVERY broker, so it wants a considered pass
+with tests, not a late-night patch.
+
+WHAT. execution.py's compute_qty_for_account ends with `qty = round(dollars / divisor, 4)`.
+Fine for stocks; broken for anything priced in the tens of thousands. At BTC ~$77k the
+smallest expressible non-zero order is 0.0001 BTC = ~$7.71:
+  - below that            -> qty = 0.0, broker rejects outright
+  - just above            -> rounds UP and OVER-SIZES (at a $9.35 balance, 50% sizing wants
+                             $4.67 but submits $7.71 = 82% of the account)
+Both brokers accept 8dp (Coinbase base_increment=0.00000001, Kraken lot_decimals=8), so the
+app is discarding precision it's entitled to use. Blast radius today is crypto ONLY - at
+MPWR's ~$1,226 the 4dp rounding is a ~0.5% error, harmless - so live equity trading is fine.
+
+THIS IS WHY THE CRYPTO ORDERS NEVER WORKED. Earlier explanations in this session were WRONG
+twice over (first "Coinbase portfolio scoping", then "GBP can't fund a USD pair"). The actual
+mechanism: both accounts size to qty=0.0. Kraken's "volume minimum not met" is literally
+correct - it was being sent a zero-volume order.
+
+TWO REAL SECONDARY BUGS, also unfixed:
+  - kraken.py get_account_snapshot: `cash = balance.get("ZUSD", 0.0)` reads USD ONLY, so a
+    GBP-funded account reports cash/buying_power = 0 regardless of holdings. KRKAPI holds
+    ZGBP 7.00 and reports buying_power 0.0.
+  - CBAPI has NO USD wallet at all (accounts: BTC/EUR/GBP only, balance GBP 5) - a BTC-USD
+    buy returns INVALID_ARGUMENT "account is not available" even with a valid size.
+  - Both brokers' ticker maps are USD-only: kraken _pair() and coinbase _product_id() both
+    pass "X:BTCGBP" through UNCHANGED rather than mapping it. Polygon DOES serve X:BTCGBP,
+    and both exchanges list the GBP pair (Kraken XBTGBP ordermin 0.00005/costmin GBP0.43;
+    Coinbase BTC-GBP quote_min_size GBP1), so trading in GBP natively is a viable route -
+    but it needs those two mappings generalised beyond USD first.
+
+UPDATE 2026-09-05: KRKAPI resolved (converted its GBP balance to real USD directly on Kraken -
+$15.81 clears the 4dp floor with an acceptable ~1% error) and unparked. CBAPI resolved
+DIFFERENTLY - see the next entry below - and also unparked, though it still won't actually
+trade until funded past the same rounding floor. The 4dp rounding bug ITSELF remains unfixed;
+this only removed the secondary blockers stacked on top of it.
+
+=== FIXED 2026-09-05: Coinbase native-currency execution + sizing (CBAPI) ===
+STATUS: FIXED. CBAPI holds GBP with no USD wallet at all (confirmed live - Coinbase's own
+Convert UI only offers GBP<->Tokenised-GBP for this account, not GBP->USD or even GBP->USDC
+despite USDC showing as a zero-balance line item; a real USDC-GBP trading pair exists as a
+workaround but was skipped in favor of the simpler fix below). Rather than fight Coinbase's own
+UI or introduce a manual GBP->USDC conversion step, CBAPI now executes its NATIVE product
+directly: BTC-GBP, which is online and fully tradeable, no conversion needed.
+
+THE ACTUAL FIX HAD TWO HALVES, NOT ONE. Swapping the execution product alone would have been
+actively DANGEROUS, not just incomplete: compute_qty_for_account sizes qty = equity / price,
+and CBAPI's equity reports in GBP while the strategy's own reference price (from the shared
+Polygon X:BTCUSD feed, kept for signal fidelity) is in USD. Dividing GBP equity by a USD price
+would have silently UNDER-SIZED every order by roughly the GBP/USD rate (~35% off, confirmed in
+verify_coinbase_native_currency.py) with NO error - worse than the clean rejection it replaced.
+  1. CoinbaseBroker gained a `quote_currency` constructor param (default "USD", zero behavior
+     change for every other Coinbase account) - `_product_id()` now builds "<BASE>-<quote_currency>"
+     instead of hardcoding "-USD".
+  2. A new `native_reference_price(ticker, fallback_price)` hook on BrokerAccount (base.py),
+     default a pure no-op returning fallback_price unchanged - true for every broker except one
+     explicitly configured with a non-USD quote_currency. CoinbaseBroker overrides it: when
+     quote_currency != "USD", fetches Coinbase's OWN live price for the real executed product
+     (one authoritative number from the venue about to fill the order) rather than deriving a
+     GBP price via a separately-sourced FX rate. Raises on failure rather than silently falling
+     back to fallback_price - a sizing exception is caught by the caller and skips that cycle's
+     trade (fails closed), which is the whole point.
+  3. execution.py's compute_qty_for_account calls this hook once, right before any sizing math
+     touches reference_price.
+  4. accounts.py's build_broker_accounts() reads quote_currency from the linked-account record
+     (broker_accounts.json) and passes it through - same pattern IBKR already uses for
+     asset_class via conn_params.
+CBAPI's record now carries "quote_currency": "GBP" (backup: broker_accounts.json.bak-20260905-*).
+
+Regression test: verify_coinbase_native_currency.py (offline, no real broker calls) - proves
+(a) every other Coinbase account and every other broker type is a byte-for-byte no-op, and
+(b) the actual bug: at a bigger balance than CBAPI's real one (chosen deliberately so the
+SEPARATE 4dp-rounding bug doesn't coincidentally flatten both numbers to the same answer), qty
+sizes off the live GBP price, NOT the raw USD signal price - the buggy path would have produced
+75% of the correct size. Verified live against the real account: quote_currency=GBP ->
+_product_id resolves to BTC-GBP -> native_reference_price fetched a real live quote (a genuine
+Coinbase API call, not a stub) -> qty correctly computes to 0.0 at CBAPI's actual GBP5 balance
+(still below the 4dp floor, same known limitation as KRKAPI had at GBP7 - needs ~GBP12-15+ to
+clear it, no code left to fix once funded).
+
+control.json's "Crypto BTC" group restored (tickers moved back from paused_tickers, backup:
+auto_trader_state/control.json.bak-20260905-*) - KRKAPI can trade for real now; CBAPI resolves
+to a real order once funded further, and fails CLOSED (qty=0, clean skip) rather than
+mis-sizing until then.
+
+LESSON. The user's own framing caught something I'd gotten wrong twice already: I initially
+proposed BTC-GBP as the "more complex, defer it" option and USDC as the "cleaner, do it now"
+option, then discovered live that Coinbase's own UI wouldn't actually let this account reach
+USDC easily - BTC-GBP turned out to be the SIMPLER path once real UI friction was factored in,
+not the harder one. Don't rank options by which touches less code without checking whether the
+"simpler" one is actually reachable for this specific account.
+
+=== FIXED 2026-09-06: Kraken positions reported under the wrong ticker - bot couldn't manage a real position ===
+STATUS: FIXED. First real crypto fill landed 2026-09-06 14:16 UTC (KRKAPI, X:BTCUSD, order
+OCQQKM-3EXX4-DE5R2D) after the qty-rounding/currency fixes above. A second BUY attempt at
+15:31 ("Insufficient funds") on the SAME account, already holding that position, was the
+symptom that surfaced this bug.
+
+WHAT. kraken.py's get_positions() returned Kraken's raw Balance-response asset code ("XXBT")
+as a Position's ticker, instead of this app's "X:BTCUSD" form. auto_trader.py's own position
+check - `existing_position = next(p for p in positions if p.ticker == ticker and p.qty > 0)` -
+compares against the normalized ticker, so "XXBT" != "X:BTCUSD" ALWAYS failed, meaning the bot
+thought this account was permanently flat regardless of what it actually held.
+
+CONSEQUENCE, both directions:
+  - BUY signal: kept trying to buy MORE every cycle, never recognizing the existing position -
+    only stopped this time by running out of funds, not by the intended one-position design.
+  - SELL signal: silently skipped every time - a long-only account with no perceived position
+    can't open a short, and there's no perceived LONG to close either. The bot had NO path to
+    close this position on its own, no matter what the strategy signalled.
+A real, live BTC position sat unmanageable by the bot's own logic until this was fixed.
+
+FIX. Kraken's raw asset codes don't reliably follow the same naming _pair() already translates
+for order submission (confirmed live via Kraken's public Assets endpoint for all 15 symbols in
+data/crypto_universe.csv: 7 carry a legacy "X" prefix - XXBT, XETH, XXRP, XXDG, XLTC, XXLM,
+XETC - the other 8 don't). Added `_KRAKEN_BALANCE_KEY_TO_SYMBOL`, a verified reverse table (not
+guessed - same discipline as the existing `_KRAKEN_SYMBOL_OVERRIDES`), and get_positions() now
+translates through it to build "X:<SYMBOL>USD" before returning each Position. Falls back to
+the raw code for anything outside the table rather than dropping the row or raising - same
+"don't fail the whole read over one unfamiliar row" precedent as coinbase.py's
+_ticker_from_epic.
+
+Regression test: verify_kraken_position_ticker.py (offline, canned Balance response) - proves
+fiat/zero-balance rows are still skipped, XXBT and a non-prefixed asset (ADA) both translate
+correctly, an unmapped asset falls back safely, and reproduces auto_trader.py's exact
+existing_position lookup line to confirm it now actually finds the position. Verified live
+against the real account too: get_positions() now returns ticker='X:BTCUSD', qty=0.0001,
+matching the real fill - the exact comparison auto_trader.py needs. Restarted 2026-09-06 to
+pick up the fix; auto_trader confirmed on new pid, fresh heartbeat, no disruption.
+
+LESSON. Every other broker in this project translates its own asset-naming BOTH ways (ticker
+-> broker format for orders, broker format -> ticker for reads) - ig.py's _ticker_from_epic,
+coinbase.py's _product_id are both two-way. Kraken only had the order-submission direction
+(_pair()); get_positions() was never given the reverse. When a broker integration adds a
+ticker-format translation, check both directions exist, not just the one the current feature
+needed.
+
+=== 2026-09-07: AlphaInsider strategy research - 1 of 3 candidates promoted ===
+Sourced 3 candidate strategies from browsing alphainsider.com's marketplace (2026-09-06) -
+NOT copied from AlphaInsider itself (a copy-trading marketplace, not a strategy-logic source;
+its own displayed "5 Year" returns on <1-year-old strategies are a confirmed data-integrity
+problem, not to be trusted at face value). All 3 implement standard, textbook indicator
+formulas (Wilder DMI/ADX 1978, Detrended Price Oscillator, Linear Regression Channel) added to
+STRATEGY_REGISTRY and indicators.py. A 4th candidate (mirroring US Congress members' disclosed
+trades) was researched and explicitly DROPPED before implementation - Polygon doesn't cover
+disclosure data at all (a fundamentally different data type than price/volume), and the real
+options (Quiver Quantitative subscription, or a from-scratch scraper against free government
+filings) were both rejected as not worth the recurring cost/maintenance burden right now.
+
+CORRECTNESS FIRST. verify_alphainsider_indicators.py (offline, synthetic data with a KNOWN
+right answer) caught nothing wrong with the formulas themselves, but DID catch a bad test
+(a smooth sine "flat" series still has sustained directional runs - fixed to real white noise).
+Confirmed: DMI/ADX saturates correctly on a clean synthetic uptrend (ADX=100, +DI>-DI
+throughout) and stays low on genuine noise; DPO detrends a pure trend to ~0 while preserving a
+real cycle's oscillation; Linear Regression Channel fits a perfectly straight line exactly
+(zero residual) and recovers known injected noise's magnitude.
+
+TUNING CAUGHT BEFORE THE EXPENSIVE RUN. A 3-ticker/30-day smoke test showed Linear Regression
+Channel and DPO firing 400-700 trades per ticker at their textbook default num_std (2.0/1.5) -
+compared directly against Bollinger Mean Reversion's own 26-40 trades on the SAME 3 tickers at
+its tuned num_std=3.0. Widened both new strategies' default num_std to 3.0 to match - trade
+counts dropped to 33-70, in line with the live baseline. Textbook indicator defaults are tuned
+for daily bars; this project trades 1-minute bars, and Bollinger MR had already learned this
+lesson once. Applying it to new candidates before the real test (not after) avoided burning
+~6 hours of scan time on a comparison that would've been unfair to begin with.
+
+THE REAL TEST. Full S&P 500 + Nasdaq-100 (518 tickers), 30-day trailing window, minute bars -
+the EXACT universe/window/methodology roster.RosterConfig's own rescan already uses, run
+alongside VWAP Mean Reversion and Bollinger Mean Reversion (both live) as a baseline, not in
+isolation. ~6 hours wall-clock (run in background). 2,590 rows recorded to scan_history.db,
+run_id=114.
+
+RESULTS (avg across every ticker that produced >=1 trade):
+  Strategy                   AvgRet%  AvgSharpe  AvgMaxDD%  AvgWinRate%  AvgPF
+  DMI/ADX Trend                -5.07      -5.40      -6.88        19.7   0.48
+  Linear Regression Channel     3.26       3.51      -2.07        59.6   3.58
+  DPO Mean-Reversion           -0.90      -2.25      -2.48        37.3   0.85
+  VWAP Mean Reversion (live)    6.33       3.12      -5.40        72.8   1.72
+  Bollinger Mean Reversion(live)2.66       3.01      -2.26        65.9   6.42
+
+VERDICT, no cherry-picking:
+  - Linear Regression Channel: PROMOTED. Beats both live strategies on max_drawdown, beats
+    both on Sharpe too. Added to roster.json's real rescan_strategy_names (backup:
+    auto_trader_state/roster.json.bak-20260907-*) AND RosterConfig's own default, so it's now
+    genuinely eligible for the roster's normal promotion/demotion process - NOT force-added to
+    the active roster directly, same "promotion is a deliberate, separate action" principle
+    already established for roster.compute_recommendation.
+  - DMI/ADX Trend: REJECTED. Sharpe -5.40, profit factor 0.48, win rate 19.7% - losing broadly
+    across the real universe, not a small-sample fluke. The ADX>=25 trend-strength filter did
+    not fix what a bare +DI/-DI crossover does on noisy 1-minute bars. Left in STRATEGY_REGISTRY
+    (so it CAN be re-tested later, e.g. on daily bars or a higher ADX threshold) but NOT added
+    to any rescan/roster list.
+  - DPO Mean-Reversion: REJECTED. Mildly net-negative (Sharpe -2.25, PF 0.85) even after fixing
+    the same overtrading issue LRC had. Same "left registered, not promoted" treatment as DMI/ADX.
+
+=== 2026-09-07: IBKR Live Gateway restart + Kraken position price enrichment ===
+Two small items during a routine pre-flight check.
+
+IBKR Live: pre-flight found the API port unreachable for 5+ hours (since ~02:11 UTC, IBC's own
+03:00 daily restart never completed - stuck waiting on a 2FA push that apparently never landed
+on the phone). IBC's own command-channel restart (Restart.bat) turned out to be unusable here -
+config.ini has CommandServerPort=0, so it's disabled. Fixed by stopping the stuck
+ibgateway1.exe/java.exe processes directly and relaunching via IBC's own StartGateway.bat
+(TRADING_MODE=live, same config it always uses) - this forces a full fresh login, which fires
+a new 2FA push. Confirmed back up: port 4001 (NOT 4002 - that's the paper account's port, easy
+mixup) reachable, live account snapshot pulled successfully (equity $34.78, no open positions).
+Chopper's own ibgateway_watchdog.py only monitors/notifies, it doesn't restart anything itself -
+this was a manual intervention, not something the watchdog will do automatically next time.
+
+Kraken position price enrichment (see [[project-trading-bot-kraken-position-ticker-bug]] for the
+full memory entry): get_positions() was hardcoding current_price=None/market_value=0.0 for every
+Kraken position - not a bug, just always a stub, since Kraken's Balance API has no price field.
+Added a live lookup via Kraken's public Ticker endpoint, using the symbol table the 2026-09-06
+ticker fix already built. Verified live (KRKAPI's real BTC dust position now shows a real
+current_price/market_value) and verified a simulated lookup failure degrades cleanly without
+breaking position recognition. avg_entry_price/unrealized_pl remain 0.0 - Kraken's API has no
+cost-basis field at all, and pulling that from this app's own live_trades.db was a deliberate
+non-choice (broker layer stays a pure API view).
+
+=== 2026-09-07 (cont'd): Kraken price enrichment + mobile chart fixes ===
+Three small follow-ups after the pre-flight check above, chained together - each caught by
+actually looking at the mobile app after the previous fix, not assumed fixed.
+
+1. Kraken get_positions() price enrichment: added a live price lookup via Kraken's public
+   Ticker endpoint (using the symbol table the 2026-09-06 ticker fix already built), so
+   current_price/market_value now populate for real instead of always being None/0.0. Best-effort
+   - a lookup failure degrades to the old stub rather than dropping the position. avg_entry_price
+   stays 0.0 permanently: Kraken's API has no cost-basis field at all. See
+   [[project_trading_bot_kraken_position_ticker_bug]].
+
+2. Mobile chart entry-line bug: the signal-detail chart's "Entry" reference line drew at
+   position.avgEntryPrice unconditionally. For Kraken that's always 0.0 (see above) - not a real
+   price, but the chart's y-axis autoscale didn't know that, so it dragged minY down to ~0 and
+   squashed the real ~$79k BTC price action into a thin band at the top. User caught this on
+   their real phone. Fixed in signal_detail_screen.dart: skip the entry line entirely when
+   avgEntryPrice <= 0. Rebuilt and redeployed via the existing /download/app-release.apk endpoint.
+
+3. Bigger one, found while checking the fix from #2: user reported the chart STILL looked wrong,
+   but only at 5m/15m, not 1m. Traced to a real bug in CoinbaseBroker.get_live_bars() (not a
+   display issue this time) - it called _product_id(ticker) with no override, which defaults to
+   self.quote_currency (GBP for CBAPI, since the 2026-09-05 native-currency fix). So CBAPI was
+   silently fetching BTC-GBP candles and returning them mislabeled as X:BTCUSD - ~$58.7k GBP
+   price shown as if it were the ~$79.4k USD price. The 1m view looked fine only because it was
+   using a cached signal snapshot that happened to be sourced from KRKAPI at the time, not CBAPI.
+   Checked live_trades.db first: CBAPI has never actually completed a trade, so no real financial
+   harm happened - but the bug WAS live and could have corrupted a real trading decision if CBAPI
+   had ever become the selected signal-computation source instead of just the chart's data source.
+   Fix: gave _product_id() an explicit quote_currency override param; get_live_bars() now always
+   passes "USD" (its documented contract - shaped identically to Polygon's bars - requires this),
+   while native_reference_price/submit_market_order keep using the account's real currency
+   (unchanged). Verified live via verify_coinbase_bars_always_usd.py and confirmed through the
+   actual mobile /bars endpoint at all three granularities after restarting the backend to pick
+   up the fix. Full narrative in [[project_trading_bot_coinbase_native_currency]].
+
+Pattern worth remembering: a currency-aware change motivated by ONE real problem (order execution)
+needs every call site of the helper it touches audited, not just the one that motivated it -
+get_live_bars was simply missed when the GBP fix was first made, because nobody was looking at a
+chart at the time.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,
