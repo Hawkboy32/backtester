@@ -5,7 +5,10 @@ from __future__ import annotations
 from backtester.strategies.bollinger_breakout import BollingerBreakoutStrategy
 from backtester.strategies.bollinger_mean_reversion import BollingerMeanReversionStrategy
 from backtester.strategies.break_and_retest import BreakAndRetestStrategy
+from backtester.strategies.dmi_adx_trend import DmiAdxTrendStrategy
+from backtester.strategies.dpo_mean_reversion import DpoMeanReversionStrategy
 from backtester.strategies.ema_crossover import EmaCrossoverStrategy
+from backtester.strategies.linear_regression_channel import LinearRegressionChannelStrategy
 from backtester.strategies.fibonacci_pullback import FibonacciPullbackStrategy
 from backtester.strategies.flag_pennant import FlagPennantContinuationStrategy
 from backtester.strategies.liquidity_sweep import LiquiditySweepStrategy
@@ -174,6 +177,37 @@ STRATEGY_REGISTRY: dict[str, dict] = {
         "class": FibonacciPullbackStrategy,
         "default_params": {"swing_window": 30, "level": "0.618", "tolerance_pct": 0.3},
         "regime": "trend",
+    },
+    # Sourced from AlphaInsider strategy-browsing (2026-09-06) as candidates
+    # worth testing - all three implement standard, textbook indicator
+    # formulas (Wilder DMI/ADX 1978, Detrended Price Oscillator, Linear
+    # Regression Channel), not any one script author's proprietary logic. Not
+    # live-deployed by default - added to STRATEGY_REGISTRY so they CAN be
+    # scanned/backtested and considered by the roster's normal rescan/
+    # promotion process, same as every other candidate; nothing here forces
+    # them into a live roster.
+    "DMI/ADX Trend": {
+        "class": DmiAdxTrendStrategy,
+        "default_params": {"period": 14, "adx_threshold": 25.0},
+        "regime": "trend",
+    },
+    "Linear Regression Channel": {
+        "class": LinearRegressionChannelStrategy,
+        # num_std widened 2.0 -> 3.0 after a smoke test showed the textbook
+        # default overtrading badly on minute bars (394-498 trades/ticker in
+        # 30 days, vs Bollinger Mean Reversion's own 26-40 at its tuned
+        # num_std=3.0 on the same sample) - matching Bollinger's already-
+        # learned lesson about band width on this project's actual bar
+        # granularity, not the textbook value written for daily-bar use.
+        "default_params": {"period": 20, "num_std": 3.0},
+        "regime": "range",
+    },
+    "DPO Mean-Reversion": {
+        "class": DpoMeanReversionStrategy,
+        # Same overtrading finding as Linear Regression Channel above (614-699
+        # trades/ticker at num_std=1.5) - widened to match.
+        "default_params": {"period": 20, "num_std": 3.0},
+        "regime": "range",
     },
 }
 

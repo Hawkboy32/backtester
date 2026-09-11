@@ -6,6 +6,7 @@ the same underlying math (EMA, session boundaries, swing points).
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
@@ -206,3 +207,91 @@ def rsi(closes: pd.Series, period: int) -> pd.Series:
     avg_loss = loss.rolling(period).mean()
     rs = avg_gain / avg_loss.replace(0, pd.NA)
     return (100 - (100 / (1 + rs))).fillna(50)
+
+
+def directional_movement_index(bars: pd.DataFrame, period: int = 14) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Wilder's +DI / -DI / ADX (New Concepts in Technical Trading Systems,
+    1978) - the standard, textbook formula, not a specific author's script.
+    Wilder's own smoothing is an exponential average with alpha=1/period,
+    which is what ewm(alpha=1/period, adjust=False) computes exactly - the
+    same substitution pandas-ta and most modern implementations use rather
+    than reimplementing Wilder's original running-sum recurrence by hand.
+
+    Returns (plus_di, minus_di, adx), each 0-100. +DI/-DI show which
+    direction is winning; ADX (built from how far apart they are, then
+    smoothed the same way) shows how STRONGLY - low ADX means no real trend
+    regardless of which of +DI/-DI is on top, which is the piece none of
+    this project's other trend strategies filter on.
+    """
+    high, low, close = bars["high"], bars["low"], bars["close"]
+    prev_close = close.shift(1)
+    prev_high = high.shift(1)
+    prev_low = low.shift(1)
+
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+
+    up_move = high - prev_high
+    down_move = prev_low - low
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+    atr = true_range.ewm(alpha=1 / period, adjust=False).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    adx = dx.ewm(alpha=1 / period, adjust=False).mean()
+    return plus_di, minus_di, adx
+
+
+def detrended_price_oscillator(closes: pd.Series, period: int = 20) -> pd.Series:
+    """DPO - standard formula (Investopedia/StockCharts): today's value is a
+    PAST close (period//2 + 1 bars ago) minus the SMA ending today. Shifting
+    the close back rather than centering the SMA is deliberate and part of
+    the real definition, not an approximation - it's what removes the
+    trend/cycle component DPO is for, at the cost of DPO necessarily lagging
+    (it can never be computed for the most recent period//2+1 bars in a
+    live/incremental sense, same "trailing-only" constraint every other
+    strategy here already respects).
+    """
+    shift = period // 2 + 1
+    sma = closes.rolling(period).mean()
+    return closes.shift(shift) - sma
+
+
+def linear_regression_channel(closes: pd.Series, period: int) -> tuple[pd.Series, pd.Series]:
+    """Rolling OLS regression of price against bar-index over each trailing
+    `period`-bar window. Returns (line, residual_std):
+      - line: the regression's fitted value at the LAST bar of each window -
+        "what a straight line through the recent trend says price is worth
+        right now", the trending equivalent of Bollinger's flat SMA middle
+        band.
+      - residual_std: std-dev of actual closes vs. that fitted line across
+        the same window - the channel's half-width building block, playing
+        the same role Bollinger's rolling std does.
+    Two separate rolling().apply() passes (not one returning a tuple -
+    pandas rolling.apply requires a scalar) recompute the same slope/
+    intercept twice; simplicity over micro-optimization, consistent with
+    Bollinger's own two-separate-rolling-calls (mean, then std) above.
+    """
+    x = np.arange(period, dtype=float)
+    x_centered = x - x.mean()
+    x_var = float((x_centered**2).sum())
+
+    def _line_value(y: np.ndarray) -> float:
+        y_mean = y.mean()
+        slope = float((x_centered * (y - y_mean)).sum() / x_var)
+        intercept = y_mean - slope * x.mean()
+        return intercept + slope * x[-1]
+
+    def _resid_std(y: np.ndarray) -> float:
+        y_mean = y.mean()
+        slope = float((x_centered * (y - y_mean)).sum() / x_var)
+        intercept = y_mean - slope * x.mean()
+        fitted = intercept + slope * x
+        return float(np.std(y - fitted))
+
+    line = closes.rolling(period).apply(_line_value, raw=True)
+    resid_std = closes.rolling(period).apply(_resid_std, raw=True)
+    return line, resid_std

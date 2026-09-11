@@ -95,7 +95,16 @@ class RosterConfig:
     # only 6 tickers), which would silently replay the wrong universe. Defaults
     # match what actually built the real roster (DDOG/MPWR/SWK).
     rescan_universes: list = field(default_factory=lambda: ["S&P 500", "Nasdaq-100 (US Tech 100)"])
-    rescan_strategy_names: list = field(default_factory=lambda: ["VWAP Mean Reversion", "Bollinger Mean Reversion"])
+    # Linear Regression Channel added 2026-09-07 after a real 518-ticker,
+    # 30-day rigorous backtest (sourced from AlphaInsider strategy-browsing,
+    # see STRATEGY_REGISTRY's own note) beat both existing entries on
+    # max_drawdown (-2.07% vs -2.26%/-5.40%) and came close on Sharpe (3.51).
+    # Two sibling candidates from the same research pass (DMI/ADX Trend,
+    # DPO Mean-Reversion) were tested the same way and did NOT make the cut -
+    # deliberately left out, not an oversight.
+    rescan_strategy_names: list = field(
+        default_factory=lambda: ["VWAP Mean Reversion", "Bollinger Mean Reversion", "Linear Regression Channel"]
+    )
     rescan_window_days: int = 30
     # Minimum days between overnight rescans even when there's no roster gap —
     # catches a decaying edge via fresh re-ranking before live performance
