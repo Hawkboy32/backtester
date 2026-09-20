@@ -17,6 +17,7 @@ ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
 KNOWN_KEYS = {
     "POLYGON_API_KEY": "Polygon.io",
     "OANDA_API_KEY": "OANDA (forex live data)",
+    "ANTHROPIC_API_KEY": "Anthropic (Claude advisor — mobile app, added 2026-09-18)",
 }
 
 

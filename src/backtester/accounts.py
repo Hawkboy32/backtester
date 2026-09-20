@@ -22,6 +22,7 @@ import keyring.errors
 from backtester.brokers.alpaca import AlpacaBroker
 from backtester.brokers.base import BrokerAccount
 from backtester.brokers.coinbase import CoinbaseBroker
+from backtester.brokers.etoro import EToroBroker
 from backtester.brokers.ibkr import ASSET_CLASSES as IBKR_ASSET_CLASSES
 from backtester.brokers.ibkr import IBKRBroker
 from backtester.brokers.ig import IGBroker
@@ -103,6 +104,24 @@ BROKER_META: dict[str, dict] = {
         "supports_paper": True,  # OANDA's practice environment — the ONLY thing this is scoped to for now
         "has_market_hours": True,  # spot forex — closed weekends
         "asset_classes": frozenset({"forex"}),
+    },
+    "etoro": {
+        "label": "eToro (added 2026-09-16 — read-only exploration for a planned copy-trading signal)",
+        # Public API Key (x-api-key) + User Key (x-user-key), both from
+        # Settings -> Trading -> API Key Management on eToro's own site.
+        # eToro issues a SEPARATE key per environment (Demo/Real aren't a
+        # runtime flag on one key) — linking here as Paper vs Live stores
+        # whichever pair the user generated for that environment, same as
+        # every other broker's is_paper split.
+        "cred_fields": ("Public API Key", "User Key"),
+        "supports_paper": True,  # eToro's own Demo environment — a real, documented sandbox
+        "has_market_hours": False,  # eToro spans multiple asset classes with different hours;
+        # not accurately a single yes/no yet — see asset_classes note below.
+        # A single placeholder, not eToro's real range (stocks/crypto/commodities/forex/indices) —
+        # account_asset_class() picks exactly one class per non-IBKR account, and nothing routes
+        # an eToro account through it yet (no auto-trading target, no scan universe). Revisit once
+        # the copy-trading signal work actually needs real per-position asset-class routing.
+        "asset_classes": frozenset({"equity"}),
     },
 }
 SUPPORTED_BROKERS = list(BROKER_META.keys())
@@ -316,6 +335,8 @@ def build_broker_accounts(account_ids: list[str] | None = None) -> list[BrokerAc
                 provider_secret=secret_key,
                 is_paper=a["is_paper"],
             )
+        elif broker == "etoro":
+            obj = EToroBroker(nickname=a["nickname"], api_key=api_key, user_key=secret_key, is_paper=a["is_paper"])
         else:
             raise ValueError(f"Unsupported broker '{broker}' for account {a['nickname']}")
 

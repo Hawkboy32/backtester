@@ -13,6 +13,7 @@ SP500_CSV_PATH = DATA_DIR / "sp500_constituents.csv"
 NASDAQ100_CSV_PATH = DATA_DIR / "nasdaq100_constituents.csv"
 CRYPTO_CSV_PATH = DATA_DIR / "crypto_universe.csv"
 FOREX_CSV_PATH = DATA_DIR / "forex_universe.csv"
+SEMICONDUCTOR_CSV_PATH = DATA_DIR / "semiconductor_universe.csv"
 
 
 def sample_universe(df: pd.DataFrame, n: int) -> pd.DataFrame:
@@ -93,11 +94,22 @@ def load_forex(max_tickers: int | None = None) -> pd.DataFrame:
     return _load_csv(FOREX_CSV_PATH, "(hand-edit data/forex_universe.csv)", max_tickers)
 
 
+def load_semiconductors(max_tickers: int | None = None) -> pd.DataFrame:
+    """Hand-curated 27 major US-listed semiconductor names (ticker, name,
+    sector, sub_industry) — see data/semiconductor_universe.meta.txt for why
+    this can't be scraped like the broad-index universes, and for the real
+    hypothesis it exists to test (2026-09-18: two eToro Popular Investors
+    watched via copy_trading.py both concentrate heavily in this sector).
+    """
+    return _load_csv(SEMICONDUCTOR_CSV_PATH, "(hand-edit data/semiconductor_universe.csv)", max_tickers)
+
+
 UNIVERSE_REGISTRY = {
     "S&P 500": load_sp500,
     "Nasdaq-100 (US Tech 100)": load_nasdaq100,
     "Crypto (top 15 USD pairs)": load_crypto,
     "Forex (7 major USD pairs)": load_forex,
+    "Semiconductors (hand-curated)": load_semiconductors,
 }
 
 

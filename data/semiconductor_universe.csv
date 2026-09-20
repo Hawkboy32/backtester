@@ -1,0 +1,28 @@
+ticker,name,sector,sub_industry
+NVDA,NVIDIA Corporation,Information Technology,Semiconductors
+AMD,Advanced Micro Devices,Information Technology,Semiconductors
+INTC,Intel Corporation,Information Technology,Semiconductors
+TSM,Taiwan Semiconductor Manufacturing,Information Technology,Semiconductors
+ASML,ASML Holding,Information Technology,Semiconductor Materials & Equipment
+AVGO,Broadcom Inc.,Information Technology,Semiconductors
+QCOM,QUALCOMM Incorporated,Information Technology,Semiconductors
+TXN,Texas Instruments,Information Technology,Semiconductors
+MU,Micron Technology,Information Technology,Semiconductors
+LRCX,Lam Research,Information Technology,Semiconductor Materials & Equipment
+KLAC,KLA Corporation,Information Technology,Semiconductor Materials & Equipment
+AMAT,Applied Materials,Information Technology,Semiconductor Materials & Equipment
+MRVL,Marvell Technology,Information Technology,Semiconductors
+ARM,Arm Holdings,Information Technology,Semiconductors
+ON,ON Semiconductor,Information Technology,Semiconductors
+MCHP,Microchip Technology,Information Technology,Semiconductors
+SWKS,Skyworks Solutions,Information Technology,Semiconductors
+QRVO,Qorvo Inc.,Information Technology,Semiconductors
+MPWR,Monolithic Power Systems,Information Technology,Semiconductors
+ENTG,Entegris Inc.,Information Technology,Semiconductor Materials & Equipment
+TER,Teradyne Inc.,Information Technology,Semiconductor Materials & Equipment
+MKSI,MKS Instruments,Information Technology,Semiconductor Materials & Equipment
+SITM,SiTime Corporation,Information Technology,Semiconductors
+DIOD,Diodes Incorporated,Information Technology,Semiconductors
+POWI,Power Integrations,Information Technology,Semiconductors
+RMBS,Rambus Inc.,Information Technology,Semiconductors
+ALGM,Allegro MicroSystems,Information Technology,Semiconductors

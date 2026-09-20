@@ -94,7 +94,22 @@ class RosterConfig:
     # scan from unrelated dev/debug work (found one recorded as "S&P 500" with
     # only 6 tickers), which would silently replay the wrong universe. Defaults
     # match what actually built the real roster (DDOG/MPWR/SWK).
-    rescan_universes: list = field(default_factory=lambda: ["S&P 500", "Nasdaq-100 (US Tech 100)"])
+    # "Semiconductors (hand-curated)" added 2026-09-18 after a real walk-forward
+    # (3 folds, Jun-Sep, 27 tickers): VWAP Mean Reversion profitable in 3/3
+    # folds, mean Sharpe 3.38 (worst fold 2.50) vs. the S&P500+Nasdaq100
+    # baseline's single-window Sharpe 2.76 — every fold's return beat baseline
+    # by 2x+. Origin: watching eToro Popular Investors Aukie2008/RainbirdFx
+    # (copy_trading.py) showed both heavily concentrated in semiconductors,
+    # which prompted testing the sector specifically. Bollinger Mean Reversion
+    # was NOT promoted alongside it — the same scan tested it on this universe
+    # and it came out clearly WORSE (Sharpe roughly halved vs. baseline), so
+    # adding the universe here doesn't mean every rescan_strategy_names entry
+    # is expected to do well on it — evaluate_roster's own scoring is what
+    # keeps a weak (strategy, ticker) combo from being promoted regardless of
+    # which universes/strategies are eligible to be scanned.
+    rescan_universes: list = field(
+        default_factory=lambda: ["S&P 500", "Nasdaq-100 (US Tech 100)", "Semiconductors (hand-curated)"]
+    )
     # Linear Regression Channel added 2026-09-07 after a real 518-ticker,
     # 30-day rigorous backtest (sourced from AlphaInsider strategy-browsing,
     # see STRATEGY_REGISTRY's own note) beat both existing entries on

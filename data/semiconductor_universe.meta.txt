@@ -1,0 +1,20 @@
+Hand-curated, 2026-09-18 — same "can't be scraped like the S&P 500/Nasdaq-100
+snapshots" reasoning as crypto_universe.csv/forex_universe.csv (see their own
+.meta.txt files): there's no single canonical "semiconductor index"
+constituent list to pull the way there is for a broad-market index.
+
+Built to test a real hypothesis, not as a general-purpose universe: watching
+eToro Popular Investors Aukie2008 and RainbirdFx (see copy_trading.py) showed
+both heavily concentrated in semiconductors specifically — worth checking
+whether Chopper's existing minute-bar strategies (VWAP Mean Reversion,
+Bollinger Mean Reversion, Linear Regression Channel) perform differently on
+a semiconductor-heavy ticker list than the current S&P 500/Nasdaq-100 scan.
+
+27 major, liquid, US-exchange-listed semiconductor design/manufacturing/
+equipment companies (large caps down to some mid-caps) — deliberately
+excludes non-US-listed names we can't execute through Alpaca/IBKR (e.g. the
+Euronext Amsterdam-listed ASM International, ASM.NV, which Aukie2008 itself
+trades — ASML is included here via its US ADR, ASM International is not).
+Sector/sub_industry columns use GICS-style labels to match sp500_constituents
+.csv's own taxonomy, so sector_for_ticker() and anything else that reads
+across universe CSVs stays consistent.
