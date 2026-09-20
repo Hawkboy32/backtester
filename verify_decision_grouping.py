@@ -7,21 +7,24 @@ Two parts:
      cases the fix has to get right (mixed-sign decisions, chain-drift,
      ticker isolation via the caller's WHERE clause, breakeven).
   2. A REPLAY against the real Q/VWAP Mean Reversion history that triggered
-     this, proving the corrected streak on real data before anything touches
-     the live roster.
+     this, frozen to the rows recorded through the 2026-08-14 16:18 incident
+     (not recent_performance()'s live view, which drifts as new trades keep
+     closing against this combo — see INCIDENT_CUTOFF below), proving the
+     corrected streak on the real data that motivated the fix.
 
 Run:  python verify_decision_grouping.py
 """
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from backtester.live_trades import (  # noqa: E402
-    DECISION_GROUP_SECONDS, _group_into_decisions, recent_performance,
+    DB_PATH, DECISION_GROUP_SECONDS, _group_into_decisions, recent_performance,
 )
 
 PASS, FAIL = [], []
@@ -102,23 +105,55 @@ def main() -> int:
     check(f"exactly {DECISION_GROUP_SECONDS:.0f}s apart stays grouped (boundary inclusive)", len(d) == 1)
 
     print("\nREPLAY AGAINST REAL Q / VWAP MEAN REVERSION HISTORY")
-    stats = recent_performance("Q", "VWAP Mean Reversion")
-    print(f"  num_trades (decisions)     = {stats.num_trades}")
-    print(f"  current_losing_streak      = {stats.current_losing_streak}")
-    print(f"  win_rate                   = {stats.win_rate:.0%}" if stats.win_rate is not None else "  win_rate = n/a")
-    print(f"  avg_pnl_pct                = {stats.avg_pnl_pct*100:+.3f}%" if stats.avg_pnl_pct is not None else "")
-    print(f"  total_pnl                  = ${stats.total_pnl:+.2f}")
+
+    # live_trades.db keeps growing as the bot keeps trading, so asserting
+    # against "whatever recent_performance() sees right now" is not
+    # reproducible — it already isn't: two more Q/VWAP MR decisions closed
+    # after this fix shipped (a loss on 2026-08-17, a win on 2026-08-31),
+    # which correctly moves TODAY's current_losing_streak to 0. That is real
+    # trading outcome, not a regression of the grouping fix. To keep proving
+    # the actual bug this fix addressed, freeze the replay to the exact rows
+    # recorded through the incident itself.
+    INCIDENT_CUTOFF = "2026-08-14T16:18:47.710911+00:00"
+    with sqlite3.connect(DB_PATH) as conn:
+        rows_desc = conn.execute(
+            """SELECT exit_time, pnl, pnl_pct FROM live_trades
+               WHERE ticker = ? AND strategy_name = ? AND exit_time <= ?
+               ORDER BY exit_time DESC""",
+            ("Q", "VWAP Mean Reversion", INCIDENT_CUTOFF),
+        ).fetchall()
+    decisions = _group_into_decisions(list(reversed(rows_desc)))
+    streak = 0
+    for d in reversed(decisions):
+        if not d["is_loss"]:
+            break
+        streak += 1
+
+    print(f"  raw rows through the incident  = {len(rows_desc)}")
+    print(f"  decisions                      = {len(decisions)}")
+    print(f"  current_losing_streak          = {streak}")
     check(
-        "streak on real data is 1, not the pre-fix 3 that paused it",
-        stats.current_losing_streak == 1,
-        f"got {stats.current_losing_streak} — the 13:42 decision (mean +0.091%, mixed dollar "
+        "streak on the incident replay is 1, not the pre-fix 3 that paused it",
+        streak == 1,
+        f"got {streak} — the 13:42 decision (mean +0.091%, mixed dollar "
         "signs) breaks the streak that the un-grouped code counted as a loss",
     )
     check(
-        "num_trades reflects ~5 real decisions, not 14 raw rows",
-        stats.num_trades <= 7,
-        f"got {stats.num_trades}",
+        "14 raw rows through the incident group into 5 real decisions",
+        len(decisions) == 5,
+        f"got {len(decisions)} decisions from {len(rows_desc)} rows",
     )
+
+    # Informational only, not asserted: today's actual rolling status for
+    # this combo, which legitimately differs from the frozen replay above as
+    # new trades close — there is no fixed "correct" value to check it against.
+    stats = recent_performance("Q", "VWAP Mean Reversion")
+    print("\n  (informational) current live status for Q / VWAP Mean Reversion:")
+    print(f"    num_trades (decisions)     = {stats.num_trades}")
+    print(f"    current_losing_streak      = {stats.current_losing_streak}")
+    print(f"    win_rate                   = {stats.win_rate:.0%}" if stats.win_rate is not None else "    win_rate = n/a")
+    print(f"    avg_pnl_pct                = {stats.avg_pnl_pct*100:+.3f}%" if stats.avg_pnl_pct is not None else "")
+    print(f"    total_pnl                  = ${stats.total_pnl:+.2f}")
 
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
