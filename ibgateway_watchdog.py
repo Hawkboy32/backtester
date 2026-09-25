@@ -49,8 +49,15 @@ RENOTIFY_MINUTES = 60  # don't re-alert every single check once already down, ju
 
 def _ibkr_targets() -> list[tuple[str, str, int]]:
     """(nickname, host, port) for every linked, non-paper IBKR account -
-    IBKR Live only as of 2026-08-20, but written generically since IBKR
-    Paper could go live later. Skipped (not an error) if none are linked."""
+    IBKR Live only as of 2026-08-20, written generically but deliberately
+    excludes IBKR Paper even now that it's an active copy-trade target
+    (see copy_trade_executor.py's _target_paper_accounts docstring):
+    confirmed live 2026-09-21 that IBKR won't keep a live + paper Gateway
+    session logged in concurrently under one login, so IBKR Paper is
+    expected to be down/unreachable whenever Live (the thing that actually
+    matters) is up - watching it here would just be permanent, correct-per-
+    design noise, not a real signal. Skipped (not an error) if none are
+    linked."""
     targets = []
     for acct in accounts_module.list_accounts():
         if acct["broker"] != "ibkr" or acct["is_paper"]:

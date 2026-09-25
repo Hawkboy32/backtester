@@ -42,7 +42,7 @@ def save_map(data: dict[str, dict]) -> None:
 def record_open(
     account_id: str, ticker: str, strategy_name: str, conviction: float | None = None,
     sizing_mode: str | None = None, sizing_value: float | None = None,
-    dollars_committed: float | None = None,
+    dollars_committed: float | None = None, entry_price: float | None = None,
 ) -> None:
     """sizing_mode/sizing_value/dollars_committed: the EFFECTIVE sizing this
     specific entry actually used (2026-08-16) - already resolved through any
@@ -51,7 +51,19 @@ def record_open(
     setting (which may since have changed). All three None (the default) for
     a caller that doesn't have this context, e.g. an old call site or a
     position opened before this existed - the mobile /positions endpoint
-    treats that as "sizing unknown" rather than guessing."""
+    treats that as "sizing unknown" rather than guessing.
+
+    entry_price (2026-09-22): the REAL fill price from the opening order's
+    own OrderResult, captured here because it's the only reliable source —
+    some brokers never populate a position's avg_entry_price at all. Found
+    live on KRKAPI: Kraken's Balance/TradeBalance endpoints have no
+    cost-basis field, so kraken.py's get_positions() deliberately always
+    reports avg_entry_price=0.0 (see that module's docstring) - but the
+    CLOSING code here used to trust that broker-reported 0.0 anyway,
+    recording entry_price=0 and inflating pnl to nearly the full exit
+    notional. 14 of 15 KRKAPI round trips were wrong this way, overstating
+    live P&L by ~$109 against a true ~$0.01. Recording the real fill price
+    at open time sidesteps the broker's limitation entirely."""
     data = load_map()
     data[_key(account_id, ticker)] = {
         "strategy_name": strategy_name,
@@ -60,6 +72,7 @@ def record_open(
         "sizing_mode": sizing_mode,
         "sizing_value": sizing_value,
         "dollars_committed": dollars_committed,
+        "entry_price": entry_price,
     }
     save_map(data)
 
@@ -70,6 +83,21 @@ def pop_open(account_id: str, ticker: str) -> dict | None:
     if entry is not None:
         save_map(data)
     return entry
+
+
+def resolve_entry_price(attribution: dict, broker_reported_entry_price: float) -> float:
+    """The entry price to actually RECORD for a closed round trip.
+
+    Prefer the real fill price captured at open time (attribution's own
+    "entry_price", added 2026-09-22) over whatever the broker's position
+    object reports now — some brokers (Kraken confirmed) never populate
+    avg_entry_price at all, always reporting 0.0 (no cost-basis field in
+    their API), and trusting that blindly wrecked recorded P&L: 14 of 15
+    KRKAPI round trips got entry_price=0, overstating live P&L by ~$109
+    against a true ~$0.01. Falls back to the broker's value only when no
+    recorded entry_price exists (a position opened before this fix, or
+    whose attribution was lost/never captured)."""
+    return attribution.get("entry_price") or broker_reported_entry_price
 
 
 def reconcile(account_id: str, actually_held_tickers: set[str]) -> None:

@@ -2544,13 +2544,16 @@ def render_execution_tab() -> None:
                             "conviction": None,
                         }
                         if result.filled_avg_price:
+                            entry_price = position_attribution.resolve_entry_price(
+                                attribution, pending_close["avg_entry_price"]
+                            )
                             live_trades.record_realized_trade(
                                 account_id=pending_close["account_id"],
                                 ticker=pending_close["ticker"],
                                 strategy_name=attribution["strategy_name"],
                                 is_paper=pending_close["is_paper"],
                                 entry_time=attribution["opened_at"],
-                                entry_price=pending_close["avg_entry_price"],
+                                entry_price=entry_price,
                                 exit_time=datetime.now(timezone.utc).isoformat(),
                                 exit_price=result.filled_avg_price,
                                 qty=result.filled_qty or pending_close["qty"],

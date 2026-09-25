@@ -19,7 +19,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass
 from alpaca.trading.enums import OrderSide as AlpacaOrderSide
-from alpaca.trading.enums import QueryOrderStatus, TimeInForce
+from alpaca.trading.enums import OrderStatus, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
     GetOrdersRequest,
     GetPortfolioHistoryRequest,
@@ -228,8 +228,32 @@ class AlpacaBroker(BrokerAccount):
             # under a second during a session, and outside one it legitimately
             # stays queued — that returns unfilled, which the caller already
             # treats as "queued for the open" rather than an error.
+            #
+            # BUG FOUND AND FIXED 2026-09-22: this used to break as soon as
+            # filled_qty was ANY positive number, treating a PARTIAL fill as
+            # done. On a large fractional-share order Alpaca's engine (paper
+            # confirmed live, closing 11 MyAlpaca positions) fills across
+            # several separate partial lots a beat apart — e.g. requested
+            # qty=35.1167 on BAC, first partial landed at qty=16.0, and this
+            # loop stopped right there and reported that as the final result.
+            # The position was NOT actually left half-open (the remaining
+            # lots kept filling after this function returned), but every
+            # CALLER trusting this OrderResult's filled_qty/filled_avg_price
+            # — realised P&L recording, copy-trade fill tracking — would
+            # have recorded a partial quantity and only the first lot's
+            # price, not the true volume-weighted outcome. Now waits for
+            # order.status == FILLED specifically, not just "some fill
+            # happened", and only gives up early on a terminal non-filled
+            # status (cancelled/rejected/expired) where no further fill is
+            # coming.
+            _TERMINAL_NON_FILL = {
+                OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED,
+                OrderStatus.STOPPED, OrderStatus.SUSPENDED, OrderStatus.DONE_FOR_DAY,
+            }
             for _ in range(_FILL_POLL_ATTEMPTS):
-                if order.filled_avg_price is not None and float(order.filled_qty or 0) > 0:
+                if order.status == OrderStatus.FILLED:
+                    break
+                if order.status in _TERMINAL_NON_FILL:
                     break
                 time.sleep(_FILL_POLL_SECONDS)
                 try:

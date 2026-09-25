@@ -781,6 +781,7 @@ def _trade_target(
             ctx["sizing_mode"] = effective_sizing_mode.value
             ctx["sizing_value"] = effective_sizing_value
             ctx["dollars_committed"] = qty * current.close
+            ctx["reference_price"] = current.close
         order_contexts.append(ctx)
 
     if not account_orders:
@@ -803,6 +804,7 @@ def _trade_target(
                 broker_account.account_id, ticker, strategy_name, conviction=entry_conviction,
                 sizing_mode=ctx["sizing_mode"], sizing_value=ctx["sizing_value"],
                 dollars_committed=ctx["dollars_committed"],
+                entry_price=result.filled_avg_price or ctx.get("reference_price"),
             )
             notifications.notify_trade_open(
                 ticker, strategy_name, result.filled_qty or 0.0,
@@ -835,19 +837,20 @@ def _trade_target(
             # a short's economics are the OPPOSITE of a long's for the same
             # (exit - entry) sign: profit when price FALLS, not rises.
             signed_qty = qty if existing_position.side == "long" else -qty
+            entry_price = position_attribution.resolve_entry_price(attribution, existing_position.avg_entry_price)
             live_trades.record_realized_trade(
                 account_id=broker_account.account_id,
                 ticker=ticker,
                 strategy_name=attribution["strategy_name"],
                 is_paper=broker_account.is_paper,
                 entry_time=attribution["opened_at"],
-                entry_price=existing_position.avg_entry_price,
+                entry_price=entry_price,
                 exit_time=datetime.now(timezone.utc).isoformat(),
                 exit_price=exit_price,
                 qty=signed_qty,
                 conviction=attribution.get("conviction"),
             )
-            pnl = (exit_price - existing_position.avg_entry_price) * signed_qty
+            pnl = (exit_price - entry_price) * signed_qty
             notifications.notify_trade_close(
                 ticker, attribution["strategy_name"], qty, pnl,
                 broker_account.nickname, broker_account.is_paper,
@@ -927,13 +930,14 @@ def _flatten_before_close(control, broker_accounts, closing_soon_ids: set[str], 
             exit_price = result.filled_avg_price or position.current_price or position.avg_entry_price
             qty = result.filled_qty or abs(position.qty)
             signed_qty = qty if position.side == "long" else -qty
+            entry_price = position_attribution.resolve_entry_price(attribution, position.avg_entry_price)
             live_trades.record_realized_trade(
                 account_id=broker_account.account_id,
                 ticker=position.ticker,
                 strategy_name=attribution["strategy_name"],
                 is_paper=broker_account.is_paper,
                 entry_time=attribution["opened_at"],
-                entry_price=position.avg_entry_price,
+                entry_price=entry_price,
                 exit_time=datetime.now(timezone.utc).isoformat(),
                 exit_price=exit_price,
                 qty=signed_qty,
@@ -941,7 +945,7 @@ def _flatten_before_close(control, broker_accounts, closing_soon_ids: set[str], 
             )
             notifications.notify_trade_close(
                 position.ticker, attribution["strategy_name"], qty,
-                (exit_price - position.avg_entry_price) * signed_qty,
+                (exit_price - entry_price) * signed_qty,
                 broker_account.nickname, broker_account.is_paper,
             )
 

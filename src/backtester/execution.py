@@ -23,6 +23,16 @@ class SizingMode(Enum):
     FIXED_DOLLARS = "fixed_dollars"
 
 
+# How much of an account's available buying_power a sized order is allowed
+# to target, below the true 100% ceiling — see compute_qty_for_account's
+# buying_power cap for why: a market order fills at whatever price the
+# broker sees at execution time, not the signal-time reference_price used to
+# size it, so a hair's-width cap leaves zero room for that gap and gets
+# rejected outright on thin accounts. Set 2026-09-21 after AlpacaLive kept
+# hitting this for three weeks straight.
+BUYING_POWER_BUFFER = 0.98
+
+
 def _forex_usd_divisor(ticker: str, price: float) -> float:
     """What to divide a USD notional target by to get OANDA/IG-style
     base-currency units, for a Polygon-style forex ticker ("C:XXXYYY").
@@ -155,7 +165,20 @@ def compute_qty_for_account(
         # buying_power, not cash, so an account with real margin isn't
         # needlessly under-sized; for a non-margin account (like AlpacaLive)
         # buying_power == cash anyway, so this is a no-op there beyond the cap.
-        dollars = min(dollars, snapshot.buying_power)
+        #
+        # BUYING_POWER_BUFFER, not a bare 1.0: capping at exactly 100% of
+        # buying_power still fails in practice, because reference_price is a
+        # signal-time hint, not the actual fill price — a market order fills
+        # at whatever the price is when the broker actually executes it. Any
+        # uptick between the two pushes the real cost_basis a few cents over
+        # a dollars figure that was already capped at the account's entire
+        # remaining buying power, and the broker rejects the order outright.
+        # Seen live on AlpacaLive repeatedly (2026-08-31 through 2026-09-21,
+        # always rejected by a few cents, e.g. buying_power=24.12 vs
+        # cost_basis=24.15) - a thin account has zero room to absorb even a
+        # trivial tick. A 2% buffer trades a small amount of unused buying
+        # power for not silently missing the trade entirely.
+        dollars = min(dollars, snapshot.buying_power * BUYING_POWER_BUFFER)
 
         divisor = _forex_usd_divisor(ticker, reference_price) if ticker.startswith("C:") else reference_price
 

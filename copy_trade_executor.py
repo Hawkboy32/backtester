@@ -8,9 +8,15 @@ so this inherits the same audit trail and phone notifications every other
 strategy's trades already get. Every copy-trade is tagged "Copy: <username>"
 so it's unmistakable in the execution log and on your phone.
 
-PAPER ACCOUNTS ONLY. Nothing here ever touches a LIVE account — see
-TARGET_ONLY_PAPER below. Going live is a separate, deliberate, later step
-(2026-09-16 agreed plan: prove out on Demo/paper first).
+PAPER ACCOUNTS BY DEFAULT, LIVE FOR A NAMED ALLOWLIST — see
+LIVE_COPY_USERNAMES below. Started paper-only (2026-09-16 agreed plan: prove
+out on Demo/paper first); extended live 2026-09-23, deliberately, ONLY for
+the two investors (RainbirdFx, Aukie2008) who'd actually produced a real
+paper track record by then — the other two linked investors (campervans,
+celesh) hadn't produced a single trade yet, so there was nothing to judge
+them on. Live-eligible investors still ALSO copy to every matching paper
+account, same as before — this adds a target, it doesn't replace paper
+validation.
 
 LONG OPENS ONLY for v1 — an eToro short (isBuy=False) is logged and
 skipped, not executed, since the target paper accounts default to
@@ -78,7 +84,35 @@ from backtester.execution_log import log_results  # noqa: E402
 from backtester.brokers.base import OrderSide  # noqa: E402
 
 COPY_SIZING_MODE = SizingMode.PCT_EQUITY
-COPY_SIZING_VALUE = 2.0  # % of each target paper account's own equity, per copied position
+# % of each target account's own equity, per copied position — same rule
+# live and paper. Raised from 2.0 to 98.0 on 2026-09-23, deliberately, the
+# day live copy-trading (LIVE_COPY_USERNAMES) started: 2% was calibrated
+# against MyAlpaca's unrealistic $100k paper balance (~$2000/position,
+# looked meaningful but proved nothing about how sizing behaves on a real,
+# small account) and the user explicitly wanted to see real behaviour on a
+# small live balance instead, not a diluted-down version of the paper test.
+# On AlpacaLive's actual ~$50 equity this means each position uses ~98% of
+# the account - if an investor opens multiple positions in one poll cycle,
+# only the first gets funded; the rest fail sizing/buying-power cleanly
+# (no phantom fills, no corrupted state - same guards as everywhere else in
+# this file) rather than being copied partially.
+COPY_SIZING_VALUE = 98.0
+
+# Investors whose copy-trades also execute on a LIVE account, not just paper
+# — decided 2026-09-23 after reviewing paper performance: these two are the
+# only ones that had actually produced trades to judge (8 total, 100% win,
+# but n=8 — explicitly a thin sample, not a proven track record the way
+# VWAP Mean Reversion's 117-trade history is). campervans and celesh stay
+# paper-only until they show something real. Revisit this set as more paper
+# evidence comes in — it's a judgment call snapshot, not a permanent rule.
+LIVE_COPY_USERNAMES = {"RainbirdFx", "Aukie2008"}
+
+# The one live account copy-trading is allowed to touch. AlpacaLive
+# specifically because it's the only live account currently trading
+# equities — what these investors actually hold (MU, GOOG, ARM, META, ...).
+# IBKR Live runs the FX strategies; not a fit for copying equity positions.
+LIVE_COPY_ACCOUNT_NICKNAME = "AlpacaLive"
+
 DEFAULT_INTERVAL_SECONDS = 90
 
 
@@ -103,15 +137,41 @@ def _find_etoro_credentials(account_nickname: str | None) -> tuple[str, str, str
     return account["nickname"], api_key, user_key
 
 
-def _target_paper_accounts(ticker: str) -> list[dict]:
-    """Linked PAPER accounts whose asset class matches this ticker — NEVER a
-    live account, and never an eToro account (this routes through Chopper's
-    OWN brokers, per the 2026-09-16 decision), regardless of what's linked."""
+def _target_accounts(username: str, ticker: str) -> list[dict]:
+    """Linked accounts to copy this investor's event onto: every matching
+    PAPER account (never an eToro account — this routes through Chopper's
+    OWN brokers, per the 2026-09-16 decision), PLUS the live account too if
+    this username is in LIVE_COPY_USERNAMES (added 2026-09-23, see that
+    constant's own docstring for why only two investors are live-eligible).
+
+    KNOWN GAP, confirmed live 2026-09-21: IBKR Paper is one of the paper
+    targets, but IBKR does not allow a live and paper Gateway session to
+    stay logged in concurrently under the same login — confirmed by
+    directly testing (stopped IBKR Live, IBKR Paper immediately logged in
+    and worked fully; restarting Live logged Paper back out). This isn't a
+    settings/port issue — a second IBC instance with its own
+    TWS_SETTINGS_PATH was tried first and didn't help, because the
+    conflict is server-side (IBKR's own session handling), not local.
+    Practical effect: since IBKR Live needs to stay up for real trading,
+    IBKR Paper as a copy-trade target will reliably fail with a
+    connection-refused sizing error every time this runs, by design of the
+    current single-login setup — not a bug in this function, see
+    ibgateway_watchdog.py for why it isn't monitored either. Only real fix:
+    a genuinely separate paper-trading login, if IBKR issues one for this
+    account (unconfirmed) - checking that is still open."""
     asset_class = infer_asset_class(ticker)
-    return [
+    targets = [
         a for a in list_accounts()
         if a["is_paper"] and a["broker"] != "etoro" and account_asset_class(a) == asset_class
     ]
+    if username in LIVE_COPY_USERNAMES:
+        targets += [
+            a for a in list_accounts()
+            if not a["is_paper"]
+            and a["nickname"] == LIVE_COPY_ACCOUNT_NICKNAME
+            and account_asset_class(a) == asset_class
+        ]
+    return targets
 
 
 def _handle_opened(event: CopyEvent, roster_state) -> None:
@@ -127,9 +187,9 @@ def _handle_opened(event: CopyEvent, roster_state) -> None:
         print(f"[{_now()}] {event.describe()} — SKIPPED (no reference price to size from)")
         return
 
-    targets = _target_paper_accounts(ticker)
+    targets = _target_accounts(event.username, ticker)
     if not targets:
-        print(f"[{_now()}] {event.describe()} — SKIPPED (no linked paper account trades {ticker}'s asset class)")
+        print(f"[{_now()}] {event.describe()} — SKIPPED (no linked account trades {ticker}'s asset class)")
         return
 
     broker_accounts = build_broker_accounts([a["id"] for a in targets])
@@ -181,7 +241,12 @@ def _handle_opened(event: CopyEvent, roster_state) -> None:
             account_id=broker_account.account_id, account_nickname=broker_account.nickname,
             qty=filled_qty, filled_avg_price=result.filled_avg_price,
         ))
-        notifications.notify_trade_open(ticker, f"Copy: {event.username}", filled_qty, broker_account.nickname, True)
+        # broker_account.is_paper, NOT a hardcoded True — since AlpacaLive
+        # became a valid target (2026-09-23), hardcoding True here would
+        # have mislabelled a real live-money trade as paper on notification.
+        notifications.notify_trade_open(
+            ticker, f"Copy: {event.username}", filled_qty, broker_account.nickname, broker_account.is_paper,
+        )
         print(f"[{_now()}] {event.username}/{ticker} on {broker_account.nickname}: BOUGHT {filled_qty}")
 
     if fills:
@@ -236,13 +301,21 @@ def _handle_closed(event: CopyEvent, roster_state) -> None:
         exit_price = result.filled_avg_price or 0.0
         entry_price = fill.filled_avg_price or 0.0
         strategy_tag = f"Copy: {event.username}"
+        # broker_account.is_paper, NOT a hardcoded True — a live AlpacaLive
+        # copy-trade close used to get recorded here as is_paper=True,
+        # silently corrupting live_trades.db's live-vs-paper split (the
+        # exact split this project has been comparing performance on).
+        # Same fix as the open side above; see that note for why it started
+        # mattering 2026-09-23.
         live_trades.record_realized_trade(
             account_id=broker_account.account_id, ticker=open_pos.ticker, strategy_name=strategy_tag,
-            is_paper=True, entry_time=open_pos.opened_at, entry_price=entry_price,
+            is_paper=broker_account.is_paper, entry_time=open_pos.opened_at, entry_price=entry_price,
             exit_time=datetime.now(timezone.utc).isoformat(), exit_price=exit_price, qty=filled_qty,
         )
         pnl = (exit_price - entry_price) * filled_qty if entry_price else 0.0
-        notifications.notify_trade_close(open_pos.ticker, strategy_tag, filled_qty, pnl, broker_account.nickname, True)
+        notifications.notify_trade_close(
+            open_pos.ticker, strategy_tag, filled_qty, pnl, broker_account.nickname, broker_account.is_paper,
+        )
         print(f"[{_now()}] {event.username}/{open_pos.ticker} on {broker_account.nickname}: SOLD {filled_qty} (P&L ${pnl:+.2f})")
         closed_account_ids.add(fill.account_id)
 
