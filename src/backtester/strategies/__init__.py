@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from backtester.strategies.bollinger_breakout import BollingerBreakoutStrategy
 from backtester.strategies.bollinger_mean_reversion import BollingerMeanReversionStrategy
+from backtester.strategies.bollinger_squeeze_breakout import BollingerSqueezeBreakoutStrategy
 from backtester.strategies.break_and_retest import BreakAndRetestStrategy
 from backtester.strategies.dmi_adx_trend import DmiAdxTrendStrategy
+from backtester.strategies.dmi_dpo_guard import DmiDpoGuardStrategy
 from backtester.strategies.dpo_mean_reversion import DpoMeanReversionStrategy
 from backtester.strategies.ema_crossover import EmaCrossoverStrategy
+from backtester.strategies.ema_rsi_confirmation import EmaRsiConfirmationStrategy
 from backtester.strategies.linear_regression_channel import LinearRegressionChannelStrategy
 from backtester.strategies.fibonacci_pullback import FibonacciPullbackStrategy
 from backtester.strategies.flag_pennant import FlagPennantContinuationStrategy
@@ -22,6 +25,7 @@ from backtester.strategies.pivot_point_scalping import PivotPointScalpingStrateg
 from backtester.strategies.rsi_divergence import RsiDivergenceStrategy
 from backtester.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
 from backtester.strategies.sma_crossover import SmaCrossoverStrategy
+from backtester.strategies.triple_ema_ribbon import TripleEmaRibbonStrategy
 from backtester.strategies.volume_spike_reversal import VolumeSpikeReversalStrategy
 from backtester.strategies.vwap_drift_pullback import VwapDriftPullbackStrategy
 from backtester.strategies.vwap_mean_reversion import VwapMeanReversionStrategy
@@ -208,6 +212,53 @@ STRATEGY_REGISTRY: dict[str, dict] = {
         # trades/ticker at num_std=1.5) - widened to match.
         "default_params": {"period": 20, "num_std": 3.0},
         "regime": "range",
+    },
+    # Multi-indicator confirmation combos, built 2026-09-27 after every
+    # single-signal strategy tested against the Kraken Funded challenge
+    # sizing sweep (VWAP Mean Reversion, Momentum ROC, MACD Crossover,
+    # Linear Regression Channel) scored 0-9% real pass rates - requiring a
+    # second, independent signal to agree is meant to cut the false-signal
+    # rate a lone indicator throws. DMI/DPO Guard sourced from AlphaInsider
+    # (2026-09-27); the other two are standard, well-known combo techniques
+    # (RSI-confirmed crossover, triple-EMA ribbon, TTM Squeeze-style
+    # volatility breakout), not any one script author's proprietary logic.
+    # Not live-deployed by default, same as every other candidate here.
+    #
+    # All four widened well past their textbook/daily-bar starting points
+    # after a smoke test on 30 days of real 1-min BTC data caught the SAME
+    # overtrading problem Linear Regression Channel/DPO Mean-Reversion
+    # already hit once (350-1060 trades/30-days, equity down 29-56% purely
+    # from cumulative slippage) - re-tuned by measuring trade count/equity
+    # across widened parameter sets on the same sample, not guessed.
+    "DMI/DPO Guard": {
+        "class": DmiDpoGuardStrategy,
+        # dpo_guard_std 0.5->2.0: 1060 trades/30d -> 96, equity 444->940.
+        "default_params": {"dmi_period": 14, "dpo_period": 20, "dpo_guard_std": 2.0},
+        "regime": "trend",
+    },
+    "EMA/RSI Confirmation": {
+        "class": EmaRsiConfirmationStrategy,
+        # spans 12/26->100/300: 772 trades/30d -> 64, equity 494->936 - the
+        # best equity outcome of all four smoke-tested candidates.
+        "default_params": {"fast_span": 100, "slow_span": 300, "rsi_period": 14, "rsi_midline": 50.0},
+        "regime": "trend",
+    },
+    "Triple EMA Ribbon": {
+        "class": TripleEmaRibbonStrategy,
+        # spans 9/21/55->50/150/300: 793 trades/30d -> 122, equity 471->891.
+        "default_params": {"fast_span": 50, "mid_span": 150, "slow_span": 300},
+        "regime": "trend",
+    },
+    "Bollinger Squeeze Breakout": {
+        "class": BollingerSqueezeBreakoutStrategy,
+        # num_std 2.0->3.0 (matches Bollinger Mean Reversion's own tuned
+        # value), squeeze_tolerance 1.10->1.05 (stricter): 354 trades/30d ->
+        # 72, equity 714->923.
+        "default_params": {
+            "period": 20, "num_std": 3.0, "squeeze_lookback": 50, "squeeze_tolerance": 1.05,
+            "squeeze_recent_bars": 5, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+        },
+        "regime": "trend",
     },
 }
 

@@ -1,0 +1,10 @@
+strategy_name,size_fraction,n,n_pass,n_fail,n_inconclusive,pass_rate,avg_days_to_pass
+Momentum ROC,0.75,53,0,53,0,0.0,
+MACD Crossover,0.75,53,0,53,0,0.0,
+Linear Regression Channel,0.75,53,0,49,4,0.0,
+RSI Divergence,0.75,53,0,52,1,0.0,
+DMI/ADX Trend,0.75,53,0,52,1,0.0,
+Triple EMA Ribbon,0.75,53,0,52,1,0.0,
+Bollinger Squeeze Breakout,0.75,53,0,51,2,0.0,
+EMA/RSI Confirmation,0.75,53,1,50,2,0.018867924528301886,7.302777777777778
+DMI/DPO Guard,0.75,53,0,52,1,0.0,

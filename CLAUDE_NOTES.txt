@@ -4444,6 +4444,98 @@ needs every call site of the helper it touches audited, not just the one that mo
 get_live_bars was simply missed when the GBP fix was first made, because nobody was looking at a
 chart at the time.
 
+=== 2026-09-26/27: Kraken Funded challenge tracking built, sizing sweep fights the tooling ===
+User asked to prep Chopper for Kraken Funded's trading challenges (pay a fee, grow a small
+account +12% before ever dropping -3%, get "funded" if you pass) - explicitly "as if bots are
+fine (for now)", since whether Kraken Funded even permits API/bot trading at all is STILL
+unconfirmed (checked their docs and their own support AI, neither could answer). Nothing here
+should touch a real account until that's actually confirmed.
+
+Built as a genuinely new pattern: an UPSIDE circuit breaker. Everything else in this project
+(max_drawdown, daily giveback) only ever stops trading because you've LOST too much; this is the
+first thing that stops trading because you've WON. Kept as its own process rather than bolted
+into auto_trader.py's loop, same reasoning as every other separation-of-concerns choice here -
+see challenge_trader.py's own module docstring.
+
+- challenge_state.py: ChallengeAttempt/ChallengeHistory dataclasses, TIERS dict (Starter $1K/$20
+  fee, Mid $5K/$50, Anchor $10K/$90 - confirmed live that all three share the IDENTICAL 12%
+  target / 3% floor, only balance+fee differ), start_attempt/end_attempt, progress_fraction()
+  (0.0 at floor to 1.0 at target - NOT centered on start, since -3%/+12% puts start only 20% of
+  the way in from the floor end).
+- challenge_trader.py: the live polling loop. Uses broker_account.get_live_bars() (never a
+  separate PolygonClient call - matches auto_trader.py's own already-fixed "Polygon pulled out
+  of the live signal path" convention) and passes the FULL bars DataFrame to on_bar() (matches
+  the real Strategy contract - history includes the current row, verified against
+  auto_trader.py's own call site rather than assumed). No bracket order prices - deliberately
+  never passes take_profit/stop_loss, matching "no advanced order types" being a real Kraken
+  Funded rule.
+- kraken_funded_challenge_sim.py: walks the SAME sizing level from many real historical BTC start
+  dates and reports the actual pass rate, not one lucky run - built to catch a sizing level that
+  looks great from one cherry-picked date but isn't reliable in general.
+
+The sim fought the tooling hard before producing anything useful, worth remembering the full
+arc: (1) first run looked hung for over an hour - turned out to be Python fully buffering stdout
+to a pipe, nothing prints until exit; fixed with `python -u`. (2) Root-caused the ACTUAL slowness
+separately: the engine is a bar-by-bar Python loop, measured ~1.5ms/bar via a standalone
+diagnostic (not a guess) - a full 2-year window is ~1M bars, so letting `_simulate_one` run every
+window all the way to the end of the data even after PASS/FAIL was already decided was pure
+wasted compute; capped each attempt to a 60-day horizon. (3) Still not enough - the whole 9-size
+sweep as ONE blocking script got silently suspended for 8+ hours overnight with zero visibility
+into whether it was working or stuck (confirmed via Get-Process: genuinely 0 accumulated CPU
+time after 8 hours - though CPU-time tools turned out to be UNRELIABLE for these
+background-launched processes in this environment; don't trust wmic/Get-Process CPU time here,
+trust the script's own progress output instead). Restructured per the user's own suggestion:
+fetch bars ONCE to a local pickle cache, then each of the 9 size levels runs as its own short,
+independent `--size 0.05` etc. process that appends one row to kraken_sim_results.csv and prints
+progress every 5 windows - if one chunk dies or the machine sleeps mid-run, only that chunk is
+lost, not the whole sweep. `--report` reads back whatever's landed so far at any point.
+
+User then laid down the actual execution plan once this is all validated and the bot-permission
+question is confirmed: run Starter 3x, any fail resets the counter and it just keeps retrying
+that tier, 3 CONSECUTIVE passes advances to the next tier (Starter -> Mid -> Anchor), and once
+Anchor passes 3x the account goes to Chopper for normal live trading at whatever sizing the
+challenges validated (NOT literally 100%-of-equity - "run it 100% from there" meant "run it
+unsupervised," not max size). Full detail in
+[[project_trading_bot_kraken_funded_challenge_plan]].
+
+=== 2026-09-27 (cont'd): Strategy sweep - multi-indicator theory tested, didn't pan out ===
+User's hypothesis after the 9.4%-best sizing result: maybe it's the STRATEGY, not the sizing -
+and specifically, "brutally hard bar for any single-indicator signal strategy" suggested trying
+multi-indicator confirmation combos (a second signal filtering out the false entries a lone
+indicator throws). Browsed alphainsider.com's crypto section again for ideas - most listings
+there turned out to be vague, configurable Pine Script "backtesting tools" with no fixed rule
+(not useful), except one well-documented one (DMI +DI/-DI with DPO as a noise guard, explicitly
+removing ADX - the author's own description explains why).
+
+Built 4 new strategies, all reusing already-verified indicator functions from indicators.py (no
+new indicator math, only new combination logic): DMI/DPO Guard (sourced from AlphaInsider),
+EMA/RSI Confirmation, Triple EMA Ribbon, Bollinger Squeeze Breakout (the latter two standard,
+well-known techniques, not reverse-engineered from one author). Smoke-tested on 30 days of real
+data BEFORE the expensive full sweep (same discipline as the original AlphaInsider work) - caught
+the exact same overtrading problem Linear Regression Channel/DPO Mean-Reversion already hit once:
+textbook-ish periods produced 350-1060 trades/30-days and 29-56% equity loss purely from
+cumulative slippage. Re-tuned by measuring trade count/equity across widened parameter sets on
+the same sample (not guessed) before running the real sweep - see STRATEGY_REGISTRY's own
+comments in strategies/__init__.py for the exact before/after numbers per strategy.
+
+**Result, no cherry-picking**: tested 5 single-indicator strategies (Momentum ROC, MACD Crossover,
+Linear Regression Channel, RSI Divergence, DMI/ADX Trend) + 4 multi-indicator combos, all at the
+same 75% sizing (the best level from the earlier sweep) against the same 53 historical BTC
+windows. EIGHT of nine scored a flat 0% real pass rate. EMA/RSI Confirmation scored 1.9% (1/53).
+VWAP Mean Reversion - the ORIGINAL strategy, from the sizing sweep - remains the best of
+everything tested at 9.4% (5/53). The multi-indicator theory specifically did not pan out: three
+of the four combos landed at 0%, same as bare single-indicator strategies, and none beat VWAP.
+
+Same "correct, non-cherry-picked outcome to report" pattern as the original AlphaInsider work
+([[project_trading_bot_alphainsider_strategies]]) - 9 more candidates tested rigorously, 9 more
+that didn't pan out for THIS specific problem. Worth being explicit about what this does and
+doesn't say: these are all still reasonable strategies for Chopper's normal long-term roster
+(regime-tagged, available via STRATEGY_REGISTRY) - what failed here is specifically "pass a
+one-shot +12%/-3% race on BTC," a much narrower and harsher bar than normal risk-adjusted
+validation. At a real 9.4% best-case pass rate, the approved 3-consecutive-passes-per-tier plan
+([[project_trading_bot_kraken_funded_challenge_plan]]) is roughly a 1-in-1,200 shot by chance,
+not something retrying reliably clears - flagged directly to the user, not yet resolved.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,

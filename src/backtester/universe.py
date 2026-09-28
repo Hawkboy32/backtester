@@ -147,3 +147,30 @@ def sector_for_ticker(ticker: str) -> str | None:
     rather than lumping unknowns together into a fake shared sector.
     """
     return _sector_map().get(ticker.upper())
+
+
+@lru_cache(maxsize=1)
+def _name_map() -> dict[str, str]:
+    """ticker -> full name (company/asset/pair) across every universe CSV we
+    have - same "first one loaded wins" reasoning as _sector_map above, and
+    the same caveat applies (a ticker in two universes keeps whichever
+    loaded first)."""
+    mapping: dict[str, str] = {}
+    for loader in UNIVERSE_REGISTRY.values():
+        try:
+            df = loader(None)
+        except FileNotFoundError:
+            continue
+        if "name" not in df.columns:
+            continue
+        for ticker, name in zip(df["ticker"], df["name"]):
+            if isinstance(name, str) and name and ticker not in mapping:
+                mapping[str(ticker)] = name
+    return mapping
+
+
+def name_for_ticker(ticker: str) -> str | None:
+    """The ticker's full name, or None if we don't know it (e.g. a
+    hand-typed ticker outside every universe, or an extra_targets combo not
+    sourced from a scan)."""
+    return _name_map().get(ticker.upper())
