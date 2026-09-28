@@ -1,0 +1,3 @@
+ticker,strategy_name,size_fraction,n,n_pass,n_fail,n_inconclusive,pass_rate,avg_days_to_pass
+X:ETHUSD,VWAP Mean Reversion,0.75,53,3,48,2,0.05660377358490566,40.64351851851852
+X:XRPUSD,VWAP Mean Reversion,0.75,53,1,50,2,0.018867924528301886,23.944444444444443

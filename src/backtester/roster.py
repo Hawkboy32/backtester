@@ -391,7 +391,27 @@ def evaluate_roster(
         ticker, strategy_name, score = row["ticker"], row["strategy_name"], float(row["score"])
         key = (ticker, strategy_name)
         if ticker in claimed_tickers:
-            continue  # a higher-scored combo already claimed this ticker
+            # A higher-scored combo for the SAME ticker already claimed the
+            # one active slot a ticker can hold (at most one active strategy
+            # per ticker - position gating is ticker-level, not per-strategy-
+            # lot). If THIS combo was the one previously active, it must be
+            # explicitly demoted here, not silently skipped - real bug found
+            # live 2026-09-28: skipping without adding `key` to `seen_keys`
+            # left it out of `new_entries` entirely, so the end-of-function
+            # "preserve last-known status for entries not reconsidered this
+            # pass" fallback re-added its STALE "active" row completely
+            # unchanged - leaving the ticker with two simultaneously active
+            # combos (ECHO: re-promoted under VWAP Mean Reversion, but its
+            # old Linear Regression Channel entry stayed "active" too).
+            existing = existing_by_key.get(key)
+            if existing is not None and existing.status == "active":
+                new_entries.append(replace(existing, status="candidate", promoted_at=None, backtest_score=score))
+                _log_event(
+                    ticker, strategy_name, "demoted",
+                    f"superseded by a higher-scored combo for the same ticker (score {score:.3f})",
+                )
+            seen_keys.add(key)
+            continue
 
         # Ticker behaviour over the scanned window — recorded on every entry for
         # display, and (only when regime_match_only) used to gate promotion.

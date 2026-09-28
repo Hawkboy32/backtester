@@ -4536,6 +4536,84 @@ validation. At a real 9.4% best-case pass rate, the approved 3-consecutive-passe
 ([[project_trading_bot_kraken_funded_challenge_plan]]) is roughly a 1-in-1,200 shot by chance,
 not something retrying reliably clears - flagged directly to the user, not yet resolved.
 
+=== 2026-09-28: Real bug found + fixed - unmapped Kraken dust couldn't be closed ===
+User couldn't find some held tickers in the mobile app's signal list at all (only visible via
+the Positions screen) - traced to the app only ever showing tickers the roster/extra_targets
+combo list covers, not every open position (see Mobile_App's own CLAUDE_NOTES.txt entry, same
+date, for the mobile-side fix). Investigating three specific tickers (BABY/OKLO/PRCT) surfaced a
+real, separate bug along the way:
+
+KrakenBroker.get_positions() falls back to the raw Kraken BALANCE asset code (e.g. "BABY") for
+any asset outside the 15-pair _KRAKEN_BALANCE_KEY_TO_SYMBOL table, instead of this app's usual
+"X:<SYMBOL>USD" ticker shape. That's fine for DISPLAY (the position still shows correctly), but
+the bare asset code isn't itself a Kraken PAIR name - asset codes and pair codes are different
+Kraken concepts - so when the user tried to close it from the mobile app, _pair() left the ticker
+unchanged and Kraken rejected the order: "EQuery:Unknown asset pair". Confirmed live (not
+guessed) that a real BABYUSD pair actually exists on Kraken and the asset is enabled/tradeable -
+this wasn't untradeable dust, just a ticker-shape bug blocking the close. Fixed by falling back
+to "X:<ASSET>USD" instead of the bare code, so _pair() can correctly round-trip it back to a real
+Kraken pair on order submission - verified live end-to-end afterward (ticker now X:BABYUSD,
+_pair() resolves to BABYUSD, live price now populates: $0.01332/unit, ~$0.0000174 total value -
+genuinely tiny, but now correctly priced and closeable instead of unknown/unclosable). Also
+extended the same live-price enrichment to every position now, not just recognized-symbol ones,
+since _pair() works correctly for the fallback case too now. Mobile backend restarted to pick up
+the fix - not yet re-tested via the app's own close button after this specific fix (user hit the
+error before the fix landed).
+
+=== 2026-09-28 (cont'd): Real evaluate_roster bug found live + a near-miss worth remembering ===
+Trying to get OKLO/PRCT (the two copy-traded positions above) properly live-traded via the
+roster, not just displayed, surfaced two real things:
+
+1. Roster was already completely saturated - all 3 rescan_strategy_names at their
+   max_per_strategy=2 cap from the existing 6 active tickers. OKLO/PRCT's real backtest numbers
+   were genuinely strong (OKLO: VWAP MR Sharpe 4.53, 81% win rate; PRCT: Bollinger MR Sharpe
+   5.64, 71% win rate) but literally couldn't be promoted under ANY strategy without displacing
+   something, regardless of how good those numbers were. User chose to raise max_per_strategy to
+   3 to make room, evaluated properly.
+
+2. Real bug in roster.evaluate_roster(): when a ticker already active under one strategy gets
+   re-promoted under a DIFFERENT, better-scoring strategy in the same pass (ECHO: LRC -> VWAP
+   MR here), it promotes the new combo but does NOT demote the old one - despite the function's
+   own docstring explicitly promising "at most one active strategy per ticker." Left ECHO with
+   TWO simultaneously active entries. Caught and manually corrected (old LRC entry set back to
+   candidate, audit event logged) - confirmed via direct, careful inspection of the raw
+   roster.json (see near-miss below for why "careful" mattered) that every other ticker was
+   completely untouched.
+
+   FIXED properly same day, root cause found: the `if ticker in claimed_tickers: continue` early
+   exit (for a combo outranked by a better-scoring combo on the SAME ticker) skipped the row
+   entirely - never demoted it, never added its key to `seen_keys`. The end-of-function "preserve
+   last-known status for entries not reconsidered this pass" loop then re-added the skipped
+   combo's STALE row completely unchanged, silently reviving an old "active" status that should
+   have been demoted. Fix: that branch now explicitly demotes an existing-active combo to
+   "candidate" (with an event logged) before continuing, mirroring the pattern the
+   regime-mismatch branch above it already used for the same kind of "we're not promoting this,
+   but something needs to happen to its old status" case. Regression test added
+   (test_roster_reevaluation_single_active.py) - verified it fails against the pre-fix code
+   (reproduces the exact ECHO scenario) and passes after. Full existing test suite re-run clean.
+
+**Near-miss worth remembering**: my own throwaway reporting script built a ticker->status dict
+from evaluate_roster's result to show the user a before/after diff. The REAL data model stores
+one entry PER (ticker, strategy) combo - a ticker can have up to 3 rows (one per candidate
+strategy), only one ever "active" at a time. A naive dict comprehension keyed by ticker alone
+silently collapsed those down to one row per ticker, keeping whichever happened to iterate last -
+for most tickers, a stale "candidate" row, not the real "active" one. The printed result looked
+like the ENTIRE roster had been wiped out (only 1 of 6 previously-active tickers still showing
+active) - genuinely alarming, since this file drives real live trading. Actual verification (a
+clean, duplicate-aware read of the raw JSON, and cross-checking roster_events.jsonl's actual
+logged promotions/demotions) showed only the single ECHO issue above; everything else was
+completely fine the whole time. Lesson: when a live-state file might have changed unexpectedly,
+verify against the RAW file and the audit log directly - never trust a quick summary script
+without first understanding the real data model, especially not enough to alarm the user over.
+
+**What actually shipped instead** (see Mobile_App's own CLAUDE_NOTES.txt, same date): given the
+roster's capacity/scoring fight above, and this exact near-miss, landed on a much simpler and
+safer design - a dynamic, display-only signal for ANY held position not covered by the roster or
+extra_targets, computed fresh every refresh cycle directly in the mobile backend. Never touches
+roster.json or control.json, never affects what auto_trader.py actually trades - solves the
+original "I can't find my position in the list" problem generically (any future position, any
+source) without any of the capacity/scoring/promotion machinery above.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,

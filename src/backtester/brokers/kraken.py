@@ -144,19 +144,31 @@ class KrakenBroker(BrokerAccount):
             # Translate back to this app's "X:<SYMBOL>USD" ticker so it
             # actually matches what auto_trader.py compares positions
             # against - see _KRAKEN_BALANCE_KEY_TO_SYMBOL's own docstring
-            # for the bug this fixes. Falls back to the raw asset code
-            # unchanged for anything outside the verified table (a coin
-            # added to the universe later, unexpected dust) rather than
+            # for the bug this fixes. Falls back to a plain strip+rejoin
+            # ("X:<ASSET>USD") for anything outside the verified table (a
+            # coin added to the universe later, unexpected dust) rather than
             # raising - same "never let one unfamiliar row fail the whole
-            # read" precedent as coinbase.py's _ticker_from_epic.
+            # read" precedent as coinbase.py's _ticker_from_epic. This still
+            # has to be "X:"-prefixed, not the bare asset code: a real bug
+            # found live 2026-09-28 (BABY, an unmapped dust balance) - the
+            # bare code isn't itself a Kraken PAIR name (asset codes and pair
+            # codes are different Kraken concepts), so _pair() left it
+            # unchanged when submitting a close order and Kraken rejected it
+            # ("EQuery:Unknown asset pair") even though a real BABYUSD pair
+            # exists and the close should have worked. Only wrong for an
+            # asset whose real altname needs an override not yet in
+            # _KRAKEN_SYMBOL_OVERRIDES (the same residual risk every entry in
+            # that table already exists to cover) - the position still shows
+            # up correctly either way, only closing it would fail the same
+            # way BABY just did, now with a clear Kraken-side error instead
+            # of silently mis-happening.
             symbol = _KRAKEN_BALANCE_KEY_TO_SYMBOL.get(asset)
-            ticker = f"X:{symbol}USD" if symbol else asset
+            ticker = f"X:{symbol}USD" if symbol else f"X:{asset}USD"
             current_price = None
-            if symbol:
-                try:
-                    current_price = self._ticker_price(ticker)
-                except Exception:
-                    pass  # best-effort enrichment - qty/ticker above are already correct without it
+            try:
+                current_price = self._ticker_price(ticker)
+            except Exception:
+                pass  # best-effort enrichment - qty/ticker above are already correct without it
             positions.append(
                 Position(
                     ticker=ticker,
