@@ -1,6 +1,26 @@
-"""Trades a Kraken Funded challenge attempt - a genuinely different trading
-problem from everything else in this project, kept in its own process
-rather than folded into auto_trader.py.
+"""RETIRED 2026-10-01 - DOES NOT WORK, DO NOT RUN. Kept only for its
+execution-path reasoning (see below), which is still accurate for every
+OTHER account in this project - just not for this one.
+
+Confirmed (both live, by querying the regular Kraken API with real linked
+credentials - Balance/TradeBalance show only the normal spot account,
+nothing resembling a challenge balance - and from Kraken's own support
+docs: "Kraken Prop does not currently offer API access... all orders on a
+Prop account are placed manually"): Kraken Funded/Prop has NO API access
+at all, for either evaluation or funded accounts, regardless of
+credentials. This script's entire premise - executing real orders against
+a Kraken Funded account via the broker API - is therefore impossible, not
+just unconfirmed as originally written below. See challenge_state.py's own
+updated docstring for the full finding.
+
+REPLACEMENT: challenge_notifier.py. Same signal computation, same
+challenge_state.py tracking, but it NOTIFIES the suggested trade instead
+of executing it - the user places each order by hand in the Kraken app.
+Not a downgrade born of giving up on automation; it's the actual shape
+this product allows.
+
+Original module docstring, kept for the reasoning trail (still correct
+about every account OTHER than Kraken Funded):
 
 WHY SEPARATE, NOT A SPECIAL CASE IN auto_trader.py: every other account
 Chopper trades has an open-ended mandate (be profitable long-term) with
@@ -18,26 +38,12 @@ position_attribution) - reused, not reimplemented, same as
 copy_trade_executor.py's own reasoning for reusing auto_trader.py's path
 rather than rebuilding it.
 
-STATUS (2026-09-26): built ahead of confirmation that Kraken Funded even
-permits API/bot trading - genuinely unconfirmed anywhere Kraken publishes,
-their own support AI couldn't answer it either. Built now so there's no
-lost time once/if that's confirmed. DO NOT point this at a real account
-until it actually is confirmed - see challenge_state.py's own docstring.
-
-ALSO UNCONFIRMED: whether the existing KrakenBroker (regular Kraken API
-credentials) even works against a Kraken Funded account at all - Kraken
-Funded is legally a separate product (Payward Oceanic Ltd / Breakout
-Trading Group, accessed through Kraken's UI but not the same entity as the
-main exchange). This script uses the generic BrokerAccount interface
-throughout specifically so that question doesn't need answering yet - if
-Kraken Funded turns out to need its own broker class, only accounts.py's
-build_broker_accounts() wiring changes, not this file.
-
 NO ADVANCED ORDER TYPES, NO LEVERAGE (Kraken Funded's own stated rules) -
 this deliberately never passes take_profit_price/stop_loss_price to
-AccountOrder. Plain market orders only.
+AccountOrder. Plain market orders only - moot now, but was a real
+constraint while this script's premise still looked viable.
 
-Usage:
+Usage (RETIRED - do not run):
     python challenge_trader.py --account-nickname <linked-account> --interval 90
 """
 from __future__ import annotations

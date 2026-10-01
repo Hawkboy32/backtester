@@ -3,13 +3,19 @@ of trading problem from everything else in this project, see
 challenge_trader.py's own module docstring for why it's a separate process
 rather than a special case bolted onto auto_trader.py.
 
-BUILT AHEAD OF CONFIRMATION (2026-09-26): whether Kraken Funded permits
-API/bot trading at all is still unconfirmed - not documented anywhere
-Kraken publishes, and their own support AI couldn't answer it either (see
-RESEARCH conversation same date). This module and challenge_trader.py are
-built and ready on the assumption bots ARE allowed, so there's no lost time
-if/when that's confirmed - but nothing here should go near a real account
-until it actually is confirmed.
+CONFIRMED 2026-10-01 (was "built ahead of confirmation" 2026-09-26, now
+resolved - NO): Kraken Funded/Prop has NO API access at all, for either
+evaluation or funded accounts - every order has to be placed manually
+through Kraken's own web interface, regardless of credentials. Confirmed
+two ways: live, by querying the regular Kraken API with real linked
+credentials (Balance/TradeBalance show only the normal spot account -
+nothing resembling a challenge balance anywhere) and from Kraken's own
+support docs ("Kraken Prop does not currently offer API access... all
+orders on a Prop account are placed manually"). challenge_trader.py (full
+automated execution) is retired for this reason - see its own updated
+docstring. challenge_notifier.py (notification-only - Chopper computes the
+signal and suggests the trade, the user places it by hand) is the
+replacement, and is what this module's state is actually used for now.
 
 TIERS: all three (Starter/Mid/Anchor) share the IDENTICAL 12% profit target
 and 3% drawdown floor - confirmed live 2026-09-26, not assumed - only the

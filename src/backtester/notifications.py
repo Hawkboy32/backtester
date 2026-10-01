@@ -150,6 +150,45 @@ def notify_kill_switch_engaged(source: str) -> bool:
     )
 
 
+def notify_manual_trade_suggestion(ticker: str, side: str, qty: float, price: float, tier: str) -> bool:
+    """Kraken Funded (the Prop/challenge product) has no API at all — confirmed
+    both live (the regular Kraken API credentials see only the normal spot
+    account, nothing resembling a challenge balance) and from Kraken's own
+    support docs ("Kraken Prop does not currently offer API access... all
+    orders are placed manually"). This is the notification half of trading
+    a challenge attempt BY HAND with Chopper's help: it still computes the
+    signal, still sizes the trade — it just can't press the button, so it
+    tells the user exactly what to do instead. See challenge_notifier.py."""
+    action = "BUY" if side == "buy" else "CLOSE / SELL"
+    return notify(
+        f"Kraken Funded: {action} {ticker}",
+        f"{action} ~{qty:.6f} {ticker} at ~${price:,.2f} — Kraken Funded has no API, place this "
+        f"yourself in the Kraken app. ({tier.title()} tier attempt)",
+        priority="high",
+    )
+
+
+def notify_manual_trade_result(ticker: str, pnl: float, pnl_pct: float) -> bool:
+    amount = f"{'+' if pnl >= 0 else '-'}${abs(pnl):,.2f}"
+    return notify(
+        f"Kraken Funded closed ({amount})",
+        f"Estimated P&L on that {ticker} round-trip: {amount} ({pnl_pct:+.1f}%). Estimate only, based "
+        f"on the suggested prices — confirm your real balance in the Kraken app.",
+    )
+
+
+def notify_manual_challenge_ended(status: str, tier: str, estimated_balance: float, target_or_floor: float) -> bool:
+    verb = "PASSED" if status == "passed" else "FAILED"
+    boundary = "target" if status == "passed" else "floor"
+    return notify(
+        f"Kraken Funded challenge likely {verb} ({tier})",
+        f"Estimated balance ${estimated_balance:,.2f} crossed the {boundary} (${target_or_floor:,.2f}). "
+        f"This is an ESTIMATE based on the suggested trades, not your real account — confirm the actual "
+        f"balance in the Kraken app before treating this attempt as officially over.",
+        priority="high",
+    )
+
+
 def notify_roster_recommendation_ready(summary: list[str]) -> bool:
     """Fired once when auto_trader.py's once-daily post-close roster check
     computes a real (non-empty) recommendation — see roster.compute_recommendation.

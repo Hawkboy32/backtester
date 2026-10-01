@@ -4614,6 +4614,45 @@ roster.json or control.json, never affects what auto_trader.py actually trades -
 original "I can't find my position in the list" problem generically (any future position, any
 source) without any of the capacity/scoring/promotion machinery above.
 
+=== 2026-10-01: Kraken Funded has NO API access - confirmed, challenge_trader.py retired ===
+Resolves the "unconfirmed, don't point this at a real account" warning that's been sitting in
+challenge_state.py/challenge_trader.py since 2026-09-26. The user started a real Kraken Funded
+Starter-tier attempt on Kraken's own site, so this got tested for real rather than staying
+theoretical: querying the regular Kraken API (real KRKAPI credentials, Balance/TradeBalance) showed
+only the normal spot account - no trace of a challenge balance anywhere. Cross-checked against
+Kraken's own support docs, which settle it outright: "Kraken Prop does not currently offer API
+access... all orders on a Prop account are placed manually." No credentials, no API key scope, no
+workaround - the product is manual-only, period.
+
+challenge_trader.py (full automated execution) is retired - its whole premise (execute real orders
+against a Funded account via the broker API) is impossible, not just unconfirmed. Docstring updated
+to say so plainly; the file is kept only for its execution-path reasoning, which is still correct
+for every OTHER account in this project.
+
+**Built instead: challenge_notifier.py** - same signal computation (VWAP Mean Reversion, the
+kraken_funded_challenge_sim.py result this ladder plan is built on), same challenge_state.py
+tracking (tier/target/floor), but NOTIFIES the suggested trade (ntfy, reusing the existing
+notifications.py config - already enabled) instead of executing it. The user places each order by
+hand in the Kraken app. Honest about its real limitation throughout, not just in the module
+docstring: since there's no API to read the real challenge balance, every number it tracks
+(estimated_equity, holding, entry price) is an ESTIMATE built on "assume every notification was
+followed at ~the suggested price" - stated explicitly in every outward-facing notification, not
+just logged quietly. `--set-equity <value>` lets the user correct the estimate after checking their
+real balance in the Kraken app, since drift is expected (a skipped trade, a different fill price)
+not a bug to chase out. Closed trades still get logged to live_trades.db for a real record, tagged
+`Challenge: {tier} (manual)` and a dedicated `kraken-funded-manual` account_id so they can never be
+confused with real executed P&L from the actual KRKAPI account (which continues trading normally,
+completely unrelated to this).
+
+Verified live, not just unit-level: ran a real cycle against live Kraken BTC price data (the
+regular API's public market-data endpoints work fine - Funded's restriction is account/order access,
+not price data), confirmed a real signal computed correctly (HOLD at the time). Then force-tested
+the BUY and SELL branches directly (real price data, a mocked signal) to verify the notification
+fires, state persists correctly between runs, P&L computes correctly from real price movement, and
+the live_trades.db row lands with the right tags - all confirmed working, then the forced-test
+trade was deleted from live_trades.db and the notifier state reset to a clean $1,000 so the user's
+real attempt #1 starts honest, not polluted by a verification run.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,
