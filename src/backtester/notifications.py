@@ -199,3 +199,11 @@ def notify_roster_recommendation_ready(summary: list[str]) -> bool:
         "Nothing applied yet — approve or dismiss in the app.\n" + "\n".join(summary),
         priority="default",
     )
+
+
+def notify_daily_briefing(text: str) -> bool:
+    """Delivers the daily_briefing/ add-on's plain-English summary (see
+    that folder's graph.py) — a separate LangGraph-orchestrated process,
+    not auto_trader.py itself, but reusing this same channel rather than
+    inventing a second notification path for one more message type."""
+    return notify("Chopper daily briefing", text)

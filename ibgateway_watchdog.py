@@ -28,8 +28,12 @@ connect attempt is the only check that can't be fooled by that.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -40,11 +44,72 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from backtester import accounts as accounts_module  # noqa: E402
 from backtester import logging_setup  # noqa: E402
 from backtester import notifications  # noqa: E402
+from backtester.auto_trader_state import atomic_write_text  # noqa: E402
 from backtester.brokers.ibkr import check_gateway_reachable  # noqa: E402
 
 CHECK_INTERVAL_SECONDS = 120
 GRACE_MINUTES = 10  # longer than IBC's normal restart+relogin cycle - see module docstring
 RENOTIFY_MINUTES = 60  # don't re-alert every single check once already down, just periodically
+
+_STATE_PATH = Path(__file__).resolve().parent / "ibgateway_watchdog_state.json"
+
+
+@dataclass
+class _WatchdogStatus:
+    pid: int | None = None
+    last_heartbeat: str | None = None
+
+
+def _load_watchdog_status() -> _WatchdogStatus:
+    if not _STATE_PATH.exists():
+        return _WatchdogStatus()
+    try:
+        return _WatchdogStatus(**json.loads(_STATE_PATH.read_text(encoding="utf-8")))
+    except Exception:
+        return _WatchdogStatus()
+
+
+def _save_watchdog_status(status: _WatchdogStatus) -> None:
+    atomic_write_text(_STATE_PATH, json.dumps(asdict(status), indent=2))
+
+
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _another_instance_alive() -> bool:
+    """Dual-signal singleton guard, same shape as auto_trader.py's own
+    `_another_instance_alive()` (and the same reason: a heartbeat alone can
+    still look "fresh" for minutes after a hard kill, and a PID alone can't
+    tell a live loop from a hung one - both checks closes both gaps).
+
+    Added 2026-10-10 after this script was found to have NO such guard at
+    all, unlike auto_trader.py - a stray manual run started a second, fully
+    independent watchdog instance instead of exiting, caught and killed
+    within seconds only because it was being watched for directly. Low
+    financial stakes compared to auto_trader.py (this script only notifies,
+    never trades), but a duplicate watchdog double-notifying - or someday
+    double-launching Gateway itself - is exactly the failure mode this
+    project's own "adopt, don't duplicate" principle exists to prevent."""
+    status = _load_watchdog_status()
+    if not status.last_heartbeat or not status.pid or status.pid == os.getpid():
+        return False
+    if not _is_pid_alive(status.pid):
+        return False
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(status.last_heartbeat)).total_seconds()
+    except ValueError:
+        return False
+    # a live loop beats once per CHECK_INTERVAL_SECONDS; allow ~3 cycles of slack
+    return age < max(300, 3 * CHECK_INTERVAL_SECONDS)
+
+
+def _touch_heartbeat() -> None:
+    _save_watchdog_status(_WatchdogStatus(pid=os.getpid(), last_heartbeat=datetime.now(timezone.utc).isoformat()))
 
 
 def _ibkr_targets() -> list[tuple[str, str, int]]:
@@ -76,6 +141,13 @@ def main() -> None:
     # this was the one process that could still fail invisibly, and its log
     # was exactly what would have said whether it noticed. See logging_setup.
     logging_setup.configure("ibgateway_watchdog")
+    if _another_instance_alive():
+        print(
+            "[ibgateway_watchdog] another instance appears to be running (fresh heartbeat) - "
+            "exiting to avoid a duplicate watchdog.", flush=True,
+        )
+        return
+    _touch_heartbeat()
     targets = _ibkr_targets()
     if not targets:
         print("[ibgateway_watchdog] no linked live IBKR accounts found - nothing to watch, exiting", flush=True)
@@ -87,6 +159,7 @@ def main() -> None:
 
     while True:
         now = time.time()
+        _touch_heartbeat()
         for nickname, host, port in targets:
             reachable = check_gateway_reachable(host, port)
             if reachable:

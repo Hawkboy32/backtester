@@ -4653,6 +4653,104 @@ the live_trades.db row lands with the right tags - all confirmed working, then t
 trade was deleted from live_trades.db and the notifier state reset to a clean $1,000 so the user's
 real attempt #1 starts honest, not polluted by a verification run.
 
+=== 2026-10-09: daily_briefing/ added - multi-agent LangGraph daily summary ===
+New read-only add-on, not a change to auto_trader.py or any trading logic:
+`daily_briefing/` is a small LangGraph graph (its own venv, its own LangGraph +
+anthropic deps on top of this project's own real dependencies, deliberately
+isolated from auto_trader.py's own venv) that gathers today's activity
+(auto_trader_state.json, current_signals.json, live_trades.db) and real
+risk/exposure (real broker connections via accounts.build_broker_accounts(),
+cross-referenced against the drawdown/giveback breakers) in two parallel
+nodes, fans both into a writer node that produces a plain-English briefing -
+same dual-provider shape (Ollama default/free, Claude code-complete but never
+run - no ANTHROPIC_API_KEY available) as the other AI pieces built this same
+session (Sentrywatch's AI copilot, its MCP server, a separate docs-assistant
+RAG tool). Delivered via a new `notifications.notify_daily_briefing()`
+wrapper - reuses the existing ntfy channel, no new infra. Scheduling has no
+Task Scheduler to lean on here either (same admin-rights constraint as
+auto_trader_watchdog.py/ibgateway_watchdog.py), so `scheduler.py` is the same
+sleep-loop-with-a-date-stamp shape as auto_trader.py's own
+`_maybe_check_roster_gap`, in its own `daily_briefing/state.json` rather than
+auto_trader_state's (two independent processes must not share one write
+target).
+
+Verified live, not just mocked: `run_once.py` (no --notify) against every
+real linked broker account (10 accounts). Two real, pre-existing conditions
+surfaced correctly rather than crashing the run: IBKR Paper's connection
+refused (the known live/paper exclusivity issue) and a real ETLive 404 - both
+isolated to that one account's own `error` field, the other eight accounts'
+real data (including KRKAPI's actually-tripped drawdown breaker) came through
+clean, and the writer's summary named both failures and the breaker
+accurately with nothing invented. `scheduler.py` has NOT been left running
+continuously yet - that's a separate decision from having built and verified
+it once.
+
+See `daily_briefing/README.md` for the graph shape, setup, and what's not
+done yet.
+
+**Same day, follow-up**: got a real ANTHROPIC_API_KEY and verified the
+writer node's Claude path for real too - gathered fresh real activity/risk
+data (free), one real paid call (~$0.015, claude-sonnet-5-5). Genuinely
+useful finding, not just a style difference: Claude's briefing caught that
+KRKAPI's drawdown-breaker reason text (peak $16.22, equity $13.77 at the
+time it tripped) no longer matched the account's actual current equity
+($5.86), and flagged the mismatch as worth checking - Ollama's earlier
+briefing hadn't noticed that. `scheduler.py` is still not left running
+continuously - verified, not enabled, two different things.
+
+=== 2026-10-10: ig.py's munch warning silenced + ibgateway_watchdog.py got a singleton guard ===
+
+Both found while testing Sentrywatch (a separate project) against this
+project's real config for the first time - chopper/ibgateway-watchdog, both
+launched via backtester/.venv/Scripts/pythonw.exe, no health_url configured.
+
+**trading_ig's "munch is not present" warning** fired on every launch via
+this venv (confirmed: `munch` genuinely isn't installed in
+backtester/.venv). Dug into it rather than just installing the package:
+`munch` only powers an optional dot-access wrapper for some trading_ig
+response payloads, and ig.py never uses it - `_resolve_epic()`'s
+search_markets() call is read via plain pandas DataFrame indexing
+throughout, confirmed by reading the actual usage, not assumed. No real
+feature gap. Silenced at the source instead of installing an unneeded
+dependency: `accounts.py` now disables the `trading_ig.utils` logger
+before importing the broker modules (a plain `setLevel()` wouldn't have
+stuck - trading_ig's own module code unconditionally resets that exact
+logger's level to WARNING right after creating it, which would undo a
+setLevel() override done beforehand; disabling the logger object itself
+survives that). Verified via a clean import test and by actually running
+auto_trader.py for real (hit its own singleton guard, exited cleanly, zero
+warning in the output).
+
+**ibgateway_watchdog.py had NO singleton guard**, unlike auto_trader.py.
+Found the hard way: a quick `--help` sanity check on it (it has no such
+flag) actually started a second, fully independent watchdog instance
+instead of exiting - caught and killed within seconds, confirmed via
+process list that no stray IB Gateway process or duplicate watchdog
+resulted. Fixed by adding the same dual-signal (PID alive AND heartbeat
+fresh) guard auto_trader.py already has, same reasoning as that one's own
+2026-08-04 fix: a heartbeat alone can still look "fresh" for a few minutes
+after a hard kill, and a PID alone can't tell a live loop from a hung one.
+New `_another_instance_alive()`/`_touch_heartbeat()`, state in
+`ibgateway_watchdog_state.json` (new file, sibling to the script - not
+reusing auto_trader_state.py's status.json, which is that bot's own rich
+status model, not a shared facility). Verified in isolation (5 cases: no
+state file, fresh+alive+other pid, stale heartbeat, dead pid, own pid -
+all correct) rather than risking a live duplicate-watchdog test against
+the real, already-running instance. NOTE: the real currently-running
+ibgateway_watchdog.py (started this morning, before this fix) is on the
+OLD code and won't write a heartbeat until it's restarted - the guard only
+protects launches from this point forward.
+
+Separately, found and fixed a real, more serious bug in Sentrywatch itself
+(a different project) during the same investigation: its own
+adopt-before-launch logic could never actually adopt a process-presence-
+only watch like chopper/ibgateway-watchdog, meaning it would always
+relaunch on cold start rather than recognizing an already-running match.
+No real duplicate trading resulted today specifically because
+auto_trader.py's own singleton guard caught every relaunch attempt - see
+Sentrywatch's own CHANGELOG (0.8.1) for the full fix, not repeated here
+since it's that project's code, not this one's.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,

@@ -13,11 +13,23 @@ fields, never typed, seen, or handled by anything else.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
 
 import keyring
 import keyring.errors
+
+# trading_ig (the IG Group broker SDK, imported below via brokers.ig) logs a
+# WARNING at import time if its optional `munch` dependency isn't installed.
+# Confirmed cosmetic, not a real gap: munch only powers dot-access wrapping
+# of some response payloads, and IGBroker never uses it - search_markets()
+# results are read as a plain pandas DataFrame throughout (2026-10-10).
+# Disabling the logger object (not setLevel()) is what actually survives
+# the import: trading_ig's own module code unconditionally calls
+# logger.setLevel(WARNING) on this exact logger right after creating it,
+# which would silently undo a setLevel() override done beforehand.
+logging.getLogger("trading_ig.utils").disabled = True
 
 from backtester.brokers.alpaca import AlpacaBroker
 from backtester.brokers.base import BrokerAccount
