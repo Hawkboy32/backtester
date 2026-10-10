@@ -10,6 +10,7 @@ __pycache__/
 results/
 logs/
 auto_trader_state/
+ibgateway_watchdog_state.json
 saved_configs.json
 app_settings.json
 scan_history.db

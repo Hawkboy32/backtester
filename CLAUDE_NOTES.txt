@@ -1,5 +1,7 @@
 CLAUDE_NOTES.txt — Trading Bot Backtester: reference for picking up a new session
-(Last updated: 2026-08-03. Update this file as the project evolves — don't let it go stale.)
+(Last updated: 2026-10-10 — the dated entries further down are the real record; this
+header only says when the file was last touched. Update this file as the project evolves —
+don't let it go stale. For WHERE things live in the code, read CLAUDE.md, not this file.)
 
 === WHAT THIS IS ===
 A local, password-gated Streamlit dashboard for backtesting, scanning, and (optionally)
@@ -4751,7 +4753,35 @@ auto_trader.py's own singleton guard caught every relaunch attempt - see
 Sentrywatch's own CHANGELOG (0.8.1) for the full fix, not repeated here
 since it's that project's code, not this one's.
 
+=== 2026-10-10 (cont'd): repo housekeeping - this project IS on GitHub, CLAUDE.md map added ===
+Correction to an assumption that had been repeated across several sessions:
+this project has a real git repo with a real remote
+(github.com/Hawkboy32/backtester, branch master) and always did. Believing
+otherwise had left daily_briefing/, notifications.py's notify_daily_briefing()
+wrapper and the two fixes in the entry above sitting uncommitted. All of it
+went up together in commit a32ca5c. Check `git status` / `git remote -v`
+directly rather than trusting a note that says there's nothing to commit to.
+
+Added CLAUDE.md at the repo root: a MAP of the codebase (commands,
+architecture, which file to touch for what, gotchas). It and this file have
+different jobs - CLAUDE.md says where things are now, this file says how they
+got that way. Don't copy one into the other.
+
+ibgateway_watchdog_state.json (the new singleton guard's pid+heartbeat file,
+written to the repo root) is now in .gitignore. It didn't exist yet when the
+guard was committed, because the watchdog that was running at the time was
+still the pre-fix code, so nothing had flagged it as untracked.
+
+The Sentrywatch repos moved from the Desktop into APP_FOLDER_AI the same day
+(now ../sentrywatch and ../sentrywatch-mobile). Nothing in this project
+referenced their old location. ../CLAUDE_NOTES.txt (the workspace master
+index) now records everything that launches or reads this repo by path:
+the Startup-folder shortcuts, Sentrywatch's config, and Mobile_App's backend.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
+CLAUDE.md (this folder) is the map of the code: start there to find which file does what.
+../CLAUDE_NOTES.txt is the workspace master index: sibling projects, cross-repo
+dependencies, and what runs at login.
 Claude's own auto-memory system (separate from this file, loads automatically at the start
 of every session) has a much more detailed running log of this project's full history,
 including things not repeated here. This .txt is a lightweight, human-readable summary for
