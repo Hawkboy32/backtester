@@ -4930,6 +4930,25 @@ Things that are different from the old watchdog and worth knowing:
 restart_all.py's comments were updated: the "supervisor" it leaves relaunches
 to is Sentrywatch for both the trader and the mobile backend.
 
+=== 2026-10-11 (evening): IB Gateway was down ~25.5 hours; trader kill test still not done ===
+IB Gateway (java.exe) stopped at 15:38 on Saturday 2026-10-10 and was not
+running again until 17:09 on Sunday 2026-10-11, when it was started by hand
+(ibc\IBC\StartGateway.bat, the same thing IBGatewayAutoStart.lnk runs; the user
+approved the 2FA push, login completed in 30s, API port 4001 open). Markets
+were closed for the whole gap, so nothing was missed.
+  - Cause NOT found. IBC's log (Logs\IBC-3.24.1_GATEWAY-1048_FRIDAY.txt) simply
+    ends at 15:38:38 with no shutdown line; no Java crash file, nothing in the
+    Windows event logs for java.exe at that time.
+  - Nothing restarts Gateway itself. ibgateway_watchdog.py only notifies, and
+    IBC only handles the daily 03:00 restart of a Gateway that is running. A
+    Gateway process that dies stays dead until the next login or a manual start.
+    That is the real gap this exposed - worth closing (a Sentrywatch watch on
+    Gateway, or the watchdog starting it) but needs thought because of 2FA.
+  - The deliberate "kill the trader, watch Sentrywatch relaunch it" test was
+    agreed by the user for this evening and then refused by the Claude app's
+    permission layer (it will not kill the live trader). Still NOT done as of
+    this entry - see the next entry if it was.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 CLAUDE.md (this folder) is the map of the code: start there to find which file does what.
 ../CLAUDE_NOTES.txt is the workspace master index: sibling projects, cross-repo
