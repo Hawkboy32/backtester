@@ -4949,6 +4949,29 @@ were closed for the whole gap, so nothing was missed.
     permission layer (it will not kill the live trader). Still NOT done as of
     this entry - see the next entry if it was.
 
+=== VERIFIED 2026-10-11 21:37: Sentrywatch relaunched the live trader after a deliberate kill ===
+The last unverified piece of the move to Sentrywatch. The user ran
+`taskkill /PID 23336 /T /F` themselves (markets closed; FX reopened at 22:00),
+killing the trader that had been running since 2026-10-09.
+  - Sentrywatch's log: 21:37:39 "[chopper] down (process exited) - relaunching",
+    21:37:45 "launching ...pythonw.exe". Six seconds from noticing to launch
+    (the 5s backoff); noticing takes up to one 60s check interval.
+  - New trader pids 21236 / 23276, parent = Sentrywatch (2220). Exactly one
+    trader afterwards. status.json took the new pid at 21:37:47 and the
+    heartbeat advanced every 120s after that; last_error stayed null.
+  - diagnose_bot.py afterwards: pid alive, heartbeat fresh, control unchanged
+    (enabled, not killed, allow_live), IBKR Live reachable through the Gateway
+    started earlier that evening, no drawdown blocks.
+  - The new process loaded the code on disk (source stamp 5ba26a0f, was
+    b6c1ec1c): the old one predated a32ca5c's small additions to accounts.py
+    and notifications.py.
+  - NOT checked directly: the new trader's environment. psutil is not in this
+    venv. It inherits Sentrywatch's, which was started through WMI outside the
+    Claude app precisely so that it is a plain login environment.
+Still untested: Sentrywatch starting everything at a real login (no reboot yet),
+and the trader being replaced for a STALE HEARTBEAT (a hang) rather than an exit -
+that path was exercised on the gateway watchdog only.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 CLAUDE.md (this folder) is the map of the code: start there to find which file does what.
 ../CLAUDE_NOTES.txt is the workspace master index: sibling projects, cross-repo
