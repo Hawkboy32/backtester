@@ -43,6 +43,14 @@ MOBILE_BACKEND = ROOT.parent / "Mobile_App" / "backend"
 
 # (label, match-substring, working dir, launch argv or None)
 #
+# WHO "the supervisor" IS, as of 2026-10-11: Sentrywatch (../sentrywatch),
+# started at login, for both mobile_backend and auto_trader. It replaced
+# Mobile_App/backend/watchdog.py and auto_trader_watchdog.py, which the
+# comments below were written about; the reasoning is unchanged - this script
+# stops a process and its supervisor brings it back - only the supervisor is.
+# If Sentrywatch is NOT running (check its dashboard, http://127.0.0.1:8972,
+# or the `sentrywatchw.exe` process), nothing will relaunch what this stops.
+#
 # mobile_backend has argv=None DELIBERATELY: watchdog.py already owns that
 # process and relaunches it within ~30s of it going unhealthy. Starting it
 # here too raced the watchdog and produced two competing instances fighting
@@ -170,6 +178,8 @@ def restart_all(only: set[str] | None = None) -> int:
         print(f"{label:16s} started")
         time.sleep(3)
 
+    # (Under Sentrywatch the worst case is the trader: a 60s check interval plus
+    # a 5s backoff and a process lookup, so still inside this wait.)
     # Long enough to cover the SLOWEST watchdog-owned relaunch, since two
     # processes now come back on their supervisor's schedule rather than ours:
     # the mobile backend's watchdog polls every 30s (+10s startup grace), and

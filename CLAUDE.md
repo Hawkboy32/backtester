@@ -8,7 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **`app.py`** — the Streamlit dashboard ("Holotable"). Lets a human configure accounts, strategies, roster, risk settings, and arm/disarm/kill the live trader. Does **not** itself place trades.
 - **`auto_trader.py`** — the actual live-trading loop. A standalone process (launched from a terminal, via `pythonw.exe` on login, or as a detached subprocess from the dashboard) that polls, computes signals, sizes orders, and submits them to real brokers.
-- **`ibgateway_watchdog.py`** / **`auto_trader_watchdog.py`** — separate supervisor scripts. The first watches IB Gateway's own reachability (Gateway force-logs-out ~daily; this catches cases IBC's auto-relogin can't close, e.g. a stuck 2FA prompt). The second relaunches `auto_trader.py` if it dies mid-session. Neither is the trading loop itself.
+- **`ibgateway_watchdog.py`** — watches IB Gateway's own reachability and notifies (Gateway force-logs-out ~daily; this catches cases IBC's auto-relogin can't close, e.g. a stuck 2FA prompt). Not the trading loop, and it supervises nothing itself.
+- **`auto_trader_watchdog.py`** — the script that used to relaunch `auto_trader.py` if it died. **Retired on this machine 2026-10-11**: Sentrywatch (`../sentrywatch`) now starts and supervises `auto_trader.py`, `ibgateway_watchdog.py` and the mobile backend at login. The file is kept (and `../ChopperCommercial` still ships its copy), but nothing here launches it any more. It also has a known pid-reuse bug, written up in `CLAUDE_NOTES.txt` 2026-10-10 — read that before ever putting it back into service.
 - **`daily_briefing/`** — a newer, separate LangGraph multi-agent add-on with its **own `.venv`** (isolated from the main project's dependencies). Strictly read-only — gathers activity/risk data and writes a plain-English summary; never places, modifies, or cancels an order.
 
 ## Common commands
@@ -23,9 +24,11 @@ python scripts\setup_auth.py                  # first-time login setup (creates 
 # or, for console output while developing:
 .venv\Scripts\python.exe auto_trader.py
 
-# Watchdogs (optional, run alongside auto_trader.py)
-.venv\Scripts\pythonw.exe auto_trader_watchdog.py
-.venv\Scripts\pythonw.exe ibgateway_watchdog.py   # only relevant if an IBKR/IB Gateway account is linked
+# Supervision: Sentrywatch starts auto_trader.py and ibgateway_watchdog.py at login and
+# relaunches them. Don't start either by hand while it is running - the trader's own guard
+# and the gateway watchdog's will refuse a second copy, but there is no reason to test them.
+# Sentrywatch's dashboard: http://127.0.0.1:8972 (or double-click ..\sentrywatch\installed\sentrywatchw.exe)
+.venv\Scripts\python.exe test_ibgateway_watchdog_singleton.py   # the gateway watchdog's guard, against real processes
 
 # Tests — root-level: standalone scripts, NOT pytest. Each is one regression
 # test for one real incident (see its own docstring). Run individually:
@@ -128,7 +131,7 @@ There is no pytest suite for the main package — root-level `test_*.py`/`verify
 - **Gitignored state/secret files — never hand-edit:** `auto_trader_state/control.json` and `status.json` (live coordination state), `broker_accounts.json` (account metadata — real credentials live in the OS keyring, not this file), `.env` (API keys/secrets), `live_trades.db` (realized-trade ledger). Go through the dashboard or the module's own read/write helpers, never a raw text edit.
 - Root-level `test_*.py`/`verify_*.py` scripts are regression tests for **real** past incidents, not illustrative examples — if one starts failing, treat it as a live bug resurfacing, not a stale test to delete.
 - `daily_briefing/` has a **separate `.venv`** and its own dependency set (LangGraph, Anthropic SDK) — don't assume the main project's `.venv` has what it needs, or vice versa.
-- **Other things launch and read this repo by path.** Windows Startup-folder shortcuts start `auto_trader_watchdog.py`, `ibgateway_watchdog.py` and the dashboard at login; Sentrywatch's config also names `auto_trader.py` and `ibgateway_watchdog.py` as watches; `../Mobile_App/backend` imports this package as an editable install and reads `auth_config.yaml` and `.env` from here. Renaming a top-level script or moving the folder breaks those — the full list is in `../CLAUDE_NOTES.txt`.
+- **Other things launch and read this repo by path.** Sentrywatch's config (`%APPDATA%\Sentrywatch\sentrywatch.toml`) launches `auto_trader.py` and `ibgateway_watchdog.py` from this folder's `.venv` and reads `auto_trader_state/status.json` and `ibgateway_watchdog_state.json` as their heartbeats — renaming either script, either state file, or the `last_heartbeat` key inside them silently breaks supervision. A Startup-folder shortcut starts the dashboard; `../Mobile_App/backend` imports this package as an editable install and reads `auth_config.yaml` and `.env` from here. Renaming a top-level script or moving the folder breaks those — the full list is in `../CLAUDE_NOTES.txt`.
 - **`../ChopperCommercial/src/backtester` is a separate copy of this package**, not a link. A fix here does not reach it.
 
 ## Pointers

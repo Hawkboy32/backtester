@@ -4881,6 +4881,55 @@ restart_all.py still works unchanged for the mobile backend: it stops the
 process and "leaves relaunch to its watchdog" - that is now Sentrywatch,
 which notices within its 30s check interval.
 
+=== 2026-10-11 (cont'd): auto_trader.py itself is now supervised by Sentrywatch ===
+Third and last stage, done the same day once a Windows Defender exclusion for
+APP_FOLDER_AI was in place (Defender quarantined a locally built
+sentrywatch.exe once, on 2026-09-30; an unsigned exe as the trader's only
+supervisor is not acceptable without that exclusion).
+
+What changed:
+  - Sentrywatch has a `chopper` watch: pythonw.exe auto_trader.py, cwd this
+    folder. Health = the process is alive AND status.json's last_heartbeat is
+    under 600s old (the old watchdog used max(300, 3 x poll interval) = 360s
+    at today's 120s poll). Startup grace 600s, same as the old watchdog and
+    for the reason recorded in auto_trader_watchdog.py: the first heartbeat
+    only lands at the END of the first cycle.
+  - It ADOPTED the running trader. auto_trader.py was not restarted: same
+    pids (23336 / 23052, up since 2026-10-09), heartbeat kept advancing.
+  - auto_trader_watchdog.py was stopped and TradingBotAutoStart.lnk moved to
+    %APPDATA%\Sentrywatch\retired-startup-shortcuts\ with the other two.
+    Nothing launches that script now. This also takes the pid-reuse bug in
+    the "OPEN BUG 2026-10-10" entry above out of play on this machine;
+    ChopperCommercial still ships the same code.
+
+What was verified, and what was NOT:
+  - Verified live on the real processes: adoption of all three; relaunch of
+    the mobile backend after a deliberate kill (25s to answering again);
+    replacement of the gateway watchdog on a stale heartbeat and again after
+    a deliberate kill (45s).
+  - NOT done: killing the live trader to watch Sentrywatch bring it back.
+    The relaunch path is the same code that was exercised on the other two,
+    and was rehearsed against dummy processes, but the trader itself has not
+    been through it. Do that deliberately, with markets closed, not by
+    accident.
+
+Things that are different from the old watchdog and worth knowing:
+  - heartbeat_max_age_seconds (600) lives in Sentrywatch's config and does NOT
+    follow control.json's poll_interval_seconds. Raise the poll interval much
+    past ~3 minutes and that limit has to be raised with it, or a healthy,
+    slowly-polling trader gets killed.
+  - After a relaunch Sentrywatch does not look at the trader again for 600s.
+    If a freshly launched trader exits at once - e.g. its own
+    _another_instance_alive() guard, which still has no command-line check
+    and can be fooled by a recycled pid after a quick reboot - that is only
+    noticed ten minutes later.
+  - If Sentrywatch itself stops, nothing restarts anything until the next
+    login. Nothing watched the old watchdogs either, but there is now one
+    process to lose instead of three.
+
+restart_all.py's comments were updated: the "supervisor" it leaves relaunches
+to is Sentrywatch for both the trader and the mobile backend.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 CLAUDE.md (this folder) is the map of the code: start there to find which file does what.
 ../CLAUDE_NOTES.txt is the workspace master index: sibling projects, cross-repo
