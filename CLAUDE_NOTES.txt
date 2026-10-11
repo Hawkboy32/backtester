@@ -4778,6 +4778,109 @@ referenced their old location. ../CLAUDE_NOTES.txt (the workspace master
 index) now records everything that launches or reads this repo by path:
 the Startup-folder shortcuts, Sentrywatch's config, and Mobile_App's backend.
 
+=== OPEN BUG 2026-10-10: auto_trader_watchdog.py adopted a recycled PID at boot, then killed it ===
+Found reading this watchdog's own log while preparing to move supervision to
+Sentrywatch. Not fixed in this file yet - see the end of this entry.
+
+What the log shows (times UTC, the PC was rebooted that morning):
+  [2026-10-09 09:13:59] auto_trader already healthy - adopting it, not launching a second.
+  [2026-10-09 09:16:59] auto_trader down (no fresh heartbeat, 180s since launch) - relaunching
+  [2026-10-09 09:16:59] killing unhealthy foreign auto_trader pid 4992
+  [2026-10-09 09:17:04] launching auto_trader...
+and auto_trader.log has NO auto_trader running between the reboot and its own
+"Auto-trader starting (pid=23052)" at 09:17:06. Nothing but this watchdog
+launches the trader at login, so at 09:13:59 there was no auto_trader to adopt.
+
+What happened: status.json survived the reboot still saying running=True,
+pid=4992, with a heartbeat only a few minutes old (the reboot was quick).
+After the reboot Windows had already handed pid 4992 to some unrelated
+process. _is_healthy() checks "is that pid alive" and "is the heartbeat
+fresh" and nothing else, so both passed and the watchdog "adopted" a stranger.
+Three minutes later the heartbeat aged out, and the foreign-instance path ran
+`taskkill /PID 4992 /T /F` - force-killing an unrelated process and its whole
+tree. Which process it was is not recoverable from the logs.
+
+Cost that time: the trader started about three minutes late, and something
+unrelated got killed. It could have been anything, including IB Gateway.
+
+Why this file's other guard doesn't have the problem: _other_watchdog_running()
+already checks the recorded pid's real command line before believing it
+("Guards against pid REUSE"). _is_healthy() and _kill_pid_tree() never got the
+same check. auto_trader.py's own _another_instance_alive() is missing it too:
+a trader launched in that same window would have refused to start ("another
+instance appears to be running") until the stale heartbeat aged out.
+
+Conditions: a reboot (or crash + relaunch) within ~6 minutes of the last
+heartbeat, AND the old pid reused by a live process at the moment of the check.
+Uncommon, but every quick restart rolls the dice.
+
+The fix, if this watchdog stays in service: in _is_healthy(), require
+"auto_trader.py" in _pid_command_line(status.pid) before treating the pid as
+the trader, and the same before _kill_pid_tree(). Same change belongs in
+auto_trader.py's guard and in ChopperCommercial's copy of both files. Left
+undone here deliberately: whether this watchdog is retired in favour of
+Sentrywatch (which identifies a target by its executable path and arguments on
+every look, never by a pid remembered in a file) was an open decision on the
+day this was found.
+
+=== FIXED 2026-10-11: ibgateway_watchdog.py's singleton guard (added the day before) never worked ===
+The guard added on 2026-10-10 (see that entry) was broken from the start, and
+the entry above that says it was verified is wrong about what was verified.
+
+Its liveness check was `os.kill(pid, 0)` on its own - the Unix idiom. On
+Windows signal 0 is CTRL_C_EVENT, so that call means "send Ctrl+C to process
+GROUP pid", not "does this pid exist". What it returns depends on the
+caller's console and the target: against the real windowless watchdog it
+failed, which was read as "not alive", so the guard always concluded nobody
+else was running; in a console test it returned success even for a pid that
+had just been killed, which would have blocked a legitimate restart instead.
+Wrong in both directions. auto_trader.py, auto_trader_watchdog.py and
+diagnose_bot.py all already had the correct Windows branch (tasklist); the
+new function simply didn't copy it.
+
+How it got through: the 2026-10-10 entry says the guard was checked "rather
+than risking a live duplicate-watchdog test against the real, already-running
+instance". The check that was run instead used stand-ins and could not have
+failed. Found on 2026-10-11 by running the live test that had been avoided:
+a second ibgateway_watchdog.py started watching, overwrote the state file
+with its own pid, and had to be killed by hand.
+
+Fix: _is_pid_alive() now uses the same tasklist check as its siblings.
+Regression test: test_ibgateway_watchdog_singleton.py - real processes (a
+windowless pythonw sleeper), real functions, only the state file's path
+redirected. It fails against the 2026-10-10 version. Then re-run live: with
+the fixed watchdog running, a second instance logged "another instance
+appears to be running (fresh heartbeat) - exiting" and exited on its own,
+state file untouched.
+
+Lesson, same as the one Sentrywatch taught twice the same weekend: a guard
+whose only test replaces the thing it guards against has not been tested.
+If the real test is cheap and the worst case is a duplicate that gets killed
+in seconds, run the real test.
+
+=== 2026-10-11: supervision moved to Sentrywatch (mobile backend, IB Gateway watchdog) ===
+Sentrywatch (../sentrywatch, v0.9.2) now supervises two of the three things
+the private watchdog scripts used to:
+  - the mobile backend (Mobile_App/backend, uvicorn on :8600), by HTTP health
+    check. Mobile_App/backend/watchdog.py is no longer started at login.
+  - ibgateway_watchdog.py, by process + heartbeat: Sentrywatch reads
+    last_heartbeat from ibgateway_watchdog_state.json and replaces the
+    watchdog if it stops beating for 10 minutes. The script itself is
+    unchanged in what it does; only who starts it and keeps it alive changed.
+Both old Startup shortcuts were MOVED, not deleted, to
+%APPDATA%\Sentrywatch\retired-startup-shortcuts\. To go back: move a shortcut
+back into shell:startup and remove that watch from Sentrywatch's dashboard.
+
+Sentrywatch itself starts at login from SentrywatchAutoStart.lnk and serves a
+dashboard on http://127.0.0.1:8972 (open it by double-clicking
+sentrywatch\installed\sentrywatchw.exe). Its config is
+%APPDATA%\Sentrywatch\sentrywatch.toml. ../CLAUDE_NOTES.txt has the full
+picture of what runs at login.
+
+restart_all.py still works unchanged for the mobile backend: it stops the
+process and "leaves relaunch to its watchdog" - that is now Sentrywatch,
+which notices within its 30s check interval.
+
 === WHERE TO LOOK FOR MORE DETAIL ===
 CLAUDE.md (this folder) is the map of the code: start there to find which file does what.
 ../CLAUDE_NOTES.txt is the workspace master index: sibling projects, cross-repo

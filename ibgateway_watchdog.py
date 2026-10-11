@@ -74,6 +74,33 @@ def _save_watchdog_status(status: _WatchdogStatus) -> None:
 
 
 def _is_pid_alive(pid: int) -> bool:
+    """Real OS-level liveness check - the same tasklist approach as
+    auto_trader.py / auto_trader_watchdog.py, and for a reason found the hard
+    way on 2026-10-11.
+
+    The first version of this function (2026-10-10) was the Unix idiom
+    `os.kill(pid, 0)` on its own. On Windows that is NOT a liveness probe:
+    signal 0 is CTRL_C_EVENT, so it asks Windows to send Ctrl+C to process
+    GROUP `pid`. For a windowless pythonw process that call fails, the
+    OSError was read as "not alive", and the singleton guard below never
+    fired for anyone - it was shipped, documented as fixed, and did nothing.
+    Found only when a second instance was deliberately started against a
+    running one as a live test: it started watching, overwrote the state
+    file with its own pid, and had to be killed by hand. The guard had been
+    "verified" in isolation with stand-ins precisely to avoid running that
+    live test. test_ibgateway_watchdog_singleton.py now runs it against real
+    processes."""
+    if os.name == "nt":
+        import subprocess
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            return str(pid) in out.stdout
+        except Exception:  # noqa: BLE001
+            return False
     try:
         os.kill(pid, 0)
         return True
