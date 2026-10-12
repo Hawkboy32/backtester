@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **`app.py`** — the Streamlit dashboard ("Holotable"). Lets a human configure accounts, strategies, roster, risk settings, and arm/disarm/kill the live trader. Does **not** itself place trades.
 - **`auto_trader.py`** — the actual live-trading loop. A standalone process (launched from a terminal, via `pythonw.exe` on login, or as a detached subprocess from the dashboard) that polls, computes signals, sizes orders, and submits them to real brokers.
-- **`ibgateway_watchdog.py`** — watches IB Gateway's own reachability and notifies (Gateway force-logs-out ~daily; this catches cases IBC's auto-relogin can't close, e.g. a stuck 2FA prompt). Not the trading loop, and it supervises nothing itself.
+- **`ibgateway_watchdog.py`** — watches IB Gateway's own reachability and notifies (Gateway force-logs-out ~daily; this catches cases IBC's auto-relogin can't close, e.g. a stuck 2FA prompt). Since 2026-10-12 it also **starts Gateway when its process is gone and restarts it when it is alive but not logged in** — every attempt is a login and therefore a 2FA push to the user's phone, so it is hard-limited (one an hour, three in 24 hours, none 23:00–07:00, none while a paper Gateway or TWS holds the login). Create `ibgateway_watchdog.pause` next to it to switch that off — do this before stopping Gateway on purpose (an upgrade, say), or it will be started again ten minutes later. Not the trading loop.
 - **`auto_trader_watchdog.py`** — the script that used to relaunch `auto_trader.py` if it died. **Retired on this machine 2026-10-11**: Sentrywatch (`../sentrywatch`) now starts and supervises `auto_trader.py`, `ibgateway_watchdog.py` and the mobile backend at login. The file is kept (and `../ChopperCommercial` still ships its copy), but nothing here launches it any more. It also has a known pid-reuse bug, written up in `CLAUDE_NOTES.txt` 2026-10-10 — read that before ever putting it back into service.
 - **`daily_briefing/`** — a newer, separate LangGraph multi-agent add-on with its **own `.venv`** (isolated from the main project's dependencies). Strictly read-only — gathers activity/risk data and writes a plain-English summary; never places, modifies, or cancels an order.
 
@@ -29,6 +29,7 @@ python scripts\setup_auth.py                  # first-time login setup (creates 
 # and the gateway watchdog's will refuse a second copy, but there is no reason to test them.
 # Sentrywatch's dashboard: http://127.0.0.1:8972 (or double-click ..\sentrywatch\installed\sentrywatchw.exe)
 .venv\Scripts\python.exe test_ibgateway_watchdog_singleton.py   # the gateway watchdog's guard, against real processes
+.venv\Scripts\python.exe test_ibgateway_watchdog_recovery.py    # when it may start/restart Gateway; never touches the real one
 
 # Tests — root-level: standalone scripts, NOT pytest. Each is one regression
 # test for one real incident (see its own docstring). Run individually:
@@ -81,7 +82,7 @@ There is no pytest suite for the main package — root-level `test_*.py`/`verify
 | `app.py` | Streamlit dashboard. Touch for UI/config changes, account linking flows, chart/report additions. Does not place trades itself. |
 | `auto_trader.py` | The live-trading loop. Touch with real caution — polling cadence, signal→order flow, roster/manual mode dispatch, all risk-guard wiring, singleton guard. |
 | `auto_trader_watchdog.py` | Relaunches `auto_trader.py` if it dies mid-session. Touch for relaunch/health-check logic only. |
-| `ibgateway_watchdog.py` | Watches IB Gateway reachability, notifies on prolonged outage. Only relevant with an IBKR account linked. |
+| `ibgateway_watchdog.py` | Watches IB Gateway reachability, notifies on prolonged outage, and starts/restarts Gateway within hard limits (`_recovery_action()` is the whole decision; its limits are constants at the top). Runs `../ibc/IBC/StartGateway.bat`. Only relevant with an IBKR account linked. |
 | `copy_trade_executor.py` / `copy_trader.py` | Copy-trading signal engine built on the same execution path, reverse-engineered against an undocumented third-party (eToro) API. |
 | `challenge_trader.py` / `challenge_notifier.py` | Kraken Funded prop-challenge ladder logic (see `src/backtester/challenge_state.py`). |
 | `restart_all.py`, `wait_then_restart.py` | Process-restart helpers for the live stack. |
@@ -127,7 +128,7 @@ There is no pytest suite for the main package — root-level `test_*.py`/`verify
 - **This is LIVE, with REAL MONEY.** Any change touching `auto_trader.py`, anything in `brokers/`, `execution.py`, or order placement/sizing needs real caution — prefer the conservative read of ambiguous requirements, add a regression test for anything that was a real incident, and don't change sizing/risk-guard defaults without being asked.
 - **User's stated risk posture: family wealth-building, not get-rich-quick — always default to the cautious option** when a choice isn't specified.
 - **IBKR Live and Paper gateways can't be logged in concurrently** — a "connection refused" on one is often just the other one holding the session, not a real outage.
-- **IB Gateway needs IBC (IB Controller) + `ibgateway_watchdog.py`** for its forced ~daily restart/relogin; the watchdog's grace period exists because that restart cycle is expected to have a short gap even when healthy.
+- **IB Gateway needs IBC (IB Controller) + `ibgateway_watchdog.py`** for its forced ~daily restart/relogin; the watchdog's grace period exists because that restart cycle is expected to have a short gap even when healthy. IBC only restarts a Gateway that is running and logged in; a dead or logged-out one is the watchdog's job (see above).
 - **Gitignored state/secret files — never hand-edit:** `auto_trader_state/control.json` and `status.json` (live coordination state), `broker_accounts.json` (account metadata — real credentials live in the OS keyring, not this file), `.env` (API keys/secrets), `live_trades.db` (realized-trade ledger). Go through the dashboard or the module's own read/write helpers, never a raw text edit.
 - Root-level `test_*.py`/`verify_*.py` scripts are regression tests for **real** past incidents, not illustrative examples — if one starts failing, treat it as a live bug resurfacing, not a stale test to delete.
 - `daily_briefing/` has a **separate `.venv`** and its own dependency set (LangGraph, Anthropic SDK) — don't assume the main project's `.venv` has what it needs, or vice versa.

@@ -11,6 +11,8 @@ results/
 logs/
 auto_trader_state/
 ibgateway_watchdog_state.json
+ibgateway_watchdog_recovery.json
+ibgateway_watchdog.pause
 saved_configs.json
 app_settings.json
 scan_history.db

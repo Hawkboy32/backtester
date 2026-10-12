@@ -4992,6 +4992,45 @@ Proposed to the user, awaiting their decision: ibgateway_watchdog.py starts
 Gateway when the process is missing and restarts it when it is alive but
 unreachable for long, with a hard cap on attempts (each one is a 2FA push).
 
+=== 2026-10-12 (cont'd): ibgateway_watchdog.py now starts / restarts Gateway ===
+The user approved the proposal above, including automatic restarts of a stuck
+Gateway. In service since 10:25 (the watchdog was restarted through
+Sentrywatch's own restart to load it: new pid 20484).
+
+What it does, once an account has been unreachable past the 10-minute grace:
+  - no Gateway process at all            -> runs ibc\IBC\StartGateway.bat
+  - Gateway alive but unreachable 30 min -> closes its IBC console (and the java
+    under it), then runs StartGateway.bat
+  - sends "IB Gateway restarted - approve the login" - every attempt is a 2FA push.
+Limits, all constants at the top of the file, all in _recovery_action():
+one attempt per 60 minutes; three in any 24 hours; none 23:00-07:00 local (my
+addition - a 03:00 push burns an attempt for nothing); none while a paper
+Gateway, TWS or a hand-started Gateway is running; none if it cannot list
+processes, cannot read or write its attempt record, has no internet, or the
+account's host is not this machine. When it will not act, the hourly
+"unreachable" notification now says why.
+  - Attempts are kept in ibgateway_watchdog_recovery.json (gitignored), not in
+    the heartbeat file, so a watchdog restart does not reset the limits.
+  - OFF SWITCH: create ibgateway_watchdog.pause beside the script. Do that
+    before taking Gateway down on purpose (the 1050 upgrade due by
+    2026-12-15), or it comes back ten minutes later.
+  - Gateway is started with the environment the watchdog had BEFORE it loaded
+    .env, so the broker keys in .env are not handed to java.
+Things learned from IBC's scripts that shaped it:
+  - Gateway's console is `cmd /K ...DisplayBannerAndLaunch.bat`. It stays open
+    after Gateway ends, so "the console exists" does not mean Gateway is up,
+    and old consoles are closed before a new start.
+  - Killing java alone is not a restart: while an autorestart token exists,
+    StartIBC.bat's loop starts Gateway again by itself. Hence console + /T.
+Tested (test_ibgateway_watchdog_recovery.py, 49 checks): every branch of the
+decision; the attempt record; the real process query, which reports the real
+Gateway correctly (live pid + console); a real launch of a stand-in
+StartGateway.bat (window runs, none of the .env variables reach it); a real
+stop of a stand-in console + child. The decision checks were confirmed to fail
+against a copy with the paper-session, daily-limit and must-record rules removed.
+NOT tested: the real thing. It has never started or restarted the real Gateway.
+Until someone closes Gateway and watches it come back, treat that as unverified.
+
 Still untested: Sentrywatch starting everything at a real login (no reboot yet),
 and the trader being replaced for a STALE HEARTBEAT (a hang) rather than an exit -
 that path was exercised on the gateway watchdog only.
