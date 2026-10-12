@@ -4968,6 +4968,30 @@ killing the trader that had been running since 2026-10-09.
   - NOT checked directly: the new trader's environment. psutil is not in this
     venv. It inherits Sentrywatch's, which was started through WMI outside the
     Claude app precisely so that it is a plain login environment.
+=== 2026-10-12: what the IBC logs say about Gateway outages (investigation, nothing changed yet) ===
+Read every log in ibc\IBC\Logs (2026-08-22 onward) for how Gateway has gone down:
+  - The daily 03:00 restart has completed every time Gateway was logged in
+    (12-16s each, no 2FA needed). That part works.
+  - Gateway PROCESS ENDED and nothing started it again: 09-09 (2FA push not
+    approved, IBC exited), 09-10 14:50, 10-01 20:11 (missed 2FA) and 23:10,
+    10-10 15:38. The 10-10 one has no "Gateway finished" line, so the IBC
+    console window went with it - consistent with that minimized window being
+    closed. No session of this assistant ran a command at that time.
+  - Gateway ALIVE BUT NOT LOGGED IN: 10-09 10:15 to 10-10 07:58, about 22
+    hours including a full trading day. Three 2FA prompts went unanswered and
+    it fell back to the login screen and sat there. A "start it if it is
+    missing" fix would not have helped; this one needs a restart.
+  - config.ini: ReloginAfterSecondFactorAuthenticationTimeout=no and
+    StartGateway.bat's TWOFA_TIMEOUT_ACTION=exit - a missed push ends in one of
+    the two states above by design.
+Tested with stand-ins: a window `start`ed from a .bat by a venv pythonw process
+(the shape of the watchdog running StartGateway.bat) is NOT in the launcher's
+job object and survives `taskkill /T /F` on that process. So the watchdog could
+start Gateway without Gateway dying whenever Sentrywatch replaces the watchdog.
+Proposed to the user, awaiting their decision: ibgateway_watchdog.py starts
+Gateway when the process is missing and restarts it when it is alive but
+unreachable for long, with a hard cap on attempts (each one is a 2FA push).
+
 Still untested: Sentrywatch starting everything at a real login (no reboot yet),
 and the trader being replaced for a STALE HEARTBEAT (a hang) rather than an exit -
 that path was exercised on the gateway watchdog only.
