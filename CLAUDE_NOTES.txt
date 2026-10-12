@@ -5028,8 +5028,20 @@ Gateway correctly (live pid + console); a real launch of a stand-in
 StartGateway.bat (window runs, none of the .env variables reach it); a real
 stop of a stand-in console + child. The decision checks were confirmed to fail
 against a copy with the paper-session, daily-limit and must-record rules removed.
-NOT tested: the real thing. It has never started or restarted the real Gateway.
-Until someone closes Gateway and watches it come back, treat that as unverified.
+VERIFIED ON THE REAL GATEWAY the same morning (the "process gone" path):
+  - 10:37 the user ran `taskkill /PID 1516 /T /F` - console and Gateway both
+    gone, the same end state as Saturday's outage.
+  - 10:39:03 first failed check. 10:49:13 the watchdog logged "unreachable for
+    10m, Gateway was not running - start (attempt 1/3)", recorded the attempt
+    and ran StartGateway.bat. IBC started at 10:49:15 ("full authentication
+    will be required"), 2FA push at 10:49:23, the user approved it, login
+    complete 10:50:37.
+  - 10:51:14 "IBKR Live reachable again after 12.2m". diagnose_bot.py: account
+    snapshot OK. The new Gateway's console is not a child of the watchdog (its
+    parent, the intermediate cmd, had already exited).
+STILL NOT seen for real: the restart of a Gateway that is alive but stuck on
+its login screen (the stop step has only killed a stand-in), and any of the
+limits actually refusing a second attempt.
 
 Still untested: Sentrywatch starting everything at a real login (no reboot yet),
 and the trader being replaced for a STALE HEARTBEAT (a hang) rather than an exit -
