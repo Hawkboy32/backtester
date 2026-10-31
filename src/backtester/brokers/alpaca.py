@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass
@@ -213,6 +213,11 @@ class AlpacaBroker(BrokerAccount):
 
             request = MarketOrderRequest(**order_kwargs)
             order = self._client.submit_order(order_data=request)
+            # Taken AFTER the order is sent, so measuring never delays it, and as close to the
+            # submission as possible (before the fill poll below). _quote_now never raises: an
+            # exception here would reach the except at the bottom and report an order that WAS
+            # sent as failed, which a caller could then retry into a duplicate.
+            quote = self._quote_now(ticker)
 
             # submit_order returns IMMEDIATELY, before the fill — filled_qty=0
             # and filled_avg_price=None on essentially every Alpaca order.
@@ -267,6 +272,35 @@ class AlpacaBroker(BrokerAccount):
                 broker_order_id=str(order.id),
                 filled_qty=float(order.filled_qty) if order.filled_qty is not None else None,
                 filled_avg_price=float(order.filled_avg_price) if order.filled_avg_price is not None else None,
+                submitted_at=_iso(getattr(order, "submitted_at", None)),
+                filled_at=_iso(getattr(order, "filled_at", None)),
+                quote_bid=quote[0] if quote else None,
+                quote_ask=quote[1] if quote else None,
+                quote_at=quote[2] if quote else None,
             )
         except Exception as e:  # noqa: BLE001
             return OrderResult(account_nickname=self.nickname, success=False, error=str(e))
+
+    def _quote_now(self, ticker: str) -> tuple[float | None, float | None, str | None] | None:
+        """(bid, ask, quote time) from the IEX feed, or None. Best-effort and NEVER raises (see the
+        caller). IEX is a single exchange, so its top of book can be wider than the national best
+        bid/offer, and a bid or ask of 0 means it had no quote on that side: read it as a rough
+        reference, not the market. A non-equity symbol simply returns None."""
+        try:
+            quotes = self._data_client.get_stock_latest_quote(
+                StockLatestQuoteRequest(symbol_or_symbols=ticker, feed=DataFeed.IEX)
+            )
+            q = quotes[ticker]
+            bid = float(q.bid_price) if q.bid_price is not None else None
+            ask = float(q.ask_price) if q.ask_price is not None else None
+            return bid, ask, _iso(getattr(q, "timestamp", None))
+        except Exception:  # noqa: BLE001 — measurement only; the order is already sent
+            return None
+
+
+def _iso(value) -> str | None:
+    """An SDK timestamp as an ISO-8601 string, or None. Never raises."""
+    try:
+        return value.isoformat() if value is not None else None
+    except Exception:  # noqa: BLE001
+        return None

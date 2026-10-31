@@ -44,6 +44,16 @@ class OrderResult:
     filled_qty: float | None = None
     filled_avg_price: float | None = None
     error: str | None = None
+    # Fill-quality fields (2026-10-31), recorded so slippage can be MEASURED instead of estimated
+    # from minute bars (that estimate put AlpacaLive's cost at ~6 bps a side against the 2 bps every
+    # backtest assumes, but 47% of fills fell outside their own minute bar, so it is rough). All
+    # optional and defaulted: a broker that does not fill them in leaves them None, and every
+    # existing positional construction of OrderResult still works. ISO-8601 UTC strings.
+    submitted_at: str | None = None
+    filled_at: str | None = None
+    quote_bid: float | None = None   # the broker's quote fetched just after submission (Alpaca: IEX top of book)
+    quote_ask: float | None = None
+    quote_at: str | None = None
 
 
 @dataclass
