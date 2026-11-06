@@ -97,6 +97,7 @@ def run_scan(
     market_calendar: str = "equity",
     strategy_params: dict[str, dict] | None = None,
     position_mode: PositionMode = PositionMode.LONG_ONLY,
+    regular_hours_only: bool = False,
 ) -> list[ScanResultRow]:
     """strategy_params: optional {strategy_name: {param: value}} overrides,
     merged over that strategy's STRATEGY_REGISTRY defaults (same merge
@@ -138,6 +139,16 @@ def run_scan(
     **scan_kwargs straight through to this function, so passing
     position_mode=PositionMode.SHORT_ONLY (etc.) there needs no changes to
     paramsweep.py itself.
+
+    regular_hours_only: passed straight through to BacktestEngine — when True
+    no NEW trade opens outside 09:30-16:00 New York time (exits still fire at
+    any hour). Default False = every existing scan's exact behavior, unchanged.
+    Added 2026-11-06 because minute-bar scans include pre-market and
+    after-hours bars, and a 2026-11-05 probe found the profit of the live
+    Bollinger and VWAP strategies concentrated in thin extended-hours entries
+    that a live stock account cannot take (auto_trader skips an account whose
+    market clock is closed, and its orders are plain DAY market orders). Use
+    True to rank strategies by what the live trader can actually do.
     """
     unknown = [name for name in strategy_names if name not in STRATEGY_REGISTRY]
     if unknown:
@@ -173,6 +184,8 @@ def run_scan(
         params = {**STRATEGY_REGISTRY[strategy_name]["default_params"], **(override or {})}
         try:
             strategy = build_strategy(strategy_name, params=override)
+            # Passed only when asked for: with it off the engine is built with exactly the arguments it always was (a replaced
+            # engine factory, e.g. the research lab's, must not meet a new keyword it did not expect - found 2026-11-06).
             engine = BacktestEngine(
                 starting_cash=starting_cash,
                 commission_per_trade=commission_per_trade,
@@ -180,6 +193,7 @@ def run_scan(
                 regime_by_date=regime_by_date,
                 blocked_dates=blocked_dates,
                 position_mode=position_mode,
+                **({"regular_hours_only": True} if regular_hours_only else {}),
             )
             result = engine.run(bars, strategy)
             report = compute_report(result.equity_curve, result.trades, periods_per_year=periods_per_year)
