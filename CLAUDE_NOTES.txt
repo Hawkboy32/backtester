@@ -5055,3 +5055,20 @@ Claude's own auto-memory system (separate from this file, loads automatically at
 of every session) has a much more detailed running log of this project's full history,
 including things not repeated here. This .txt is a lightweight, human-readable summary for
 quick orientation on either side — the memory file is the fuller record.
+
+2026-11-09 IB GATEWAY UPGRADED 1048 -> 1050.1 (Chris asked for it early; the notices were irritating).
+  Gateway was already down (normal exit 13:10 UTC, full login needed) so nothing was interrupted; the watchdog had used its 3 attempts that day.
+  Steps: ibgateway_watchdog.pause created; stable installer (ibgateway-stable-standalone-windows-x64.exe, 336,966,328 bytes, IBKR's own host download2.interactivebrokers.com,
+  Authenticode VALID for Interactive Brokers Group, Inc., file version 1.050.1.6, SHA-256 EAD718225B2BBB8362A44371E7E5036C9DA59DE3F5E52AA7A7A59B4CB4E21557) downloaded to
+  Downloads\ibgateway-stable-20261109 and run BY CHRIS into C:\Jts\ibgateway\1050; ibc\IBC\StartGateway.bat changed in exactly two lines (TWS_MAJOR_VRSN 1048->1050 and
+  JAVA_PATH ...\1048\jre\bin -> ...\1050\jre\bin; a first sed edit rewrote every line ending and was reverted, the second was byte-exact; backup StartGateway.bat.bak-20261109-before-1050).
+  TWS_SETTINGS_PATH was deliberately LEFT at C:\Jts\ibgateway\1048, so the API settings and per-user settings (jts.ini: TrustedIPs 127.0.0.1, ApiOnly, AutoRestart) carry over:
+  DO NOT uninstall or delete the 1048 folder, it now holds the live settings. StartGatewayPaper.bat and the 1048_paper install are NOT upgraded yet (paper Gateway also needs 1050.1+).
+  What happened on first start: (1) a 'trouble loading your settings' dialog (it looked for ibg.xml in the settings folder while the new version was rewriting it; the file existed and
+  matched the Monday backup): Chris chose the ibg.Mon.xml backup, nothing lost. (2) 'Read-Only API' came up TICKED (IBKR's default after that recovery) and the trader's first write
+  request was refused; Chris unticked it himself and re-checked socket port 4001, trusted IP 127.0.0.1 and localhost-only (the IBKR live account had made live trades through
+  the API before, so write access was the prior state). The live API port is 4001 (paper 4002); jts.ini's LocalServerPort=4000 is a different setting.
+  Verified after: the trader's last_error cleared and its heartbeat stayed fresh; a read-only API client (clientId 9871, readonly=True) connected to 127.0.0.1:4001 (server version 178),
+  saw the managed account, 0 open orders, 0 positions, and read the account summary; IBC now logs to IBC-3.24.1_GATEWAY-1050_*.txt; the pause file was removed.
+  NOT yet seen: the next 03:00 daily auto-restart on 1050 (it should relogin without a push if the autorestart token is written; watch tomorrow morning), and a real order placed
+  through 1050. Follow-ups: the paper Gateway is deliberately NOT being upgraded (Chris: 'the paper one doesn't matter'; it will stop being supported 2026-12-15); the 2026-12-15 commitment was removed from ~/.major-zero/projects.toml; Gateway 'Read-Only API' is now OFF.
