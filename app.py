@@ -3117,6 +3117,7 @@ def render_auto_trading_tab() -> None:
             vol_target_enabled=vol_target_enabled,
             vol_target_ann=vol_target_ann,
             block_event_days=block_event_days,
+            skip_opening_minutes=control.skip_opening_minutes,  # carried forward: saving here must not reset it
             use_roster=use_roster,
             # Owned by the Settings page now — carry forward from the loaded control so
             # saving here never clobbers the account-risk limit set in Settings.

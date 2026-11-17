@@ -71,6 +71,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from backtester import account_risk, accounts as accounts_module, daily_pnl_guard
+from backtester import entry_window
 from backtester import current_signals, events, heartbeat, live_trades, logging_setup, notifications, position_attribution, roster, source_stamp, version, volatility
 from backtester.auto_trader_state import (
     AutoTraderStatus, load_control, load_control_checked, load_status, save_status,
@@ -696,6 +697,17 @@ def _trade_target(
                 f"GARCH storm regime (vol_pctile={regime_info.vol_pctile:.0f})" if regime_info else "storm regime"
             )
             status.last_signal = f"{ticker}/{strategy_name}: {order_side.value.upper()} blocked — {reason}"
+            save_status(status)
+            continue
+
+        # Opening-minutes rule (2026-11-17, strategy lab Study I-H): no NEW equity
+        # entry in the first skip_opening_minutes after 09:30 New York. Opening
+        # only - a close, crypto, forex and the IG index strategy fall through.
+        opening_reason = entry_window.opening_block_reason(
+            ticker_asset_class, is_opening, datetime.now(timezone.utc), control.skip_opening_minutes
+        )
+        if opening_reason is not None:
+            status.last_signal = f"{ticker}/{strategy_name}: {order_side.value.upper()} blocked — {opening_reason}"
             save_status(status)
             continue
 

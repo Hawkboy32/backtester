@@ -196,6 +196,10 @@ class AutoTraderControl:
     block_event_days: bool = True  # skip NEW entries on known risk-event days (FOMC — see backtester.events).
     # Defaults ON, unlike the other opt-in filters: it's a pure step-out safety net ("don't sell
     # insurance during a flood warning") and only takes effect on a deliberate (re)start.
+    skip_opening_minutes: int = 15  # no NEW equity entries 09:30 to 09:30+N New York time (0 = off).
+    # Added 2026-11-17 from the strategy lab's Study I / I-H (see backtester.entry_window for the
+    # numbers and why it is a small trim, not a fix). Opening only; closes, crypto, forex and the
+    # IG index strategy are untouched. Defaults ON (Chris's decision), takes effect on a restart.
     giveback_enabled: bool = False  # daily P&L guard (see backtester.daily_pnl_guard)
     giveback_pct: float = 25.0  # % of TODAY's peak profit that can be given back before new entries block
     # --- Protective exits (2026-08-14) ---------------------------------------
