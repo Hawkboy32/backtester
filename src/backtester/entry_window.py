@@ -25,11 +25,16 @@ time, and a live market order fills in the minute it is sent).
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from backtester.auto_trader_state import STATE_DIR
 
 _NY_TZ = ZoneInfo("America/New_York")
 _OPEN_MINUTES = 9 * 60 + 30  # 09:30 America/New_York
+BLOCKS_PATH = STATE_DIR / "entry_blocks.jsonl"  # one line per blocked entry, for judging the rule live
 MAX_SKIP_MINUTES = 60  # a typo guard: nobody means "skip the first two hours" by accident
 
 
@@ -60,3 +65,48 @@ def opening_block_reason(
     if not in_opening_window(now_utc, skip_minutes):
         return None
     return f"opening-minutes rule (no new equity entries in the first {min(skip_minutes, MAX_SKIP_MINUTES)} min after 09:30 New York)"
+
+
+_SEEN_BLOCKS: set[tuple] = set()
+
+
+def record_block(
+    now_utc: datetime,
+    account_id: str,
+    ticker: str,
+    strategy_name: str,
+    side: str,
+    skip_minutes: int,
+    path: Path | None = None,
+    seen: set | None = None,
+) -> bool:
+    """Append one line to entry_blocks.jsonl the first time today that this
+    (account, ticker, strategy, side) is held back; True if a line was written.
+
+    The trader re-evaluates every signal each poll, so without the de-duplication
+    one signal would log once a minute through the whole window. Logging can never
+    stop a trade or a block: any failure here is swallowed and returns False.
+    """
+    try:
+        seen = _SEEN_BLOCKS if seen is None else seen
+        ny = now_utc.astimezone(_NY_TZ)
+        key = (ny.date().isoformat(), account_id, ticker, strategy_name, side)
+        if key in seen:
+            return False
+        line = json.dumps(
+            {
+                "timestamp": now_utc.isoformat(),
+                "ny_time": ny.strftime("%Y-%m-%d %H:%M:%S"),
+                "account_id": account_id,
+                "ticker": ticker,
+                "strategy_name": strategy_name,
+                "side": side,
+                "skip_minutes": skip_minutes,
+            }
+        )
+        with open(path or BLOCKS_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        seen.add(key)  # only after a successful write, so a failed write is retried next poll
+        return True
+    except Exception:  # noqa: BLE001 - monitoring must never affect trading
+        return False

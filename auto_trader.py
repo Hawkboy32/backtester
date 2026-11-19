@@ -709,6 +709,10 @@ def _trade_target(
         if opening_reason is not None:
             status.last_signal = f"{ticker}/{strategy_name}: {order_side.value.upper()} blocked — {opening_reason}"
             save_status(status)
+            entry_window.record_block(
+                datetime.now(timezone.utc), broker_account.account_id, ticker, strategy_name,
+                order_side.value, control.skip_opening_minutes,
+            )
             continue
 
         if not is_opening:
